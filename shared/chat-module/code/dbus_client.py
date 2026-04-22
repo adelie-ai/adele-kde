@@ -451,19 +451,51 @@ def create_conversation(title: str) -> str:
     return str(response[0])
 
 
-def send_prompt(conversation_id: str, prompt: str) -> str:
+def _build_override(
+    connection_id: str,
+    model_id: str,
+    effort: str | None,
+) -> dict[str, Any] | None:
+    """Build a daemon-compatible SendPromptOverride payload.
+
+    Returns None when either `connection_id` or `model_id` is empty (the daemon
+    requires both). `effort` is optional and must be one of {"low","medium","high"}.
+    """
+    conn = (connection_id or "").strip()
+    model = (model_id or "").strip()
+    if not conn or not model:
+        return None
+
+    override: dict[str, Any] = {
+        "connection_id": conn,
+        "model_id": model,
+    }
+    eff = (effort or "").strip().lower()
+    if eff in {"low", "medium", "high"}:
+        override["effort"] = eff
+    return override
+
+
+def send_prompt(
+    conversation_id: str,
+    prompt: str,
+    override: dict[str, Any] | None = None,
+) -> str:
     if TRANSPORT == "ws":
-        response = _ws_request(
-            {
-                "send_message": {
-                    "conversation_id": conversation_id,
-                    "content": prompt,
-                }
-            }
-        )
+        payload: dict[str, Any] = {
+            "conversation_id": conversation_id,
+            "content": prompt,
+        }
+        if override is not None:
+            payload["override"] = override
+        response = _ws_request({"send_message": payload})
         _ws_expect_variant(response, "ack")
         return ""
 
+    # D-Bus transport does not currently surface SendPromptOverride; the
+    # daemon's DBus adapter predates the multi-connection API. For parity we
+    # fall back to the unoverridden SendPrompt call. A future daemon release
+    # will add per-call overrides over D-Bus; see desktop-assistant#18.
     response = _run_gdbus("SendPrompt", conversation_id, prompt)
     return str(response[0])
 
@@ -473,6 +505,8 @@ def get_conversation(
     tail: int | None = None,
     after_count: int | None = None,
 ) -> dict[str, Any]:
+    warnings: list[dict[str, Any]] = []
+    last_model_selection: dict[str, Any] | None = None
     if TRANSPORT == "ws":
         response = _ws_request({"get_conversation": {"id": conversation_id}})
         response = _ws_expect_variant(response, "conversation")
@@ -485,6 +519,28 @@ def get_conversation(
             if not isinstance(item, dict):
                 continue
             messages.append((str(item.get("role", "")), str(item.get("content", ""))))
+        # Warnings (e.g. DanglingModelSelection) are one-shot advisories the
+        # daemon emits after GetConversation. Forward them verbatim so the UI
+        # can show a passive notification; desktop-assistant#17 guarantees the
+        # server clears state so the warning does not recur.
+        raw_warnings = response.get("warnings")
+        if isinstance(raw_warnings, list):
+            for warn in raw_warnings:
+                if isinstance(warn, dict):
+                    warnings.append(warn)
+        # Future daemon revisions (desktop-assistant#18) will surface the
+        # conversation's persisted selection so the UI can hydrate its picker
+        # on load without sending a probe prompt. Forward the field when the
+        # daemon includes it; callers should treat absence as "no selection
+        # yet — inherit purpose default".
+        raw_selection = response.get("last_model_selection")
+        if isinstance(raw_selection, dict) and raw_selection.get("connection_id") and raw_selection.get("model_id"):
+            last_model_selection = {
+                "connection_id": str(raw_selection.get("connection_id", "")),
+                "model_id": str(raw_selection.get("model_id", "")),
+            }
+            if raw_selection.get("effort"):
+                last_model_selection["effort"] = str(raw_selection.get("effort", "")).lower()
     else:
         response = _run_gdbus("GetConversation", conversation_id)
         conv_id, title, messages = response
@@ -506,7 +562,7 @@ def get_conversation(
     items = []
     for role, content in visible_messages:
         items.append({"role": role, "content": content})
-    return {
+    result: dict[str, Any] = {
         "id": conv_id,
         "title": title,
         "messages": items,
@@ -514,6 +570,127 @@ def get_conversation(
         "truncated": truncated,
         "after_count": normalized_after if use_after else None,
     }
+    if warnings:
+        result["warnings"] = warnings
+    if last_model_selection is not None:
+        result["last_model_selection"] = last_model_selection
+    return result
+
+
+def list_available_models(
+    connection_id: str | None = None,
+    refresh: bool = False,
+) -> list[dict[str, Any]]:
+    """Fetch `Connection · Model` listings across healthy connections.
+
+    Returns an empty list when the daemon is unreachable over WS; this lets
+    the chat widget degrade to the "no selector" state without crashing.
+    """
+    if TRANSPORT != "ws":
+        # Multi-connection model listing is WS-only today. Return an empty
+        # list so the widget selector simply shows no entries rather than
+        # erroring out on D-Bus transports.
+        return []
+
+    payload: dict[str, Any] = {}
+    if connection_id:
+        payload["connection_id"] = connection_id
+    if refresh:
+        payload["refresh"] = True
+    response = _ws_request({"list_available_models": payload})
+    listings = _ws_expect_variant(response, "models")
+    if not isinstance(listings, list):
+        raise WsError(f"unexpected list_available_models payload: {listings}")
+
+    results: list[dict[str, Any]] = []
+    for item in listings:
+        if not isinstance(item, dict):
+            continue
+        model = item.get("model", {}) or {}
+        if not isinstance(model, dict):
+            continue
+        results.append(
+            {
+                "connection_id": str(item.get("connection_id", "")),
+                "connection_label": str(item.get("connection_label", "")),
+                "model_id": str(model.get("id", "")),
+                "model_display_name": str(model.get("display_name", model.get("id", ""))),
+            }
+        )
+    return results
+
+
+def list_connections() -> list[dict[str, Any]]:
+    if TRANSPORT != "ws":
+        return []
+    response = _ws_request({"list_connections": {}})
+    views = _ws_expect_variant(response, "connections")
+    if not isinstance(views, list):
+        raise WsError(f"unexpected list_connections payload: {views}")
+
+    rows: list[dict[str, Any]] = []
+    for item in views:
+        if not isinstance(item, dict):
+            continue
+        availability = item.get("availability") or {}
+        rows.append(
+            {
+                "id": str(item.get("id", "")),
+                "connector_type": str(item.get("connector_type", "")),
+                "display_label": str(item.get("display_label", item.get("id", ""))),
+                "status": str(availability.get("status", "ok")) if isinstance(availability, dict) else "ok",
+                "reason": str(availability.get("reason", "")) if isinstance(availability, dict) else "",
+                "has_credentials": bool(item.get("has_credentials", False)),
+            }
+        )
+    return rows
+
+
+def create_connection(connection_id: str, config: dict[str, Any]) -> None:
+    if TRANSPORT != "ws":
+        raise WsError("create_connection requires WebSocket transport")
+    response = _ws_request(
+        {"create_connection": {"id": connection_id, "config": config}}
+    )
+    _ws_expect_variant(response, "ack")
+
+
+def update_connection(connection_id: str, config: dict[str, Any]) -> None:
+    if TRANSPORT != "ws":
+        raise WsError("update_connection requires WebSocket transport")
+    response = _ws_request(
+        {"update_connection": {"id": connection_id, "config": config}}
+    )
+    _ws_expect_variant(response, "ack")
+
+
+def delete_connection(connection_id: str, force: bool = False) -> None:
+    if TRANSPORT != "ws":
+        raise WsError("delete_connection requires WebSocket transport")
+    payload: dict[str, Any] = {"id": connection_id}
+    if force:
+        payload["force"] = True
+    response = _ws_request({"delete_connection": payload})
+    _ws_expect_variant(response, "ack")
+
+
+def get_purposes() -> dict[str, Any]:
+    if TRANSPORT != "ws":
+        return {}
+    response = _ws_request({"get_purposes": {}})
+    view = _ws_expect_variant(response, "purposes")
+    if not isinstance(view, dict):
+        raise WsError(f"unexpected get_purposes payload: {view}")
+    return view
+
+
+def set_purpose(purpose: str, config: dict[str, Any]) -> None:
+    if TRANSPORT != "ws":
+        raise WsError("set_purpose requires WebSocket transport")
+    response = _ws_request(
+        {"set_purpose": {"purpose": purpose, "config": config}}
+    )
+    _ws_expect_variant(response, "ack")
 
 
 def get_messages(
@@ -564,11 +741,30 @@ def get_messages(
             visible = visible[-normalized_tail:]
             truncated = True
 
-        return {
+        out: dict[str, Any] = {
             "messages": visible,
             "message_count": int(total_count),
             "truncated": bool(truncated),
         }
+        # Conversation-level advisories / stored selection (desktop-assistant#17,
+        # #18). Harmless when the daemon omits them.
+        raw_warnings = response.get("warnings")
+        if isinstance(raw_warnings, list) and raw_warnings:
+            out["warnings"] = [w for w in raw_warnings if isinstance(w, dict)]
+        raw_selection = response.get("last_model_selection")
+        if (
+            isinstance(raw_selection, dict)
+            and raw_selection.get("connection_id")
+            and raw_selection.get("model_id")
+        ):
+            entry: dict[str, Any] = {
+                "connection_id": str(raw_selection.get("connection_id", "")),
+                "model_id": str(raw_selection.get("model_id", "")),
+            }
+            if raw_selection.get("effort"):
+                entry["effort"] = str(raw_selection.get("effort", "")).lower()
+            out["last_model_selection"] = entry
+        return out
 
     tail_arg = str(max(0, int(tail or 0)))
     # gdbus parses arguments starting with '-' as option flags, so negative
@@ -745,6 +941,22 @@ def main() -> int:
     send_cmd = subparsers.add_parser("send")
     send_cmd.add_argument("conversation_id")
     send_cmd.add_argument("prompt")
+    send_cmd.add_argument(
+        "--override-connection",
+        default="",
+        help="Connection id to route this single message through (WS transport only).",
+    )
+    send_cmd.add_argument(
+        "--override-model",
+        default="",
+        help="Model id to use for this single message (WS transport only).",
+    )
+    send_cmd.add_argument(
+        "--override-effort",
+        default="",
+        choices=["", "low", "medium", "high"],
+        help="Optional effort hint for this single message.",
+    )
 
     get_cmd = subparsers.add_parser("get")
     get_cmd.add_argument("conversation_id")
@@ -770,6 +982,45 @@ def main() -> int:
 
     subparsers.add_parser("connections")
     subparsers.add_parser("status")
+
+    # Multi-connection daemon API (WebSocket transport only, desktop-assistant#17).
+    subparsers.add_parser("list-llm-connections")
+
+    models_cmd = subparsers.add_parser("list-models")
+    models_cmd.add_argument("--connection-id", default="")
+    models_cmd.add_argument("--refresh", action="store_true")
+
+    create_conn_cmd = subparsers.add_parser("create-llm-connection")
+    create_conn_cmd.add_argument("--id", required=True)
+    create_conn_cmd.add_argument(
+        "--config",
+        required=True,
+        help="JSON-encoded ConnectionConfigView, e.g. '{\"type\":\"openai\"}'",
+    )
+
+    update_conn_cmd = subparsers.add_parser("update-llm-connection")
+    update_conn_cmd.add_argument("--id", required=True)
+    update_conn_cmd.add_argument("--config", required=True)
+
+    delete_conn_cmd = subparsers.add_parser("delete-llm-connection")
+    delete_conn_cmd.add_argument("--id", required=True)
+    delete_conn_cmd.add_argument("--force", action="store_true")
+
+    subparsers.add_parser("get-purposes")
+
+    purpose_cmd = subparsers.add_parser("set-purpose")
+    purpose_cmd.add_argument(
+        "--purpose",
+        required=True,
+        choices=["interactive", "dreaming", "embedding", "titling"],
+    )
+    purpose_cmd.add_argument("--connection", required=True)
+    purpose_cmd.add_argument("--model", required=True)
+    purpose_cmd.add_argument(
+        "--effort",
+        default="",
+        choices=["", "low", "medium", "high"],
+    )
 
     args = parser.parse_args()
     payload = _load_widget_settings_payload()
@@ -824,7 +1075,13 @@ def main() -> int:
             print(json.dumps({"conversations": list_conversations(args.max_age_days)}))
             return 0
         if args.command == "send":
-            print(json.dumps({"request_id": send_prompt(args.conversation_id, args.prompt)}))
+            override = _build_override(
+                getattr(args, "override_connection", ""),
+                getattr(args, "override_model", ""),
+                getattr(args, "override_effort", ""),
+            )
+            request_id = send_prompt(args.conversation_id, args.prompt, override=override)
+            print(json.dumps({"request_id": request_id}))
             return 0
         if args.command == "get":
             include = [r.strip() for r in args.roles.split(",") if r.strip()]
@@ -871,6 +1128,51 @@ def main() -> int:
             return 0
         if args.command == "status":
             return cmd_status()
+        if args.command == "list-llm-connections":
+            print(json.dumps({"connections": list_connections()}))
+            return 0
+        if args.command == "list-models":
+            conn_id = args.connection_id.strip() or None
+            print(
+                json.dumps(
+                    {"models": list_available_models(conn_id, refresh=args.refresh)}
+                )
+            )
+            return 0
+        if args.command == "create-llm-connection":
+            try:
+                config = json.loads(args.config)
+            except json.JSONDecodeError as exc:
+                raise WsError(f"invalid --config JSON: {exc}") from exc
+            create_connection(args.id, config)
+            print(json.dumps({"created": True, "id": args.id}))
+            return 0
+        if args.command == "update-llm-connection":
+            try:
+                config = json.loads(args.config)
+            except json.JSONDecodeError as exc:
+                raise WsError(f"invalid --config JSON: {exc}") from exc
+            update_connection(args.id, config)
+            print(json.dumps({"updated": True, "id": args.id}))
+            return 0
+        if args.command == "delete-llm-connection":
+            delete_connection(args.id, force=args.force)
+            print(json.dumps({"deleted": True, "id": args.id, "force": args.force}))
+            return 0
+        if args.command == "get-purposes":
+            print(json.dumps({"purposes": get_purposes()}))
+            return 0
+        if args.command == "set-purpose":
+            config: dict[str, Any] = {
+                "connection": args.connection,
+                "model": args.model,
+            }
+            effort = args.effort.strip().lower()
+            if effort in {"low", "medium", "high"}:
+                config["effort"] = effort
+            set_purpose(args.purpose, config)
+            print(json.dumps({"ok": True, "purpose": args.purpose}))
+            return 0
         raise DbusError("unknown command")
     except (DbusError, WsError) as exc:
         print(json.dumps({"error": str(exc)}))

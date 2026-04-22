@@ -28,11 +28,15 @@ KCM.SimpleKCM {
             id: tabs
             Layout.fillWidth: true
 
-            QQC2.TabButton { text: "Chat LLM" }
+            // The legacy single-LLM "Chat LLM" tab is gone (daemon's
+            // GetLlmSettings/SetLlmSettings were removed in
+            // desktop-assistant#17). Connections + Purposes replace it.
+            QQC2.TabButton { text: "Connections" }
+            QQC2.TabButton { text: "Purposes" }
             QQC2.TabButton { text: "Search" }
             QQC2.TabButton { text: "Backend Tasks" }
             QQC2.TabButton { text: "Data Sync" }
-            QQC2.TabButton { text: "Connections" }
+            QQC2.TabButton { text: "Daemon Instances" }
             QQC2.TabButton { text: "Authentication" }
         }
 
@@ -43,80 +47,15 @@ KCM.SimpleKCM {
 
             QQC2.ScrollView {
                 clip: true
+                ConnectionsPage {
+                    width: parent ? parent.width : implicitWidth
+                }
+            }
 
-                ColumnLayout {
-                    width: parent.width
-                    spacing: 12
-
-                    QQC2.Label {
-                        Layout.fillWidth: true
-                        wrapMode: Text.Wrap
-                        text: kcm.hasApiKey
-                            ? "API key is configured in the secret backend."
-                            : "No API key stored yet."
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        QQC2.Label { text: "Connector" }
-                        QQC2.ComboBox {
-                            id: connectorBox
-                            Layout.fillWidth: true
-                            model: ["ollama", "openai", "anthropic", "aws-bedrock"]
-                            currentIndex: {
-                                if (kcm.connector === "ollama") return 0
-                                if (kcm.connector === "openai") return 1
-                                if (kcm.connector === "anthropic") return 2
-                                if (kcm.connector === "bedrock" || kcm.connector === "aws-bedrock") return 3
-                                return 1
-                            }
-                            onActivated: kcm.connector = currentText
-                        }
-                    }
-
-                    QQC2.Button {
-                        text: "Set Defaults"
-                        onClicked: kcm.applyChatDefaults()
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        QQC2.Label { text: "Model" }
-                        QQC2.TextField {
-                            id: llmModelField
-                            Layout.fillWidth: true
-                            placeholderText: "gpt-5.4 / llama3.1 / ..."
-                            text: kcm.model
-                            onTextEdited: kcm.model = text
-                        }
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        QQC2.Label { text: "Base URL" }
-                        QQC2.TextField {
-                            id: llmBaseUrlField
-                            Layout.fillWidth: true
-                            placeholderText: "https://api.openai.com/v1"
-                            text: kcm.baseUrl
-                            onTextEdited: kcm.baseUrl = text
-                        }
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        QQC2.Label { text: "API Key" }
-                        QQC2.TextField {
-                            id: apiKeyField
-                            Layout.fillWidth: true
-                            echoMode: TextInput.Password
-                            placeholderText: "Write-only; leave blank to keep existing"
-                            text: kcm.apiKeyInput
-                            onTextEdited: kcm.apiKeyInput = text
-                        }
-                    }
-
-                    Item { Layout.fillHeight: true }
+            QQC2.ScrollView {
+                clip: true
+                PurposesPage {
+                    width: parent ? parent.width : implicitWidth
                 }
             }
 
@@ -721,23 +660,9 @@ KCM.SimpleKCM {
         Connections {
             target: kcm
 
-            function onModelChanged() {
-                if (llmModelField.text !== kcm.model) {
-                    llmModelField.text = kcm.model
-                }
-            }
-
-            function onBaseUrlChanged() {
-                if (llmBaseUrlField.text !== kcm.baseUrl) {
-                    llmBaseUrlField.text = kcm.baseUrl
-                }
-            }
-
-            function onApiKeyInputChanged() {
-                if (apiKeyField.text !== kcm.apiKeyInput) {
-                    apiKeyField.text = kcm.apiKeyInput
-                }
-            }
+            // Chat-LLM text fields were removed alongside the legacy tab
+            // (desktop-assistant#17); their model/baseUrl/apiKeyInput
+            // sync handlers moved into the Connections + Purposes pages.
 
             function onEmbModelChanged() {
                 if (embModelField.text !== kcm.embModel) {
