@@ -127,6 +127,27 @@ Item {
     }
     property int lateResponsePollRemaining: 0
 
+    // --- Multi-connection model selector (issue adele-kde#1) ------------------
+    // `modelChoices` is a flattened list of `{connection_id, connection_label,
+    // model_id, model_display_name, label}` entries populated from the daemon's
+    // `list_available_models` command. `selectedModelIndex < 0` means "inherit
+    // from the interactive purpose"; the widget sends no override in that case.
+    // `perConversationSelections` is a local cache keyed by conversation id so
+    // switching conversations restores each conversation's most recently chosen
+    // model without a round-trip to the daemon; desktop-assistant#18 will add
+    // a daemon-side `last_model_selection` field on `ConversationView` that we
+    // hydrate from when present.
+    property var modelChoices: []
+    property int selectedModelIndex: -1
+    property var perConversationSelections: ({})
+    property bool modelListLoading: false
+    property var currentConversationWarnings: []
+    // Per-model effort hints (keyed by "connection_id|model_id"). Today the
+    // daemon accepts but does not fully act on effort overrides; we still
+    // send the values so behaviour lights up as desktop-assistant#18 lands.
+    property var modelEffortOverrides: ({})
+    property string autoLabel: "Auto (coming soon)"
+
     function toImageSource(pathValue) {
         const value = String(pathValue || "").trim()
         if (value.length === 0) {
@@ -749,6 +770,173 @@ Item {
         return -1
     }
 
+    // Build a flattened `Connection · Model` label; keep it short so the
+    // picker stays legible in the panel plasmoid where horizontal space is
+    // scarce.
+    function buildModelLabel(entry) {
+        const conn = String(entry.connection_label || entry.connection_id || "")
+        const model = String(entry.model_display_name || entry.model_id || "")
+        if (conn.length === 0) return model
+        if (model.length === 0) return conn
+        return conn + " · " + model
+    }
+
+    function modelKey(entry) {
+        return String(entry.connection_id || "") + "|" + String(entry.model_id || "")
+    }
+
+    function reloadModelList(onLoaded) {
+        modelListLoading = true
+        const command = helperCommand("list-models")
+        runCommand(
+            command,
+            function(stdout) {
+                modelListLoading = false
+                let payload
+                try {
+                    payload = JSON.parse(stdout)
+                } catch (e) {
+                    appendStatus("Could not parse model list: " + e)
+                    return
+                }
+                if (payload.error) {
+                    // Don't nag the user if the daemon is old/offline — the
+                    // selector will just stay empty. Log to debug instead.
+                    return
+                }
+                const entries = payload.models || []
+                const choices = []
+                for (let i = 0; i < entries.length; i++) {
+                    const entry = entries[i]
+                    if (!entry || !entry.connection_id || !entry.model_id) {
+                        continue
+                    }
+                    const label = buildModelLabel(entry)
+                    choices.push({
+                        connection_id: String(entry.connection_id),
+                        connection_label: String(entry.connection_label || entry.connection_id),
+                        model_id: String(entry.model_id),
+                        model_display_name: String(entry.model_display_name || entry.model_id),
+                        label: label,
+                    })
+                }
+                modelChoices = choices
+                applyRememberedModelSelection()
+                if (onLoaded) {
+                    onLoaded(choices)
+                }
+            },
+            function(stderr) {
+                modelListLoading = false
+                // Quiet failure — keeps panel chatty noise down when the
+                // daemon does not support multi-connection yet.
+            }
+        )
+    }
+
+    function modelIndexByKey(key) {
+        for (let i = 0; i < modelChoices.length; i++) {
+            if (modelKey(modelChoices[i]) === key) {
+                return i
+            }
+        }
+        return -1
+    }
+
+    function applyRememberedModelSelection() {
+        if (modelChoices.length === 0) {
+            selectedModelIndex = -1
+            return
+        }
+        const remembered = perConversationSelections[conversationId || ""]
+        if (!remembered) {
+            selectedModelIndex = -1
+            return
+        }
+        const key = String(remembered.connection_id || "") + "|" + String(remembered.model_id || "")
+        selectedModelIndex = modelIndexByKey(key)
+    }
+
+    function currentModelSelection() {
+        if (selectedModelIndex < 0 || selectedModelIndex >= modelChoices.length) {
+            return null
+        }
+        const entry = modelChoices[selectedModelIndex]
+        const out = {
+            connection_id: entry.connection_id,
+            model_id: entry.model_id,
+        }
+        const effort = modelEffortOverrides[modelKey(entry)]
+        if (effort === "low" || effort === "medium" || effort === "high") {
+            out.effort = effort
+        }
+        return out
+    }
+
+    function onModelSelectorActivated(index) {
+        // Index 0 is the disabled "Auto (coming soon)" sentinel.
+        if (index <= 0) {
+            selectedModelIndex = -1
+            if (conversationId.length > 0) {
+                const clone = Object.assign({}, perConversationSelections)
+                delete clone[conversationId]
+                perConversationSelections = clone
+            }
+            return
+        }
+        const choiceIndex = index - 1
+        if (choiceIndex >= 0 && choiceIndex < modelChoices.length) {
+            selectedModelIndex = choiceIndex
+            if (conversationId.length > 0) {
+                const entry = modelChoices[choiceIndex]
+                const updated = Object.assign({}, perConversationSelections)
+                updated[conversationId] = {
+                    connection_id: entry.connection_id,
+                    model_id: entry.model_id,
+                }
+                perConversationSelections = updated
+            }
+        }
+    }
+
+    function rememberModelSelectionFor(convId, selection) {
+        if (!convId || convId.length === 0 || !selection) {
+            return
+        }
+        const updated = Object.assign({}, perConversationSelections)
+        updated[convId] = {
+            connection_id: String(selection.connection_id || ""),
+            model_id: String(selection.model_id || ""),
+        }
+        perConversationSelections = updated
+    }
+
+    function maybeShowConversationWarnings(warnings) {
+        if (!warnings || warnings.length === 0) {
+            return
+        }
+        currentConversationWarnings = warnings
+        for (let i = 0; i < warnings.length; i++) {
+            const warn = warnings[i]
+            if (!warn || warn.type !== "dangling_model_selection") {
+                continue
+            }
+            const prev = warn.previous_selection || {}
+            const fallback = warn.fallback_to || {}
+            const prevText = (prev.connection_id || "?") + " · " + (prev.model_id || "?")
+            const fallbackText = (fallback.connection_id || "?") + " · " + (fallback.model_id || "?")
+            const message = "Previous model selection '" + prevText + "' is no longer available. Falling back to '" + fallbackText + "'."
+            appendStatus(message)
+            if (typeof Kirigami.showPassiveNotification === "function") {
+                try {
+                    Kirigami.showPassiveNotification(message, "long")
+                } catch (e) {
+                    // passive notifications are best-effort; avoid crashing the widget
+                }
+            }
+        }
+    }
+
     function reloadConversationList(onLoaded) {
         const command = helperCommand("list --max-age-days " + maxSessionAgeDays())
         runCommand(
@@ -853,6 +1041,8 @@ Item {
         expandedToolEntries = ({})
         transcriptEntries = []
         appendStatus("Switched to conversation " + conversationId)
+        currentConversationWarnings = []
+        applyRememberedModelSelection()
         refreshConversation()
     }
 
@@ -919,6 +1109,18 @@ Item {
 
                 if (requestId !== conversationId) {
                     return
+                }
+
+                // Hydrate the model picker from the daemon's persisted
+                // `last_model_selection` (when present) and surface any
+                // one-shot `warnings` (e.g. DanglingModelSelection) the
+                // daemon attached to this GetConversation result.
+                if (payload.last_model_selection) {
+                    rememberModelSelectionFor(requestId, payload.last_model_selection)
+                    applyRememberedModelSelection()
+                }
+                if (payload.warnings && payload.warnings.length > 0) {
+                    maybeShowConversationWarnings(payload.warnings)
                 }
 
                 const allMessages = payload.messages || []
@@ -1019,7 +1221,22 @@ Item {
                 resetOptimisticUserTracking(false)
             }
 
-            const sendCommand = helperCommand("send " + shellEscape(conversationId) + " " + shellEscape(prompt))
+            // Attach a per-send override when the user has explicitly picked
+            // a model; when no selection is made the daemon falls back to the
+            // conversation's previous selection (if any) or the `interactive`
+            // purpose — that's exactly what we want for mutable-sticky per
+            // conversation.
+            let sendArgs = "send " + shellEscape(conversationId) + " " + shellEscape(prompt)
+            const activeSelection = currentModelSelection()
+            if (activeSelection) {
+                sendArgs += " --override-connection " + shellEscape(activeSelection.connection_id)
+                    + " --override-model " + shellEscape(activeSelection.model_id)
+                if (activeSelection.effort) {
+                    sendArgs += " --override-effort " + shellEscape(activeSelection.effort)
+                }
+                rememberModelSelectionFor(conversationId, activeSelection)
+            }
+            const sendCommand = helperCommand(sendArgs)
             runCommand(
                 sendCommand,
                 function(sendOut) {
@@ -1554,6 +1771,61 @@ Item {
             }
         }
 
+        // Per-conversation model selector. The combo's flattened list pairs
+        // every healthy connection with every model the connector exposes.
+        // Index 0 is the disabled "Auto (coming soon)" sentinel — kept pinned
+        // top so the UX doesn't shift when auto-routing lands.
+        RowLayout {
+            id: modelSelectorRow
+            Layout.fillWidth: true
+            visible: !root.ultraNarrow && (root.usingWsTransport || modelChoices.length > 0)
+            spacing: 6
+
+            QQC2.Label {
+                text: "Model:"
+                color: root.themeDisabledTextColor
+                Layout.alignment: Qt.AlignVCenter
+            }
+
+            QQC2.ComboBox {
+                id: modelSelectorCombo
+                Layout.fillWidth: true
+                enabled: !busy && modelChoices.length > 0
+                model: {
+                    const labels = [root.autoLabel]
+                    for (let i = 0; i < modelChoices.length; i++) {
+                        labels.push(modelChoices[i].label)
+                    }
+                    return labels
+                }
+                currentIndex: selectedModelIndex < 0 ? 0 : (selectedModelIndex + 1)
+                onActivated: function(index) {
+                    onModelSelectorActivated(index)
+                }
+
+                delegate: QQC2.ItemDelegate {
+                    width: parent ? parent.width : implicitWidth
+                    enabled: index !== 0
+                    text: modelText.text
+                    contentItem: QQC2.Label {
+                        id: modelText
+                        text: modelSelectorCombo.model[index]
+                        color: index === 0 ? root.themeDisabledTextColor : root.themeTextColor
+                        elide: Text.ElideRight
+                    }
+                    highlighted: modelSelectorCombo.highlightedIndex === index
+                }
+            }
+
+            QQC2.ToolButton {
+                text: "⟳"
+                ToolTip.text: "Refresh model list"
+                ToolTip.visible: hovered
+                enabled: !modelListLoading
+                onClicked: reloadModelList()
+            }
+        }
+
         RowLayout {
             Layout.fillWidth: true
 
@@ -1684,6 +1956,10 @@ Item {
             } else {
                 startupTimer.start()
             }
+            // Fetch the daemon's flattened connection·model list once the
+            // service is up; the selector stays empty on daemons that don't
+            // ship multi-connection yet (which is fine).
+            reloadModelList()
         })
     }
 }
