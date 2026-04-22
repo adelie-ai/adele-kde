@@ -1,4 +1,5 @@
 #include "desktopassistantkcm.h"
+#include "daemonwsclient.h"
 
 #include <algorithm>
 
@@ -8,12 +9,16 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJSEngine>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonValue>
+#include <QPointer>
 #include <QProcess>
 #include <QRegularExpression>
 #include <QStandardPaths>
+#include <QUrl>
 
 #include <KPluginFactory>
 
@@ -93,6 +98,7 @@ K_PLUGIN_CLASS_WITH_JSON(DesktopAssistantKcm, "kcm_desktopassistant.json")
 
 DesktopAssistantKcm::DesktopAssistantKcm(QObject *parent, const KPluginMetaData &metaData, const QVariantList &args)
     : KQuickConfigModule(parent, metaData)
+    , m_wsClient(new DaemonWsClient(this))
 {
     Q_UNUSED(args);
     setButtons(Apply);
@@ -961,6 +967,40 @@ void DesktopAssistantKcm::applyBackendDefaults()
     setBtLlmBaseUrl(defaults.llmBaseUrl);
 }
 
+QString DesktopAssistantKcm::wsUrl() const
+{
+    // Matches the daemon's default bind (crates/daemon/src/main.rs#1288).
+    // Remote daemons running in the "Daemon Instances" tab override this
+    // via the widget_settings.json ws_url; the KCM multi-connection pages
+    // always target the local daemon because that's where credentials and
+    // the keyring live.
+    return QStringLiteral("ws://127.0.0.1:11339/ws");
+}
+
+QString DesktopAssistantKcm::generateWsJwt(const QString &subject)
+{
+    QDBusInterface iface(SERVICE, PATH, IFACE, QDBusConnection::sessionBus());
+    if (!iface.isValid()) {
+        m_statusText = QStringLiteral("Daemon is not running on the session bus");
+        Q_EMIT statusTextChanged();
+        return {};
+    }
+
+    QDBusMessage reply = iface.call(QStringLiteral("GenerateWsJwt"), subject);
+    if (reply.type() == QDBusMessage::ErrorMessage) {
+        setStatusFromDbusError(reply);
+        return {};
+    }
+
+    const auto args = reply.arguments();
+    if (args.isEmpty()) {
+        m_statusText = QStringLiteral("GenerateWsJwt returned no token");
+        Q_EMIT statusTextChanged();
+        return {};
+    }
+    return args.first().toString();
+}
+
 void DesktopAssistantKcm::restartDaemon()
 {
     QProcess process;
@@ -1307,6 +1347,88 @@ void DesktopAssistantKcm::emitConnectionSelectionChanged()
     Q_EMIT selectedConnectionWsUrlChanged();
     Q_EMIT selectedConnectionWsSubjectChanged();
     Q_EMIT selectedConnectionRemovableChanged();
+}
+
+void DesktopAssistantKcm::wsCall(const QString &command, const QJSValue &payload, const QJSValue &callback)
+{
+    // Bootstrap a JWT every call. The daemon's WS router fails with
+    // `401 Unauthorized` on expired tokens and we have no "is this token
+    // still valid?" signal; the D-Bus call is cheap and we never want to
+    // spam the user with reauth dialogs mid-tab.
+    const QString token = generateWsJwt();
+    if (token.isEmpty()) {
+        if (callback.isCallable()) {
+            QJSEngine *engine = qjsEngine(this);
+            QJSValueList argv;
+            argv << QJSValue(QJSValue::NullValue);
+            argv << (engine ? engine->toScriptValue(QStringLiteral("Unable to bootstrap WebSocket token via D-Bus"))
+                            : QJSValue(QStringLiteral("Unable to bootstrap WebSocket token via D-Bus")));
+            QJSValue cb = callback;
+            cb.call(argv);
+        }
+        return;
+    }
+
+    QJsonObject payloadObj;
+    if (payload.isObject()) {
+        const QJsonValue asJson = QJsonValue::fromVariant(payload.toVariant());
+        if (asJson.isObject()) {
+            payloadObj = asJson.toObject();
+        }
+    }
+
+    // Normalise the command's variant tag; QML convenience callers may
+    // pass `"ListConnections"` or `"list_connections"` interchangeably.
+    QString variant = command.trimmed();
+    QString snake;
+    for (QChar c : variant) {
+        if (c.isUpper()) {
+            if (!snake.isEmpty()) snake.append(QChar('_'));
+            snake.append(c.toLower());
+        } else {
+            snake.append(c);
+        }
+    }
+    if (snake.isEmpty()) {
+        if (callback.isCallable()) {
+            QJSValueList argv;
+            argv << QJSValue(QJSValue::NullValue);
+            argv << QJSValue(QStringLiteral("wsCall: missing command variant"));
+            QJSValue cb = callback;
+            cb.call(argv);
+        }
+        return;
+    }
+
+    // Capture the callback by value so it survives the lambda's outer scope
+    // and keep a QPointer to the KCM object so a teardown-mid-request (e.g.
+    // the user closes Settings) cannot re-enter QML engines that are gone.
+    QJSValue cb = callback;
+    QPointer<DesktopAssistantKcm> guard(this);
+
+    m_wsClient->send(
+        QUrl(wsUrl()),
+        token,
+        snake,
+        payloadObj,
+        [cb, guard](const QVariant &result, const QString &error) mutable {
+            if (!guard) return;
+            if (!cb.isCallable()) return;
+
+            QJSEngine *engine = qjsEngine(guard.data());
+            QJSValue resultValue = engine
+                ? engine->toScriptValue(result)
+                : QJSValue(QJSValue::NullValue);
+            QJSValue errorValue = error.isEmpty()
+                ? QJSValue(QJSValue::NullValue)
+                : (engine ? engine->toScriptValue(error) : QJSValue(error));
+
+            QJSValueList argv;
+            argv << resultValue;
+            argv << errorValue;
+            cb.call(argv);
+        }
+    );
 }
 
 #include "desktopassistantkcm.moc"

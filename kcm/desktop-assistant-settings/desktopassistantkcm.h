@@ -1,10 +1,13 @@
 #pragma once
 
 #include <KQuickConfigModule>
+#include <QJSValue>
+#include <QJsonObject>
 #include <QStringList>
 #include <QVector>
 
 class QDBusMessage;
+class DaemonWsClient;
 
 class DesktopAssistantKcm : public KQuickConfigModule {
     Q_OBJECT
@@ -167,6 +170,29 @@ public:
     Q_INVOKABLE void addRemoteConnection(const QString &name);
     Q_INVOKABLE void removeSelectedConnection();
 
+    /// Return the effective WebSocket URL for the multi-connection API
+    /// (issue adele-kde#1). Defaults to the daemon's local bind; callers
+    /// may use this as the QML side of QtWebSockets connections.
+    Q_INVOKABLE QString wsUrl() const;
+
+    /// Synchronously bootstrap a WS JWT via the existing
+    /// `org.desktopAssistant.Settings.GenerateWsJwt` D-Bus method.
+    /// Returns an empty string on failure; the caller should surface the
+    /// error via the Settings page's status banner rather than retrying.
+    Q_INVOKABLE QString generateWsJwt(const QString &subject = QStringLiteral("kcm-desktopassistant"));
+
+    /// Dispatch a daemon Command (snake-cased variant) over the WebSocket
+    /// API and invoke `callback(result, error)` exactly once. `payload` is
+    /// the variant's inner object; pass an empty object for unit variants
+    /// such as `list_connections` or `get_purposes`.
+    ///
+    /// This is the QML-facing entry point for the multi-connection pages
+    /// (Connections, Purposes). It auto-bootstraps a JWT on first call and
+    /// caches it for the session; the token is refreshed on each invocation
+    /// because the daemon's WS handler doesn't expose a "this token is
+    /// still good" signal and the cost of re-bootstrapping is negligible.
+    Q_INVOKABLE void wsCall(const QString &command, const QJSValue &payload, const QJSValue &callback);
+
 Q_SIGNALS:
     void connectorChanged();
     void modelChanged();
@@ -261,4 +287,6 @@ private:
     QString m_oidcTokenEndpoint;
     QString m_oidcClientId;
     QString m_oidcScopes = QStringLiteral("openid profile email");
+
+    DaemonWsClient *m_wsClient = nullptr;
 };
