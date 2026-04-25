@@ -46,16 +46,22 @@ KCM.SimpleKCM {
             currentIndex: tabs.currentIndex
 
             QQC2.ScrollView {
+                id: connectionsScroll
                 clip: true
+                contentWidth: availableWidth
                 ConnectionsPage {
-                    width: parent ? parent.width : implicitWidth
+                    width: connectionsScroll.availableWidth
+                    height: connectionsScroll.availableHeight
                 }
             }
 
             QQC2.ScrollView {
+                id: purposesScroll
                 clip: true
+                contentWidth: availableWidth
                 PurposesPage {
-                    width: parent ? parent.width : implicitWidth
+                    width: purposesScroll.availableWidth
+                    height: purposesScroll.availableHeight
                 }
             }
 
