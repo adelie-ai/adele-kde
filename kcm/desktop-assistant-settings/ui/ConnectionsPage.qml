@@ -94,7 +94,7 @@ ColumnLayout {
             id: listView
             model: connections
             spacing: 2
-            delegate: Kirigami.AbstractListItem {
+            delegate: QQC2.ItemDelegate {
                 width: ListView.view ? ListView.view.width : implicitWidth
                 onClicked: editor.openFor(modelData)
 
