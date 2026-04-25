@@ -191,6 +191,14 @@ ColumnLayout {
                                     for (let i = 0; i < connections.length; i++) {
                                         base.push({ value: connections[i].id, label: connections[i].label })
                                     }
+                                    // Always include the saved value so the
+                                    // dropdown reflects the daemon state even
+                                    // before list_connections completes.
+                                    const cur = modelData.connection
+                                    if (cur && cur !== "primary"
+                                        && !base.some(function(m) { return m.value === cur })) {
+                                        base.push({ value: cur, label: cur })
+                                    }
                                     return base
                                 }
                                 currentIndex: {
@@ -229,14 +237,36 @@ ColumnLayout {
                                 textRole: "label"
                                 model: {
                                     const base = []
-                                    if (modelData.connection === "primary") {
-                                        base.push({ value: "primary", label: "Same as Interactive Chat" })
-                                        return base
+                                    const isInheritingConn = modelData.connection === "primary"
+                                    base.push({
+                                        value: "primary",
+                                        label: isInheritingConn ? "Same as Interactive Chat" : "Same model as Interactive Chat"
+                                    })
+                                    // Enumerate models from this purpose's
+                                    // connection — or, when inheriting, from
+                                    // the interactive purpose's connection so
+                                    // the user can override only the model.
+                                    let sourceConn = modelData.connection
+                                    if (isInheritingConn) {
+                                        const interactivePurpose = purposes.find(function(p) { return p.key === "interactive" })
+                                        sourceConn = interactivePurpose ? interactivePurpose.connection : ""
                                     }
-                                    base.push({ value: "primary", label: "Same model as Interactive Chat" })
-                                    const models = modelsByConnection[modelData.connection] || []
-                                    for (let i = 0; i < models.length; i++) {
-                                        base.push({ value: models[i].id, label: models[i].display_name })
+                                    if (sourceConn && sourceConn !== "primary") {
+                                        const models = modelsByConnection[sourceConn] || []
+                                        for (let i = 0; i < models.length; i++) {
+                                            base.push({ value: models[i].id, label: models[i].display_name })
+                                        }
+                                    }
+                                    // Always include the saved value so the
+                                    // dropdown reflects the daemon state even
+                                    // before list_available_models completes
+                                    // (or when the connection can't enumerate
+                                    // models at all, e.g. Bedrock without
+                                    // network).
+                                    const cur = modelData.model
+                                    if (cur && cur !== "primary"
+                                        && !base.some(function(m) { return m.value === cur })) {
+                                        base.push({ value: cur, label: cur })
                                     }
                                     return base
                                 }
