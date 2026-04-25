@@ -254,6 +254,19 @@ KCM.SimpleKCM {
                         }
                     }
 
+                    RowLayout {
+                        Layout.fillWidth: true
+                        QQC2.Label { text: "Archive conversations after (days; 0 = never)" }
+                        QQC2.SpinBox {
+                            id: btArchiveAfterDaysBox
+                            from: 0
+                            to: 3650
+                            stepSize: 1
+                            value: kcm.btArchiveAfterDays
+                            onValueModified: kcm.btArchiveAfterDays = value
+                        }
+                    }
+
                     Item { Layout.fillHeight: true }
                 }
             }
@@ -721,6 +734,12 @@ KCM.SimpleKCM {
             function onBtDreamingIntervalSecsChanged() {
                 if (btDreamingIntervalBox.value !== kcm.btDreamingIntervalSecs) {
                     btDreamingIntervalBox.value = kcm.btDreamingIntervalSecs
+                }
+            }
+
+            function onBtArchiveAfterDaysChanged() {
+                if (btArchiveAfterDaysBox.value !== kcm.btArchiveAfterDays) {
+                    btArchiveAfterDaysBox.value = kcm.btArchiveAfterDays
                 }
             }
 

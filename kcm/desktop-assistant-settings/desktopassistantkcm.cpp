@@ -499,6 +499,21 @@ void DesktopAssistantKcm::setBtDreamingIntervalSecs(int value)
     setNeedsSave(true);
 }
 
+int DesktopAssistantKcm::btArchiveAfterDays() const
+{
+    return m_btArchiveAfterDays;
+}
+
+void DesktopAssistantKcm::setBtArchiveAfterDays(int value)
+{
+    if (m_btArchiveAfterDays == value) {
+        return;
+    }
+    m_btArchiveAfterDays = value;
+    Q_EMIT btArchiveAfterDaysChanged();
+    setNeedsSave(true);
+}
+
 bool DesktopAssistantKcm::btHasSeparateLlm() const
 {
     return m_btHasSeparateLlm;
@@ -746,6 +761,7 @@ void DesktopAssistantKcm::load()
     m_btLlmBaseUrl = btArgs[3].toString();
     m_btDreamingEnabled = btArgs[4].toBool();
     m_btDreamingIntervalSecs = static_cast<int>(btArgs[5].toULongLong());
+    m_btArchiveAfterDays = btArgs.size() > 6 ? static_cast<int>(btArgs[6].toUInt()) : 0;
 
     QDBusMessage wsAuthReply = iface.call("GetWsAuthSettings");
     if (!setStatusFromDbusError(wsAuthReply)) {
@@ -787,6 +803,7 @@ void DesktopAssistantKcm::load()
     emitConnectionSelectionChanged();
     Q_EMIT btDreamingEnabledChanged();
     Q_EMIT btDreamingIntervalSecsChanged();
+    Q_EMIT btArchiveAfterDaysChanged();
     Q_EMIT btHasSeparateLlmChanged();
     Q_EMIT btLlmConnectorChanged();
     Q_EMIT btLlmModelChanged();
@@ -845,7 +862,8 @@ void DesktopAssistantKcm::save()
         m_btLlmModel,
         m_btLlmBaseUrl,
         m_btDreamingEnabled,
-        static_cast<qulonglong>(m_btDreamingIntervalSecs)
+        static_cast<qulonglong>(m_btDreamingIntervalSecs),
+        static_cast<uint>(m_btArchiveAfterDays)
     );
     if (setStatusFromDbusError(btSaveReply)) {
         return;

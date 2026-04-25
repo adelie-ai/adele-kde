@@ -39,6 +39,7 @@ class DesktopAssistantKcm : public KQuickConfigModule {
     Q_PROPERTY(bool selectedConnectionRemovable READ selectedConnectionRemovable NOTIFY selectedConnectionRemovableChanged)
     Q_PROPERTY(bool btDreamingEnabled READ btDreamingEnabled WRITE setBtDreamingEnabled NOTIFY btDreamingEnabledChanged)
     Q_PROPERTY(int btDreamingIntervalSecs READ btDreamingIntervalSecs WRITE setBtDreamingIntervalSecs NOTIFY btDreamingIntervalSecsChanged)
+    Q_PROPERTY(int btArchiveAfterDays READ btArchiveAfterDays WRITE setBtArchiveAfterDays NOTIFY btArchiveAfterDaysChanged)
     Q_PROPERTY(bool btHasSeparateLlm READ btHasSeparateLlm NOTIFY btHasSeparateLlmChanged)
     Q_PROPERTY(QString btLlmConnector READ btLlmConnector WRITE setBtLlmConnector NOTIFY btLlmConnectorChanged)
     Q_PROPERTY(QString btLlmModel READ btLlmModel WRITE setBtLlmModel NOTIFY btLlmModelChanged)
@@ -128,6 +129,9 @@ public:
 
     int btDreamingIntervalSecs() const;
     void setBtDreamingIntervalSecs(int value);
+
+    int btArchiveAfterDays() const;
+    void setBtArchiveAfterDays(int value);
 
     bool btHasSeparateLlm() const;
 
@@ -222,6 +226,7 @@ Q_SIGNALS:
     void selectedConnectionRemovableChanged();
     void btDreamingEnabledChanged();
     void btDreamingIntervalSecsChanged();
+    void btArchiveAfterDaysChanged();
     void btHasSeparateLlmChanged();
     void btLlmConnectorChanged();
     void btLlmModelChanged();
@@ -275,6 +280,7 @@ private:
     QString m_selectedConnectionName = QStringLiteral("local");
     bool m_btDreamingEnabled = false;
     int m_btDreamingIntervalSecs = 3600;
+    int m_btArchiveAfterDays = 0;
     bool m_btHasSeparateLlm = false;
     QString m_btLlmConnector;
     QString m_btLlmModel;
