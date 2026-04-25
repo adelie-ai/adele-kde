@@ -116,17 +116,20 @@ ColumnLayout {
 
                     ColumnLayout {
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                         spacing: 0
 
                         QQC2.Label {
                             text: modelData.display_label
                             font.bold: true
+                            Layout.fillWidth: true
+                            elide: Text.ElideRight
                         }
 
                         QQC2.Label {
                             text: modelData.connector_type + (modelData.has_credentials ? " · credentials present" : " · no credentials")
                             color: Kirigami.Theme.disabledTextColor
-                            wrapMode: Text.Wrap
+                            elide: Text.ElideRight
                             Layout.fillWidth: true
                         }
 
@@ -134,7 +137,7 @@ ColumnLayout {
                             visible: modelData.availability_status !== "ok"
                             text: "Unavailable: " + (modelData.availability_reason || "unknown")
                             color: Kirigami.Theme.negativeTextColor
-                            wrapMode: Text.Wrap
+                            elide: Text.ElideRight
                             Layout.fillWidth: true
                         }
                     }
