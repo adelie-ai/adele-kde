@@ -85,18 +85,16 @@ ColumnLayout {
         }
     }
 
-    QQC2.ScrollView {
+    ListView {
+        id: listView
         Layout.fillWidth: true
         Layout.fillHeight: true
         clip: true
-
-        ListView {
-            id: listView
-            model: connections
-            spacing: 2
-            delegate: QQC2.ItemDelegate {
-                width: ListView.view ? ListView.view.width : implicitWidth
-                onClicked: editor.openFor(modelData)
+        model: connections
+        spacing: 2
+        delegate: QQC2.ItemDelegate {
+            width: listView.width
+            onClicked: editor.openFor(modelData)
 
                 contentItem: RowLayout {
                     spacing: Kirigami.Units.largeSpacing
@@ -148,7 +146,6 @@ ColumnLayout {
                         onClicked: removeDialog.promptFor(modelData)
                     }
                 }
-            }
         }
     }
 

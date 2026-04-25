@@ -130,7 +130,11 @@ Kirigami.OverlaySheet {
 
     ColumnLayout {
         spacing: 8
-        Layout.preferredWidth: 480
+        // Kirigami.OverlaySheet sizes itself to the content item's implicit
+        // width/height, so set them explicitly — Layout.* properties don't
+        // apply to a top-level child of an OverlaySheet.
+        implicitWidth: 520
+        implicitHeight: 560
 
         QQC2.Label {
             Layout.fillWidth: true
