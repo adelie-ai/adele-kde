@@ -145,7 +145,7 @@ ColumnLayout {
     QQC2.Label {
         Layout.fillWidth: true
         wrapMode: Text.Wrap
-        text: "Route each assistant purpose through a specific connection and model. Non-interactive purposes (titling, dreaming, embedding) can inherit the interactive choice by picking 'primary'."
+        text: "Route each assistant purpose through a specific connection and model. Non-interactive purposes (titling, dreaming, embedding) can pick \"Same as Interactive Chat\" to follow whatever the interactive purpose is set to."
     }
 
     QQC2.ScrollView {
@@ -181,8 +181,12 @@ ColumnLayout {
                                     const base = []
                                     // Non-interactive purposes can inherit
                                     // the primary (interactive) selection.
+                                    // The wire value stays "primary" — the
+                                    // daemon resolves inheritance — but the
+                                    // label avoids implying "Primary" is a
+                                    // connector type.
                                     if (modelData.key !== "interactive") {
-                                        base.push({ value: "primary", label: "primary (inherit)" })
+                                        base.push({ value: "primary", label: "Same as Interactive Chat" })
                                     }
                                     for (let i = 0; i < connections.length; i++) {
                                         base.push({ value: connections[i].id, label: connections[i].label })
@@ -226,10 +230,10 @@ ColumnLayout {
                                 model: {
                                     const base = []
                                     if (modelData.connection === "primary") {
-                                        base.push({ value: "primary", label: "primary (inherit)" })
+                                        base.push({ value: "primary", label: "Same as Interactive Chat" })
                                         return base
                                     }
-                                    base.push({ value: "primary", label: "primary (inherit model)" })
+                                    base.push({ value: "primary", label: "Same model as Interactive Chat" })
                                     const models = modelsByConnection[modelData.connection] || []
                                     for (let i = 0; i < models.length; i++) {
                                         base.push({ value: models[i].id, label: models[i].display_name })
