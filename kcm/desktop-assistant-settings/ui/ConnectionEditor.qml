@@ -229,7 +229,10 @@ Kirigami.OverlaySheet {
             }
             QQC2.TextField {
                 Layout.fillWidth: true
-                placeholderText: "default"
+                // Daemon (crates/llm-bedrock/src/lib.rs#l156) auto-uses the
+                // "adele" profile when no override is set; show that as the
+                // placeholder instead of the misleading AWS-SDK "default".
+                placeholderText: "adele"
                 text: fieldAwsProfile
                 onTextEdited: fieldAwsProfile = text
             }
