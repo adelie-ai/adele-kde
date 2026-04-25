@@ -98,9 +98,11 @@ ColumnLayout {
                 if (cid.length === 0) continue
                 if (!byConn[cid]) byConn[cid] = []
                 const modelObj = entry.model || {}
+                const caps = modelObj.capabilities || {}
                 byConn[cid].push({
                     id: String(modelObj.id || ""),
                     display_name: String(modelObj.display_name || modelObj.id || ""),
+                    embedding: Boolean(caps.embedding),
                 })
             }
             modelsByConnection = byConn
@@ -253,8 +255,19 @@ ColumnLayout {
                                     }
                                     if (sourceConn && sourceConn !== "primary") {
                                         const models = modelsByConnection[sourceConn] || []
+                                        // The embedding purpose only accepts
+                                        // embedding-capable models; every
+                                        // other purpose only accepts chat
+                                        // (non-embedding) models. The
+                                        // currently-saved id is still
+                                        // appended below as a safety net so
+                                        // existing config never disappears
+                                        // from the dropdown.
+                                        const wantsEmbedding = modelData.key === "embedding"
                                         for (let i = 0; i < models.length; i++) {
-                                            base.push({ value: models[i].id, label: models[i].display_name })
+                                            const m = models[i]
+                                            if (Boolean(m.embedding) !== wantsEmbedding) continue
+                                            base.push({ value: m.id, label: m.display_name })
                                         }
                                     }
                                     // Always include the saved value so the
