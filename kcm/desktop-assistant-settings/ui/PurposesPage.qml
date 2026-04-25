@@ -129,6 +129,12 @@ ColumnLayout {
 
     Component.onCompleted: reload()
 
+    // Refresh whenever the user flips back to this tab — connections added
+    // or removed under the Connections tab won't have triggered our
+    // list_connections call, so the dropdown would otherwise stay stale
+    // until Apply.
+    onVisibleChanged: if (visible) reload()
+
     Kirigami.InlineMessage {
         Layout.fillWidth: true
         visible: statusText.length > 0
