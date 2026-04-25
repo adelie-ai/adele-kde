@@ -15,7 +15,7 @@ include(KDECompilerSettings NO_POLICY_SCOPE)
 set(BUILD_SHARED_LIBS ON CACHE BOOL "Build shared libraries" FORCE)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}" CACHE PATH "Library output directory" FORCE)
 
-find_package(Qt6 REQUIRED COMPONENTS Core DBus Qml WebSockets)
+find_package(Qt6 REQUIRED COMPONENTS Core DBus Qml)
 find_package(KF6 REQUIRED COMPONENTS CoreAddons KCMUtils)
 
 add_definitions(-DTRANSLATION_DOMAIN="kcm_desktopassistant")
@@ -23,7 +23,6 @@ add_definitions(-DTRANSLATION_DOMAIN="kcm_desktopassistant")
 kcmutils_add_qml_kcm(kcm_desktopassistant
     SOURCES
         desktopassistantkcm.cpp
-        daemonwsclient.cpp
     INSTALL_NAMESPACE
         plasma/kcms/systemsettings
 )
@@ -35,7 +34,6 @@ target_link_libraries(kcm_desktopassistant
         Qt6::Core
         Qt6::DBus
         Qt6::Qml
-        Qt6::WebSockets
         KF6::CoreAddons
         KF6::KCMUtils
 )

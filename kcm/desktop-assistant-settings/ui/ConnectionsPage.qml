@@ -162,9 +162,8 @@ ColumnLayout {
         anchors.centerIn: parent
         implicitWidth: 360
 
-        ColumnLayout {
-            anchors.fill: parent
-            spacing: 8
+        contentItem: ColumnLayout {
+            spacing: Kirigami.Units.smallSpacing
 
             QQC2.Label {
                 text: "Choose connector type:"
