@@ -24,6 +24,12 @@ import org.kde.kirigami as Kirigami
 Kirigami.OverlaySheet {
     id: sheet
 
+    // Size the sheet explicitly. Without this, OverlaySheet picks an
+    // implicit width based on the inner ColumnLayout's children, which
+    // collapses to the longest label and renders a tiny popup.
+    implicitWidth: Math.min(parent ? parent.width - Kirigami.Units.gridUnit * 2 : 560, 720)
+    implicitHeight: Math.min(parent ? parent.height - Kirigami.Units.gridUnit * 2 : 600, 720)
+
     signal done(bool succeeded)
 
     property string connectorType: ""
@@ -130,11 +136,6 @@ Kirigami.OverlaySheet {
 
     ColumnLayout {
         spacing: 8
-        // Kirigami.OverlaySheet sizes itself to the content item's implicit
-        // width/height, so set them explicitly — Layout.* properties don't
-        // apply to a top-level child of an OverlaySheet.
-        implicitWidth: 520
-        implicitHeight: 560
 
         QQC2.Label {
             Layout.fillWidth: true

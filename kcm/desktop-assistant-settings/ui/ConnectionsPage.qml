@@ -89,6 +89,11 @@ ColumnLayout {
         id: listView
         Layout.fillWidth: true
         Layout.fillHeight: true
+        // Without an explicit minimum, the parent ColumnLayout (wrapped in
+        // an outer QQC2.ScrollView in main.qml) is height-unbounded and
+        // Layout.fillHeight collapses to zero, hiding the list entirely.
+        Layout.minimumHeight: 240
+        implicitHeight: Math.max(contentHeight + 8, Layout.minimumHeight)
         clip: true
         model: connections
         spacing: 2
