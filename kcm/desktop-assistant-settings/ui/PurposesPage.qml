@@ -126,11 +126,15 @@ ColumnLayout {
         })
     }
 
-    function persist(index) {
+    // `item` is the snapshot to persist — pass it directly rather than
+    // looking it up from `purposes[index]`. The lookup approach broke when
+    // the caller had to mutate `purposes` first to populate the entry, and
+    // mutating `purposes` triggers Repeater delegate rebuilds that kill
+    // the calling JS context before persist() got to run.
+    function persist(item) {
         persistCalls += 1
-        const item = purposes[index]
         if (!item) {
-            persistLast = "#" + persistCalls + " no item at index " + index
+            persistLast = "#" + persistCalls + " persist called with no item"
             return
         }
         const config = {
@@ -241,6 +245,7 @@ ColumnLayout {
                                 id: connectionBox
                                 Layout.fillWidth: true
                                 textRole: "label"
+                                valueRole: "value"
                                 // model and currentIndex are both imperative.
                                 // A `model: { ... }` JS-expression binding
                                 // recomputes between currentIndexChanged and
@@ -273,7 +278,26 @@ ColumnLayout {
                                     }
                                     currentIndex = 0
                                 }
-                                Component.onCompleted: rebuild()
+                                Component.onCompleted: {
+                                    rebuild()
+                                    connectionBox.activated.connect(function(idx) {
+                                        const value = connectionBox.currentValue
+                                        if (!value) return
+                                        const newItem = Object.assign({}, purposeCard.rowData, { connection: value })
+                                        const modelsForConn = modelsByConnection[value] || []
+                                        const wantsEmbedding = purposeCard.rowData.key === "embedding"
+                                        const still = modelsForConn.find(function(m) { return m.id === purposeCard.rowData.model })
+                                        if (!still) {
+                                            const fallback = modelsForConn.find(function(m) { return Boolean(m.embedding) === wantsEmbedding })
+                                            if (fallback) newItem.model = fallback.id
+                                        }
+                                        const rowIdx = purposeCard.rowIndex
+                                        persist(newItem)
+                                        const updated = purposes.slice()
+                                        updated[rowIdx] = newItem
+                                        purposes = updated
+                                    })
+                                }
                                 Connections {
                                     target: root
                                     function onConnectionsChanged() { connectionBox.rebuild() }
@@ -281,30 +305,6 @@ ColumnLayout {
                                 Connections {
                                     target: purposeCard
                                     function onRowDataChanged() { connectionBox.rebuild() }
-                                }
-                                Connections {
-                                    target: connectionBox
-                                    function onActivated(idx) {
-                                        const entry = connectionBox.model[idx]
-                                        if (!entry) return
-                                        const updated = purposes.slice()
-                                        updated[purposeCard.rowIndex] = Object.assign({}, purposeCard.rowData, { connection: entry.value })
-                                        const modelsForConn = modelsByConnection[entry.value] || []
-                                        const wantsEmbedding = purposeCard.rowData.key === "embedding"
-                                        const still = modelsForConn.find(function(m) {
-                                            return m.id === purposeCard.rowData.model
-                                        })
-                                        if (!still) {
-                                            const fallback = modelsForConn.find(function(m) {
-                                                return Boolean(m.embedding) === wantsEmbedding
-                                            })
-                                            if (fallback) {
-                                                updated[purposeCard.rowIndex].model = fallback.id
-                                            }
-                                        }
-                                        purposes = updated
-                                        persist(purposeCard.rowIndex)
-                                    }
                                 }
                             }
 
@@ -360,14 +360,19 @@ ColumnLayout {
                                     // returning undefined for reasons that
                                     // are not worth the time to chase.
                                     modelBox.activated.connect(function(idx) {
-                                        persistCalls += 1
                                         const value = modelBox.currentValue
-                                        persistLast = "[modelBox imperative " + purposeCard.rowData.key + "] idx=" + idx + " value=" + value
                                         if (!value) return
+                                        // Build the new snapshot, persist it,
+                                        // THEN mutate `purposes`. Mutating
+                                        // first kicks off Repeater delegate
+                                        // rebuilds and kills this JS context
+                                        // before persist() ran.
+                                        const newItem = Object.assign({}, purposeCard.rowData, { model: value })
+                                        const rowIdx = purposeCard.rowIndex
+                                        persist(newItem)
                                         const updated = purposes.slice()
-                                        updated[purposeCard.rowIndex] = Object.assign({}, purposeCard.rowData, { model: value })
+                                        updated[rowIdx] = newItem
                                         purposes = updated
-                                        persist(purposeCard.rowIndex)
                                     })
                                 }
                                 Connections {
@@ -384,6 +389,7 @@ ColumnLayout {
                                 id: effortBox
                                 Layout.preferredWidth: 140
                                 textRole: "label"
+                                valueRole: "value"
                                 model: [
                                     { value: "", label: "Effort: None" },
                                     { value: "low", label: "Effort: Low" },
@@ -400,21 +406,21 @@ ColumnLayout {
                                     }
                                     currentIndex = 0
                                 }
-                                Component.onCompleted: syncIndex()
+                                Component.onCompleted: {
+                                    syncIndex()
+                                    effortBox.activated.connect(function(idx) {
+                                        const value = effortBox.currentValue || ""
+                                        const newItem = Object.assign({}, purposeCard.rowData, { effort: value })
+                                        const rowIdx = purposeCard.rowIndex
+                                        persist(newItem)
+                                        const updated = purposes.slice()
+                                        updated[rowIdx] = newItem
+                                        purposes = updated
+                                    })
+                                }
                                 Connections {
                                     target: purposeCard
                                     function onRowDataChanged() { effortBox.syncIndex() }
-                                }
-                                Connections {
-                                    target: effortBox
-                                    function onActivated(idx) {
-                                        const entry = effortBox.model[idx]
-                                        if (!entry) return
-                                        const updated = purposes.slice()
-                                        updated[purposeCard.rowIndex] = Object.assign({}, purposeCard.rowData, { effort: entry.value })
-                                        purposes = updated
-                                        persist(purposeCard.rowIndex)
-                                    }
                                 }
                             }
 
