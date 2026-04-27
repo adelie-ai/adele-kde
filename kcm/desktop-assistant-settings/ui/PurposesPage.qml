@@ -127,10 +127,12 @@ ColumnLayout {
     function persist(index) {
         const item = purposes[index]
         if (!item) return
-        if (!item.connection || !item.model) return
+        // Don't bail when one field looks empty — emit anyway and let the
+        // daemon respond. The previous early-return swallowed real changes
+        // when a connection switch raced ahead of the model list landing.
         const config = {
-            connection: item.connection,
-            model: item.model,
+            connection: item.connection || "",
+            model: item.model || "",
         }
         if (item.effort && item.effort.length > 0) {
             config.effort = item.effort
@@ -139,9 +141,11 @@ ColumnLayout {
         kcm.wsCall("set_purpose", { purpose: item.key, config: config }, function(_result, error) {
             if (error) {
                 statusText = "Failed to save purpose '" + item.key + "': " + error
+                console.warn("set_purpose failed", item.key, JSON.stringify(config), "→", error)
                 return
             }
             statusText = "Updated purpose '" + item.key + "'."
+            console.info("set_purpose ok", item.key, JSON.stringify(config))
         })
     }
 
@@ -224,10 +228,14 @@ ColumnLayout {
                                     if (!entry) return
                                     const updated = purposes.slice()
                                     updated[index] = Object.assign({}, modelData, { connection: entry.value })
-                                    // When the connection changes, drop a
-                                    // model that no longer exists under it;
-                                    // pick the first capability-matching
-                                    // model on the new connection.
+                                    // Try to swap in a capability-matching
+                                    // model from the new connection. If
+                                    // nothing matches (e.g. the model list
+                                    // hasn't landed yet), keep the existing
+                                    // model so persist still has something
+                                    // to send — the user can fix it from
+                                    // the model dropdown after the list
+                                    // populates.
                                     const modelsForConn = modelsByConnection[entry.value] || []
                                     const wantsEmbedding = modelData.key === "embedding"
                                     const still = modelsForConn.find(function(m) {
@@ -237,7 +245,9 @@ ColumnLayout {
                                         const fallback = modelsForConn.find(function(m) {
                                             return Boolean(m.embedding) === wantsEmbedding
                                         })
-                                        updated[index].model = fallback ? fallback.id : ""
+                                        if (fallback) {
+                                            updated[index].model = fallback.id
+                                        }
                                     }
                                     purposes = updated
                                     persist(index)
