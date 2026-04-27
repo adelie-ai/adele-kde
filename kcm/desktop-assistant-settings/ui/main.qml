@@ -24,15 +24,26 @@ KCM.SimpleKCM {
         anchors.fill: parent
         spacing: 10
 
+        QQC2.Label {
+            Layout.fillWidth: true
+            horizontalAlignment: Text.AlignRight
+            font.italic: true
+            opacity: 0.6
+            text: "kcm_desktopassistant " + kcm.buildStamp
+        }
+
         QQC2.TabBar {
             id: tabs
             Layout.fillWidth: true
 
-            QQC2.TabButton { text: "Chat LLM" }
-            QQC2.TabButton { text: "Search" }
+            // The legacy single-LLM "Chat LLM" tab is gone (daemon's
+            // GetLlmSettings/SetLlmSettings were removed in
+            // desktop-assistant#17). Connections + Purposes replace it.
+            QQC2.TabButton { text: "Connections" }
+            QQC2.TabButton { text: "Purposes" }
             QQC2.TabButton { text: "Backend Tasks" }
             QQC2.TabButton { text: "Data Sync" }
-            QQC2.TabButton { text: "Connections" }
+            QQC2.TabButton { text: "Daemon Instances" }
             QQC2.TabButton { text: "Authentication" }
         }
 
@@ -42,81 +53,22 @@ KCM.SimpleKCM {
             currentIndex: tabs.currentIndex
 
             QQC2.ScrollView {
+                id: connectionsScroll
                 clip: true
+                contentWidth: availableWidth
+                ConnectionsPage {
+                    width: connectionsScroll.availableWidth
+                    height: connectionsScroll.availableHeight
+                }
+            }
 
-                ColumnLayout {
-                    width: parent.width
-                    spacing: 12
-
-                    QQC2.Label {
-                        Layout.fillWidth: true
-                        wrapMode: Text.Wrap
-                        text: kcm.hasApiKey
-                            ? "API key is configured in the secret backend."
-                            : "No API key stored yet."
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        QQC2.Label { text: "Connector" }
-                        QQC2.ComboBox {
-                            id: connectorBox
-                            Layout.fillWidth: true
-                            model: ["ollama", "openai", "anthropic", "aws-bedrock"]
-                            currentIndex: {
-                                if (kcm.connector === "ollama") return 0
-                                if (kcm.connector === "openai") return 1
-                                if (kcm.connector === "anthropic") return 2
-                                if (kcm.connector === "bedrock" || kcm.connector === "aws-bedrock") return 3
-                                return 1
-                            }
-                            onActivated: kcm.connector = currentText
-                        }
-                    }
-
-                    QQC2.Button {
-                        text: "Set Defaults"
-                        onClicked: kcm.applyChatDefaults()
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        QQC2.Label { text: "Model" }
-                        QQC2.TextField {
-                            id: llmModelField
-                            Layout.fillWidth: true
-                            placeholderText: "gpt-5.4 / llama3.1 / ..."
-                            text: kcm.model
-                            onTextEdited: kcm.model = text
-                        }
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        QQC2.Label { text: "Base URL" }
-                        QQC2.TextField {
-                            id: llmBaseUrlField
-                            Layout.fillWidth: true
-                            placeholderText: "https://api.openai.com/v1"
-                            text: kcm.baseUrl
-                            onTextEdited: kcm.baseUrl = text
-                        }
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        QQC2.Label { text: "API Key" }
-                        QQC2.TextField {
-                            id: apiKeyField
-                            Layout.fillWidth: true
-                            echoMode: TextInput.Password
-                            placeholderText: "Write-only; leave blank to keep existing"
-                            text: kcm.apiKeyInput
-                            onTextEdited: kcm.apiKeyInput = text
-                        }
-                    }
-
-                    Item { Layout.fillHeight: true }
+            QQC2.ScrollView {
+                id: purposesScroll
+                clip: true
+                contentWidth: availableWidth
+                PurposesPage {
+                    width: purposesScroll.availableWidth
+                    height: purposesScroll.availableHeight
                 }
             }
 
@@ -130,155 +82,7 @@ KCM.SimpleKCM {
                     QQC2.Label {
                         Layout.fillWidth: true
                         wrapMode: Text.Wrap
-                        text: "Search helps Adele find relevant past messages and preferences. Choose which service powers search below."
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        QQC2.Label { text: "Provider" }
-                        QQC2.ComboBox {
-                            id: embConnectorBox
-                            Layout.fillWidth: true
-                            model: ["auto (same as Chat LLM)", "ollama", "openai", "aws-bedrock"]
-                            currentIndex: {
-                                if (kcm.embConnector === "ollama") return 1
-                                if (kcm.embConnector === "openai") return 2
-                                if (kcm.embConnector === "bedrock" || kcm.embConnector === "aws-bedrock") return 3
-                                return 0
-                            }
-                            onActivated: {
-                                if (currentIndex === 0) kcm.embConnector = ""
-                                else kcm.embConnector = currentText
-                            }
-                        }
-                    }
-
-                    QQC2.Button {
-                        text: "Set Defaults"
-                        onClicked: kcm.applySearchDefaults()
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        QQC2.Label { text: "Model" }
-                        QQC2.TextField {
-                            id: embModelField
-                            Layout.fillWidth: true
-                            placeholderText: {
-                                let c = kcm.embConnector || kcm.connector
-                                if (c === "bedrock" || c === "aws-bedrock") return "amazon.titan-embed-text-v2:0"
-                                return c === "ollama" ? "nomic-embed-text" : "text-embedding-3-small"
-                            }
-                            text: kcm.embModel
-                            onTextEdited: kcm.embModel = text
-                        }
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        QQC2.Label { text: "Base URL" }
-                        QQC2.TextField {
-                            id: embBaseUrlField
-                            Layout.fillWidth: true
-                            placeholderText: {
-                                let c = kcm.embConnector || kcm.connector
-                                if (c === "bedrock" || c === "aws-bedrock") return "us-east-1"
-                                return c === "ollama" ? "http://localhost:11434" : "https://api.openai.com/v1"
-                            }
-                            text: kcm.embBaseUrl
-                            onTextEdited: kcm.embBaseUrl = text
-                        }
-                    }
-
-                    QQC2.Label {
-                        Layout.fillWidth: true
-                        wrapMode: Text.Wrap
-                        visible: !kcm.embAvailable
-                        color: Kirigami.Theme.neutralTextColor
-                        text: "The current choice cannot power Search right now. Pick another Search provider, or switch the Chat LLM connector."
-                    }
-
-                    Item { Layout.fillHeight: true }
-                }
-            }
-
-            QQC2.ScrollView {
-                clip: true
-
-                ColumnLayout {
-                    width: parent.width
-                    spacing: 12
-
-                    QQC2.Label {
-                        Layout.fillWidth: true
-                        wrapMode: Text.Wrap
-                        text: "Backend tasks use a cheaper LLM for title generation, context summary compaction, and dreaming (periodic fact extraction). When no separate LLM is configured, the primary Chat LLM is used."
-                    }
-
-                    QQC2.CheckBox {
-                        id: btSeparateLlmCheck
-                        text: "Use a separate LLM for backend tasks"
-                        checked: kcm.btLlmConnector !== ""
-                        onToggled: {
-                            if (!checked) {
-                                kcm.btLlmConnector = ""
-                                kcm.btLlmModel = ""
-                                kcm.btLlmBaseUrl = ""
-                            } else {
-                                kcm.btLlmConnector = "ollama"
-                            }
-                        }
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        enabled: btSeparateLlmCheck.checked
-                        QQC2.Label { text: "Connector" }
-                        QQC2.ComboBox {
-                            id: btConnectorBox
-                            Layout.fillWidth: true
-                            model: ["ollama", "openai", "anthropic", "aws-bedrock"]
-                            currentIndex: {
-                                if (kcm.btLlmConnector === "ollama") return 0
-                                if (kcm.btLlmConnector === "openai") return 1
-                                if (kcm.btLlmConnector === "anthropic") return 2
-                                if (kcm.btLlmConnector === "bedrock" || kcm.btLlmConnector === "aws-bedrock") return 3
-                                return 0
-                            }
-                            onActivated: kcm.btLlmConnector = currentText
-                        }
-                    }
-
-                    QQC2.Button {
-                        text: "Set Defaults"
-                        enabled: btSeparateLlmCheck.checked
-                        onClicked: kcm.applyBackendDefaults()
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        enabled: btSeparateLlmCheck.checked
-                        QQC2.Label { text: "Model" }
-                        QQC2.TextField {
-                            id: btModelField
-                            Layout.fillWidth: true
-                            placeholderText: "llama3.2:3b / gpt-4o-mini / ..."
-                            text: kcm.btLlmModel
-                            onTextEdited: kcm.btLlmModel = text
-                        }
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        enabled: btSeparateLlmCheck.checked
-                        QQC2.Label { text: "Base URL" }
-                        QQC2.TextField {
-                            id: btBaseUrlField
-                            Layout.fillWidth: true
-                            placeholderText: "http://localhost:11434"
-                            text: kcm.btLlmBaseUrl
-                            onTextEdited: kcm.btLlmBaseUrl = text
-                        }
+                        text: "Backend tasks (title generation, summary compaction, dreaming) use the connection and model assigned to their purpose on the Purposes tab. This page configures the schedule and retention policy."
                     }
 
                     Kirigami.Separator { Layout.fillWidth: true }
@@ -312,6 +116,19 @@ KCM.SimpleKCM {
                             stepSize: 300
                             value: kcm.btDreamingIntervalSecs
                             onValueModified: kcm.btDreamingIntervalSecs = value
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        QQC2.Label { text: "Archive conversations after (days; 0 = never)" }
+                        QQC2.SpinBox {
+                            id: btArchiveAfterDaysBox
+                            from: 0
+                            to: 3650
+                            stepSize: 1
+                            value: kcm.btArchiveAfterDays
+                            onValueModified: kcm.btArchiveAfterDays = value
                         }
                     }
 
@@ -693,25 +510,6 @@ KCM.SimpleKCM {
             }
         }
 
-        RowLayout {
-            Layout.fillWidth: true
-
-            QQC2.Button {
-                text: "Reload"
-                onClicked: kcm.load()
-            }
-
-            QQC2.Button {
-                text: "Apply"
-                onClicked: kcm.save()
-            }
-
-            QQC2.Button {
-                text: "Restart Daemon"
-                onClicked: kcm.restartDaemon()
-            }
-        }
-
         QQC2.Label {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
@@ -721,23 +519,9 @@ KCM.SimpleKCM {
         Connections {
             target: kcm
 
-            function onModelChanged() {
-                if (llmModelField.text !== kcm.model) {
-                    llmModelField.text = kcm.model
-                }
-            }
-
-            function onBaseUrlChanged() {
-                if (llmBaseUrlField.text !== kcm.baseUrl) {
-                    llmBaseUrlField.text = kcm.baseUrl
-                }
-            }
-
-            function onApiKeyInputChanged() {
-                if (apiKeyField.text !== kcm.apiKeyInput) {
-                    apiKeyField.text = kcm.apiKeyInput
-                }
-            }
+            // Chat-LLM text fields were removed alongside the legacy tab
+            // (desktop-assistant#17); their model/baseUrl/apiKeyInput
+            // sync handlers moved into the Connections + Purposes pages.
 
             function onEmbModelChanged() {
                 if (embModelField.text !== kcm.embModel) {
@@ -796,6 +580,12 @@ KCM.SimpleKCM {
             function onBtDreamingIntervalSecsChanged() {
                 if (btDreamingIntervalBox.value !== kcm.btDreamingIntervalSecs) {
                     btDreamingIntervalBox.value = kcm.btDreamingIntervalSecs
+                }
+            }
+
+            function onBtArchiveAfterDaysChanged() {
+                if (btArchiveAfterDaysBox.value !== kcm.btArchiveAfterDays) {
+                    btArchiveAfterDaysBox.value = kcm.btArchiveAfterDays
                 }
             }
 

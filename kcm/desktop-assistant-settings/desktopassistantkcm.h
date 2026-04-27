@@ -1,6 +1,8 @@
 #pragma once
 
 #include <KQuickConfigModule>
+#include <QJSValue>
+#include <QJsonObject>
 #include <QStringList>
 #include <QVector>
 
@@ -8,6 +10,7 @@ class QDBusMessage;
 
 class DesktopAssistantKcm : public KQuickConfigModule {
     Q_OBJECT
+    Q_PROPERTY(QString buildStamp READ buildStamp CONSTANT)
     Q_PROPERTY(QString connector READ connector WRITE setConnector NOTIFY connectorChanged)
     Q_PROPERTY(QString model READ model WRITE setModel NOTIFY modelChanged)
     Q_PROPERTY(QString baseUrl READ baseUrl WRITE setBaseUrl NOTIFY baseUrlChanged)
@@ -36,6 +39,7 @@ class DesktopAssistantKcm : public KQuickConfigModule {
     Q_PROPERTY(bool selectedConnectionRemovable READ selectedConnectionRemovable NOTIFY selectedConnectionRemovableChanged)
     Q_PROPERTY(bool btDreamingEnabled READ btDreamingEnabled WRITE setBtDreamingEnabled NOTIFY btDreamingEnabledChanged)
     Q_PROPERTY(int btDreamingIntervalSecs READ btDreamingIntervalSecs WRITE setBtDreamingIntervalSecs NOTIFY btDreamingIntervalSecsChanged)
+    Q_PROPERTY(int btArchiveAfterDays READ btArchiveAfterDays WRITE setBtArchiveAfterDays NOTIFY btArchiveAfterDaysChanged)
     Q_PROPERTY(bool btHasSeparateLlm READ btHasSeparateLlm NOTIFY btHasSeparateLlmChanged)
     Q_PROPERTY(QString btLlmConnector READ btLlmConnector WRITE setBtLlmConnector NOTIFY btLlmConnectorChanged)
     Q_PROPERTY(QString btLlmModel READ btLlmModel WRITE setBtLlmModel NOTIFY btLlmModelChanged)
@@ -52,6 +56,8 @@ class DesktopAssistantKcm : public KQuickConfigModule {
 
 public:
     DesktopAssistantKcm(QObject *parent, const KPluginMetaData &metaData, const QVariantList &args);
+
+    QString buildStamp() const;
 
     QString connector() const;
     void setConnector(const QString &value);
@@ -126,6 +132,9 @@ public:
     int btDreamingIntervalSecs() const;
     void setBtDreamingIntervalSecs(int value);
 
+    int btArchiveAfterDays() const;
+    void setBtArchiveAfterDays(int value);
+
     bool btHasSeparateLlm() const;
 
     QString btLlmConnector() const;
@@ -163,9 +172,20 @@ public:
     Q_INVOKABLE void applyChatDefaults();
     Q_INVOKABLE void applySearchDefaults();
     Q_INVOKABLE void applyBackendDefaults();
-    Q_INVOKABLE void restartDaemon();
     Q_INVOKABLE void addRemoteConnection(const QString &name);
     Q_INVOKABLE void removeSelectedConnection();
+
+    /// Dispatch a daemon Command (snake-cased variant) and invoke
+    /// `callback(result, error)` exactly once. `payload` is the variant's
+    /// inner object; pass an empty object for unit variants such as
+    /// `list_connections` or `get_purposes`.
+    ///
+    /// This is the QML-facing entry point for the multi-connection pages
+    /// (Connections, Purposes). Dispatched via the daemon's
+    /// `org.desktopAssistant.Connections` D-Bus interface — the name is
+    /// transport-neutral so we can swap implementations without churning
+    /// every QML caller.
+    Q_INVOKABLE void daemonCall(const QString &command, const QJSValue &payload, const QJSValue &callback);
 
 Q_SIGNALS:
     void connectorChanged();
@@ -196,6 +216,7 @@ Q_SIGNALS:
     void selectedConnectionRemovableChanged();
     void btDreamingEnabledChanged();
     void btDreamingIntervalSecsChanged();
+    void btArchiveAfterDaysChanged();
     void btHasSeparateLlmChanged();
     void btLlmConnectorChanged();
     void btLlmModelChanged();
@@ -225,6 +246,14 @@ private:
     bool saveWidgetConnectionSettings();
     void setSelectedConnectionByIndex(int index);
     void emitConnectionSelectionChanged();
+    // Per-section immediate-save helpers. Each setter that previously
+    // toggled setNeedsSave(true) now calls one of these directly so
+    // changes hit the daemon as soon as the user makes them; there is no
+    // Apply gesture (the daemon hot-reloads inside each Set* handler).
+    void pushPersistenceSettings();
+    void pushDatabaseSettings();
+    void pushBackendTasksSettings();
+    void pushWsAuthSettings();
 
     QString m_connector;
     QString m_model;
@@ -249,6 +278,7 @@ private:
     QString m_selectedConnectionName = QStringLiteral("local");
     bool m_btDreamingEnabled = false;
     int m_btDreamingIntervalSecs = 3600;
+    int m_btArchiveAfterDays = 0;
     bool m_btHasSeparateLlm = false;
     QString m_btLlmConnector;
     QString m_btLlmModel;
