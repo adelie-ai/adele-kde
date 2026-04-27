@@ -348,7 +348,24 @@ ColumnLayout {
                                     }
                                     currentIndex = 0
                                 }
-                                Component.onCompleted: rebuild()
+                                Component.onCompleted: {
+                                    rebuild()
+                                    // Imperative connect — bypasses every
+                                    // declarative form (`onActivated:`,
+                                    // `Connections { function onActivated() }`)
+                                    // that the QML compiler keeps dropping
+                                    // in this delegate context.
+                                    modelBox.activated.connect(function(idx) {
+                                        persistCalls += 1
+                                        persistLast = "[modelBox imperative " + purposeCard.rowData.key + "] idx=" + idx
+                                        const entry = modelBox.items[idx]
+                                        if (!entry) return
+                                        const updated = purposes.slice()
+                                        updated[purposeCard.rowIndex] = Object.assign({}, purposeCard.rowData, { model: entry.value })
+                                        purposes = updated
+                                        persist(purposeCard.rowIndex)
+                                    })
+                                }
                                 Connections {
                                     target: root
                                     function onModelsByConnectionChanged() { modelBox.rebuild() }
@@ -356,17 +373,6 @@ ColumnLayout {
                                 Connections {
                                     target: purposeCard
                                     function onRowDataChanged() { modelBox.rebuild() }
-                                }
-                                Connections {
-                                    target: modelBox
-                                    function onActivated(idx) {
-                                        const entry = modelBox.model[idx]
-                                        if (!entry) return
-                                        const updated = purposes.slice()
-                                        updated[purposeCard.rowIndex] = Object.assign({}, purposeCard.rowData, { model: entry.value })
-                                        purposes = updated
-                                        persist(purposeCard.rowIndex)
-                                    }
                                 }
                             }
 
