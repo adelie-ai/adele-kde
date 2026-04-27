@@ -241,43 +241,46 @@ ColumnLayout {
                                 id: connectionBox
                                 Layout.fillWidth: true
                                 textRole: "label"
-                                model: {
+                                // model and currentIndex are both imperative.
+                                // A `model: { ... }` JS-expression binding
+                                // recomputes between currentIndexChanged and
+                                // activated when its deps tick, and Qt drops
+                                // activated as a result. A `currentIndex:`
+                                // binding similarly fights user picks. Keep
+                                // both explicitly under our control.
+                                property var items: []
+                                model: items
+                                function rebuild() {
                                     const base = []
                                     for (let i = 0; i < connections.length; i++) {
                                         base.push({ value: connections[i].id, label: connections[i].label })
                                     }
-                                    // Always include the saved value so the
-                                    // dropdown reflects the daemon state even
-                                    // before list_connections completes (or
-                                    // when the connection has been deleted
-                                    // out from under this purpose).
                                     const cur = purposeCard.rowData.connection
                                     if (cur
                                         && !base.some(function(m) { return m.value === cur })) {
                                         base.push({ value: cur, label: cur })
                                     }
-                                    return base
+                                    items = base
+                                    syncIndex()
                                 }
-                                // currentIndex is set imperatively rather
-                                // than via a `currentIndex: { ... }` binding
-                                // — Qt's ComboBox swallows `activated` when
-                                // a binding immediately re-asserts the
-                                // index right after the user's pick.
                                 function syncIndex() {
                                     const current = purposeCard.rowData.connection
-                                    for (let i = 0; i < count; i++) {
-                                        if (model[i] && model[i].value === current) {
+                                    for (let i = 0; i < items.length; i++) {
+                                        if (items[i].value === current) {
                                             currentIndex = i
                                             return
                                         }
                                     }
                                     currentIndex = 0
                                 }
-                                Component.onCompleted: syncIndex()
-                                onModelChanged: syncIndex()
+                                Component.onCompleted: rebuild()
+                                Connections {
+                                    target: root
+                                    function onConnectionsChanged() { connectionBox.rebuild() }
+                                }
                                 Connections {
                                     target: purposeCard
-                                    function onRowDataChanged() { connectionBox.syncIndex() }
+                                    function onRowDataChanged() { connectionBox.rebuild() }
                                 }
                                 Connections {
                                     target: connectionBox
@@ -309,7 +312,9 @@ ColumnLayout {
                                 id: modelBox
                                 Layout.fillWidth: true
                                 textRole: "label"
-                                model: {
+                                property var items: []
+                                model: items
+                                function rebuild() {
                                     const base = []
                                     const sourceConn = purposeCard.rowData.connection
                                     if (sourceConn) {
@@ -325,34 +330,32 @@ ColumnLayout {
                                             base.push({ value: m.id, label: m.display_name })
                                         }
                                     }
-                                    // Always include the saved value so the
-                                    // dropdown reflects the daemon state even
-                                    // before list_available_models completes
-                                    // (or when the connection can't enumerate
-                                    // models at all, e.g. Bedrock without
-                                    // network).
                                     const cur = purposeCard.rowData.model
                                     if (cur
                                         && !base.some(function(m) { return m.value === cur })) {
                                         base.push({ value: cur, label: cur })
                                     }
-                                    return base
+                                    items = base
+                                    syncIndex()
                                 }
                                 function syncIndex() {
                                     const current = purposeCard.rowData.model
-                                    for (let i = 0; i < count; i++) {
-                                        if (model[i] && model[i].value === current) {
+                                    for (let i = 0; i < items.length; i++) {
+                                        if (items[i].value === current) {
                                             currentIndex = i
                                             return
                                         }
                                     }
                                     currentIndex = 0
                                 }
-                                Component.onCompleted: syncIndex()
-                                onModelChanged: syncIndex()
+                                Component.onCompleted: rebuild()
+                                Connections {
+                                    target: root
+                                    function onModelsByConnectionChanged() { modelBox.rebuild() }
+                                }
                                 Connections {
                                     target: purposeCard
-                                    function onRowDataChanged() { modelBox.syncIndex() }
+                                    function onRowDataChanged() { modelBox.rebuild() }
                                 }
                                 Connections {
                                     target: modelBox
