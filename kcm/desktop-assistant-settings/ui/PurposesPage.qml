@@ -234,16 +234,27 @@ ColumnLayout {
                                     }
                                     return base
                                 }
-                                currentIndex: {
+                                // currentIndex is set imperatively rather
+                                // than via a `currentIndex: { ... }` binding
+                                // — Qt's ComboBox swallows `activated` when
+                                // a binding immediately re-asserts the
+                                // index right after the user's pick.
+                                function syncIndex() {
                                     const current = purposeCard.rowData.connection
                                     for (let i = 0; i < count; i++) {
-                                        if (model[i] && model[i].value === current) return i
+                                        if (model[i] && model[i].value === current) {
+                                            currentIndex = i
+                                            return
+                                        }
                                     }
-                                    return 0
+                                    currentIndex = 0
                                 }
-                                // Connections-element binding is the Qt 6
-                                // idiom that survives whatever was dropping
-                                // the inline `onActivated:` handler.
+                                Component.onCompleted: syncIndex()
+                                onModelChanged: syncIndex()
+                                Connections {
+                                    target: purposeCard
+                                    function onRowDataChanged() { connectionBox.syncIndex() }
+                                }
                                 Connections {
                                     target: connectionBox
                                     function onActivated(idx) {
@@ -303,32 +314,31 @@ ColumnLayout {
                                     }
                                     return base
                                 }
-                                currentIndex: {
+                                function syncIndex() {
                                     const current = purposeCard.rowData.model
                                     for (let i = 0; i < count; i++) {
-                                        if (model[i] && model[i].value === current) return i
+                                        if (model[i] && model[i].value === current) {
+                                            currentIndex = i
+                                            return
+                                        }
                                     }
-                                    return 0
+                                    currentIndex = 0
+                                }
+                                Component.onCompleted: syncIndex()
+                                onModelChanged: syncIndex()
+                                Connections {
+                                    target: purposeCard
+                                    function onRowDataChanged() { modelBox.syncIndex() }
                                 }
                                 Connections {
                                     target: modelBox
                                     function onActivated(idx) {
-                                        persistCalls += 1
-                                        persistLast = "[modelBox.activated " + purposeCard.rowData.key + " idx=" + idx + "]"
                                         const entry = modelBox.model[idx]
                                         if (!entry) return
                                         const updated = purposes.slice()
                                         updated[purposeCard.rowIndex] = Object.assign({}, purposeCard.rowData, { model: entry.value })
                                         purposes = updated
                                         persist(purposeCard.rowIndex)
-                                    }
-                                    function onCurrentIndexChanged() {
-                                        persistCalls += 1
-                                        persistLast = "[modelBox.currentIndexChanged " + purposeCard.rowData.key + " ci=" + modelBox.currentIndex + "]"
-                                    }
-                                    function onPressedChanged() {
-                                        persistCalls += 1
-                                        persistLast = "[modelBox.pressedChanged " + purposeCard.rowData.key + " pressed=" + modelBox.pressed + "]"
                                     }
                                 }
                             }
@@ -343,12 +353,20 @@ ColumnLayout {
                                     { value: "medium", label: "Effort: Medium" },
                                     { value: "high", label: "Effort: High" },
                                 ]
-                                currentIndex: {
+                                function syncIndex() {
                                     const current = purposeCard.rowData.effort || ""
                                     for (let i = 0; i < count; i++) {
-                                        if (model[i] && model[i].value === current) return i
+                                        if (model[i] && model[i].value === current) {
+                                            currentIndex = i
+                                            return
+                                        }
                                     }
-                                    return 0
+                                    currentIndex = 0
+                                }
+                                Component.onCompleted: syncIndex()
+                                Connections {
+                                    target: purposeCard
+                                    function onRowDataChanged() { effortBox.syncIndex() }
                                 }
                                 Connections {
                                     target: effortBox
