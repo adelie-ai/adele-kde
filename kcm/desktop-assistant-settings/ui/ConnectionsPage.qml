@@ -25,7 +25,7 @@ ColumnLayout {
 
     function reload() {
         loading = true
-        kcm.wsCall("list_connections", {}, function(result, error) {
+        kcm.daemonCall("list_connections", {}, function(result, error) {
             loading = false
             if (error) {
                 statusText = error
@@ -217,7 +217,7 @@ ColumnLayout {
         onAccepted: {
             if (!target) return
             const id = target.id
-            kcm.wsCall("delete_connection", { id: id, force: false }, function(result, error) {
+            kcm.daemonCall("delete_connection", { id: id, force: false }, function(result, error) {
                 if (error) {
                     // The daemon refuses deletion when a purpose still
                     // references the connection; offer a Force variant.
@@ -275,7 +275,7 @@ ColumnLayout {
         onAccepted: {
             if (!target) return
             const id = target.id
-            kcm.wsCall("delete_connection", { id: id, force: true }, function(result, error) {
+            kcm.daemonCall("delete_connection", { id: id, force: true }, function(result, error) {
                 if (error) {
                     statusText = "Force-remove failed: " + error
                     return

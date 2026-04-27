@@ -181,11 +181,11 @@ public:
     /// `list_connections` or `get_purposes`.
     ///
     /// This is the QML-facing entry point for the multi-connection pages
-    /// (Connections, Purposes). It now dispatches via the daemon's
-    /// `org.desktopAssistant.Connections` D-Bus interface; the legacy
-    /// `wsCall` name is preserved so existing QML continues to work without
-    /// edits.
-    Q_INVOKABLE void wsCall(const QString &command, const QJSValue &payload, const QJSValue &callback);
+    /// (Connections, Purposes). Dispatched via the daemon's
+    /// `org.desktopAssistant.Connections` D-Bus interface — the name is
+    /// transport-neutral so we can swap implementations without churning
+    /// every QML caller.
+    Q_INVOKABLE void daemonCall(const QString &command, const QJSValue &payload, const QJSValue &callback);
 
 Q_SIGNALS:
     void connectorChanged();

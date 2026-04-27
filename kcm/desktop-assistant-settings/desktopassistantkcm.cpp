@@ -1316,13 +1316,14 @@ void DesktopAssistantKcm::emitConnectionSelectionChanged()
     Q_EMIT selectedConnectionRemovableChanged();
 }
 
-void DesktopAssistantKcm::wsCall(const QString &command, const QJSValue &payload, const QJSValue &callback)
+void DesktopAssistantKcm::daemonCall(const QString &command, const QJSValue &payload, const QJSValue &callback)
 {
-    // Despite the legacy "ws" name, this dispatches the multi-connection
-    // commands through the daemon's D-Bus surface
-    // (org.desktopAssistant.Connections), not WebSocket. The WS path used to
-    // require a fresh JWT for every call and a TLS handshake against a
-    // self-signed CA; routing through D-Bus removes both problems.
+    // Dispatches multi-connection commands through the daemon's D-Bus
+    // surface (org.desktopAssistant.Connections). The KCM is a local-only
+    // client, so D-Bus is the right transport — the matching WebSocket
+    // path was used briefly during the multi-connection rollout but
+    // required a per-call JWT + a TLS handshake against the daemon's
+    // self-signed CA, which is wasted work for a session-bus client.
 
     auto fail = [&](const QString &message) {
         if (callback.isCallable()) {
@@ -1347,7 +1348,7 @@ void DesktopAssistantKcm::wsCall(const QString &command, const QJSValue &payload
         }
     }
     if (snake.isEmpty()) {
-        fail(QStringLiteral("wsCall: missing command variant"));
+        fail(QStringLiteral("daemonCall: missing command variant"));
         return;
     }
 
@@ -1408,7 +1409,7 @@ void DesktopAssistantKcm::wsCall(const QString &command, const QJSValue &payload
         const QString configJson = serializePayloadField(QStringLiteral("config"));
         reply = iface.call(QStringLiteral("SetPurpose"), purpose, configJson);
     } else {
-        fail(QStringLiteral("wsCall: unsupported command '%1'").arg(snake));
+        fail(QStringLiteral("daemonCall: unsupported command '%1'").arg(snake));
         return;
     }
 

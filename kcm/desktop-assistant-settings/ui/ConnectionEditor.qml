@@ -113,7 +113,7 @@ Kirigami.OverlaySheet {
         }
 
         const variant = isNew ? "create_connection" : "update_connection"
-        kcm.wsCall(variant, { id: id, config: config }, function(result, error) {
+        kcm.daemonCall(variant, { id: id, config: config }, function(result, error) {
             if (error) {
                 refreshStatus = error
                 return
@@ -262,7 +262,7 @@ Kirigami.OverlaySheet {
                 onClicked: {
                     refreshStatus = "Refreshing…"
                     refreshedModels = []
-                    kcm.wsCall("list_available_models", {
+                    kcm.daemonCall("list_available_models", {
                         connection_id: connectionId,
                         refresh: true,
                     }, function(result, error) {

@@ -41,7 +41,7 @@ ColumnLayout {
         loadingPurposes = true
         loadingConnections = true
 
-        kcm.wsCall("list_connections", {}, function(result, error) {
+        kcm.daemonCall("list_connections", {}, function(result, error) {
             loadingConnections = false
             if (error) {
                 statusText = error
@@ -59,7 +59,7 @@ ColumnLayout {
             reloadModels()
         })
 
-        kcm.wsCall("get_purposes", {}, function(result, error) {
+        kcm.daemonCall("get_purposes", {}, function(result, error) {
             loadingPurposes = false
             if (error) {
                 statusText = error
@@ -100,7 +100,7 @@ ColumnLayout {
     function reloadModels() {
         // Fetch models once across all connections; the per-connection map
         // lets the UI filter the Model combo as the Connection combo flips.
-        kcm.wsCall("list_available_models", {}, function(result, error) {
+        kcm.daemonCall("list_available_models", {}, function(result, error) {
             if (error) {
                 statusText = error
                 return
@@ -138,7 +138,7 @@ ColumnLayout {
         if (item.effort && item.effort.length > 0) {
             config.effort = item.effort
         }
-        kcm.wsCall("set_purpose", { purpose: item.key, config: config }, function(_result, error) {
+        kcm.daemonCall("set_purpose", { purpose: item.key, config: config }, function(_result, error) {
             if (error) {
                 statusText = "Failed to save purpose '" + item.key + "': " + error
                 return
