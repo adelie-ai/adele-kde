@@ -26,6 +26,8 @@ ColumnLayout {
     property var modelsByConnection: ({})
     property bool loadingPurposes: false
     property bool loadingConnections: false
+    property int persistCalls: 0
+    property string persistLast: "(no persist call yet)"
 
     // Keys are the purpose slugs; mirror the daemon's PurposeKindApi. Order
     // matters in the UI so we walk this list rather than iterating over
@@ -125,11 +127,12 @@ ColumnLayout {
     }
 
     function persist(index) {
+        persistCalls += 1
         const item = purposes[index]
-        if (!item) return
-        // Don't bail when one field looks empty — emit anyway and let the
-        // daemon respond. The previous early-return swallowed real changes
-        // when a connection switch raced ahead of the model list landing.
+        if (!item) {
+            persistLast = "#" + persistCalls + " no item at index " + index
+            return
+        }
         const config = {
             connection: item.connection || "",
             model: item.model || "",
@@ -137,6 +140,7 @@ ColumnLayout {
         if (item.effort && item.effort.length > 0) {
             config.effort = item.effort
         }
+        persistLast = "#" + persistCalls + " " + item.key + " " + JSON.stringify(config)
         kcm.wsCall("set_purpose", { purpose: item.key, config: config }, function(_result, error) {
             if (error) {
                 statusText = "Failed to save purpose '" + item.key + "': " + error
@@ -159,6 +163,15 @@ ColumnLayout {
         visible: statusText.length > 0
         text: statusText
         type: Kirigami.MessageType.Warning
+    }
+
+    QQC2.Label {
+        Layout.fillWidth: true
+        font.family: "monospace"
+        font.italic: true
+        opacity: 0.7
+        wrapMode: Text.Wrap
+        text: "persist calls: " + persistCalls + " — last: " + persistLast
     }
 
     QQC2.Label {
@@ -228,42 +241,32 @@ ColumnLayout {
                                     }
                                     return 0
                                 }
-                                // Inline statement form ensures Qt 6's QML
-                                // compiler attaches this handler. The
-                                // function-form (`function(idx) { ... }`)
-                                // version was being silently dropped, so
-                                // dropdown picks never reached persist().
-                                // `index` here is the activated item's
-                                // index in the popup; the Repeater's row
-                                // index is captured into purposeCard.rowIndex.
-                                onActivated: {
-                                    const entry = connectionBox.model[index]
-                                    if (!entry) return
-                                    const updated = purposes.slice()
-                                    updated[purposeCard.rowIndex] = Object.assign({}, purposeCard.rowData, { connection: entry.value })
-                                    // Try to swap in a capability-matching
-                                    // model from the new connection. If
-                                    // nothing matches (e.g. the model list
-                                    // hasn't landed yet), keep the existing
-                                    // model so persist still has something
-                                    // to send — the user can fix it from
-                                    // the model dropdown after the list
-                                    // populates.
-                                    const modelsForConn = modelsByConnection[entry.value] || []
-                                    const wantsEmbedding = purposeCard.rowData.key === "embedding"
-                                    const still = modelsForConn.find(function(m) {
-                                        return m.id === purposeCard.rowData.model
-                                    })
-                                    if (!still) {
-                                        const fallback = modelsForConn.find(function(m) {
-                                            return Boolean(m.embedding) === wantsEmbedding
+                                // Connections-element binding is the Qt 6
+                                // idiom that survives whatever was dropping
+                                // the inline `onActivated:` handler.
+                                Connections {
+                                    target: connectionBox
+                                    function onActivated(idx) {
+                                        const entry = connectionBox.model[idx]
+                                        if (!entry) return
+                                        const updated = purposes.slice()
+                                        updated[purposeCard.rowIndex] = Object.assign({}, purposeCard.rowData, { connection: entry.value })
+                                        const modelsForConn = modelsByConnection[entry.value] || []
+                                        const wantsEmbedding = purposeCard.rowData.key === "embedding"
+                                        const still = modelsForConn.find(function(m) {
+                                            return m.id === purposeCard.rowData.model
                                         })
-                                        if (fallback) {
-                                            updated[purposeCard.rowIndex].model = fallback.id
+                                        if (!still) {
+                                            const fallback = modelsForConn.find(function(m) {
+                                                return Boolean(m.embedding) === wantsEmbedding
+                                            })
+                                            if (fallback) {
+                                                updated[purposeCard.rowIndex].model = fallback.id
+                                            }
                                         }
+                                        purposes = updated
+                                        persist(purposeCard.rowIndex)
                                     }
-                                    purposes = updated
-                                    persist(purposeCard.rowIndex)
                                 }
                             }
 
@@ -307,13 +310,16 @@ ColumnLayout {
                                     }
                                     return 0
                                 }
-                                onActivated: {
-                                    const entry = modelBox.model[index]
-                                    if (!entry) return
-                                    const updated = purposes.slice()
-                                    updated[purposeCard.rowIndex] = Object.assign({}, purposeCard.rowData, { model: entry.value })
-                                    purposes = updated
-                                    persist(purposeCard.rowIndex)
+                                Connections {
+                                    target: modelBox
+                                    function onActivated(idx) {
+                                        const entry = modelBox.model[idx]
+                                        if (!entry) return
+                                        const updated = purposes.slice()
+                                        updated[purposeCard.rowIndex] = Object.assign({}, purposeCard.rowData, { model: entry.value })
+                                        purposes = updated
+                                        persist(purposeCard.rowIndex)
+                                    }
                                 }
                             }
 
@@ -334,13 +340,16 @@ ColumnLayout {
                                     }
                                     return 0
                                 }
-                                onActivated: {
-                                    const entry = effortBox.model[index]
-                                    if (!entry) return
-                                    const updated = purposes.slice()
-                                    updated[purposeCard.rowIndex] = Object.assign({}, purposeCard.rowData, { effort: entry.value })
-                                    purposes = updated
-                                    persist(purposeCard.rowIndex)
+                                Connections {
+                                    target: effortBox
+                                    function onActivated(idx) {
+                                        const entry = effortBox.model[idx]
+                                        if (!entry) return
+                                        const updated = purposes.slice()
+                                        updated[purposeCard.rowIndex] = Object.assign({}, purposeCard.rowData, { effort: entry.value })
+                                        purposes = updated
+                                        persist(purposeCard.rowIndex)
+                                    }
                                 }
                             }
                         }
