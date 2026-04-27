@@ -174,6 +174,30 @@ ColumnLayout {
         text: "persist calls: " + persistCalls + " — last: " + persistLast
     }
 
+    // Plain top-level ComboBox to confirm whether ComboBox.activated
+    // works at all in this page (independent of the Repeater delegate
+    // context where the production ComboBoxes live).
+    RowLayout {
+        Layout.fillWidth: true
+        QQC2.Label { text: "TEST ComboBox:" }
+        QQC2.ComboBox {
+            id: testCombo
+            Layout.fillWidth: true
+            model: ["alpha", "beta", "gamma"]
+            onActivated: {
+                persistCalls += 1
+                persistLast = "[TEST inline-onActivated] idx=" + index + " value=" + testCombo.model[index]
+            }
+        }
+        Connections {
+            target: testCombo
+            function onActivated(idx) {
+                persistCalls += 1
+                persistLast = "[TEST Connections.onActivated] idx=" + idx + " value=" + testCombo.model[idx]
+            }
+        }
+    }
+
     QQC2.Label {
         Layout.fillWidth: true
         wrapMode: Text.Wrap
