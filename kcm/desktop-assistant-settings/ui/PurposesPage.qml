@@ -66,15 +66,30 @@ ColumnLayout {
                 return
             }
             const view = result && result.purposes ? result.purposes : {}
+            // The daemon protocol still understands the "primary" sentinel
+            // for inheritance, but the UI now shows everything as explicit
+            // values. Resolve any inherited entries to interactive's actual
+            // connection/model on load so the dropdowns render real ids and
+            // saving back rewrites them as explicit (no more "primary" on
+            // the wire from this client).
+            const interactive = view["interactive"] || {}
+            const interactiveConn = String(interactive.connection || "")
+            const interactiveModel = String(interactive.model || "")
             const out = []
             for (let i = 0; i < purposeOrder.length; i++) {
                 const entry = purposeOrder[i]
                 const cfg = view[entry.key] || {}
+                let conn = String(cfg.connection || "")
+                let model = String(cfg.model || "")
+                if (entry.key !== "interactive") {
+                    if (conn === "primary" || conn === "") conn = interactiveConn
+                    if (model === "primary" || model === "") model = interactiveModel
+                }
                 out.push({
                     key: entry.key,
                     label: entry.label,
-                    connection: String(cfg.connection || ""),
-                    model: String(cfg.model || ""),
+                    connection: conn,
+                    model: model,
                     effort: cfg.effort ? String(cfg.effort) : "",
                 })
             }
@@ -112,9 +127,10 @@ ColumnLayout {
     function persist(index) {
         const item = purposes[index]
         if (!item) return
+        if (!item.connection || !item.model) return
         const config = {
-            connection: item.connection || "primary",
-            model: item.model || "primary",
+            connection: item.connection,
+            model: item.model,
         }
         if (item.effort && item.effort.length > 0) {
             config.effort = item.effort
@@ -147,7 +163,7 @@ ColumnLayout {
     QQC2.Label {
         Layout.fillWidth: true
         wrapMode: Text.Wrap
-        text: "Route each assistant purpose through a specific connection and model. Non-interactive purposes (titling, dreaming, embedding) can pick \"Same as Interactive Chat\" to follow whatever the interactive purpose is set to."
+        text: "Route each assistant purpose through a specific connection and model."
     }
 
     QQC2.ScrollView {
@@ -181,23 +197,16 @@ ColumnLayout {
                                 textRole: "label"
                                 model: {
                                     const base = []
-                                    // Non-interactive purposes can inherit
-                                    // the primary (interactive) selection.
-                                    // The wire value stays "primary" — the
-                                    // daemon resolves inheritance — but the
-                                    // label avoids implying "Primary" is a
-                                    // connector type.
-                                    if (modelData.key !== "interactive") {
-                                        base.push({ value: "primary", label: "Same as Interactive Chat" })
-                                    }
                                     for (let i = 0; i < connections.length; i++) {
                                         base.push({ value: connections[i].id, label: connections[i].label })
                                     }
                                     // Always include the saved value so the
                                     // dropdown reflects the daemon state even
-                                    // before list_connections completes.
+                                    // before list_connections completes (or
+                                    // when the connection has been deleted
+                                    // out from under this purpose).
                                     const cur = modelData.connection
-                                    if (cur && cur !== "primary"
+                                    if (cur
                                         && !base.some(function(m) { return m.value === cur })) {
                                         base.push({ value: cur, label: cur })
                                     }
@@ -215,19 +224,20 @@ ColumnLayout {
                                     if (!entry) return
                                     const updated = purposes.slice()
                                     updated[index] = Object.assign({}, modelData, { connection: entry.value })
-                                    // When the connection changes, reset
-                                    // model to "primary" (inherit) to avoid
-                                    // dangling model ids on a new connector.
-                                    if (entry.value === "primary") {
-                                        updated[index].model = "primary"
-                                    } else {
-                                        const modelsForConn = modelsByConnection[entry.value] || []
-                                        const still = modelsForConn.find(function(m) {
-                                            return m.id === modelData.model
+                                    // When the connection changes, drop a
+                                    // model that no longer exists under it;
+                                    // pick the first capability-matching
+                                    // model on the new connection.
+                                    const modelsForConn = modelsByConnection[entry.value] || []
+                                    const wantsEmbedding = modelData.key === "embedding"
+                                    const still = modelsForConn.find(function(m) {
+                                        return m.id === modelData.model
+                                    })
+                                    if (!still) {
+                                        const fallback = modelsForConn.find(function(m) {
+                                            return Boolean(m.embedding) === wantsEmbedding
                                         })
-                                        if (!still) {
-                                            updated[index].model = modelsForConn.length > 0 ? modelsForConn[0].id : "primary"
-                                        }
+                                        updated[index].model = fallback ? fallback.id : ""
                                     }
                                     purposes = updated
                                     persist(index)
@@ -239,30 +249,13 @@ ColumnLayout {
                                 textRole: "label"
                                 model: {
                                     const base = []
-                                    const isInheritingConn = modelData.connection === "primary"
-                                    base.push({
-                                        value: "primary",
-                                        label: isInheritingConn ? "Same as Interactive Chat" : "Same model as Interactive Chat"
-                                    })
-                                    // Enumerate models from this purpose's
-                                    // connection — or, when inheriting, from
-                                    // the interactive purpose's connection so
-                                    // the user can override only the model.
-                                    let sourceConn = modelData.connection
-                                    if (isInheritingConn) {
-                                        const interactivePurpose = purposes.find(function(p) { return p.key === "interactive" })
-                                        sourceConn = interactivePurpose ? interactivePurpose.connection : ""
-                                    }
-                                    if (sourceConn && sourceConn !== "primary") {
+                                    const sourceConn = modelData.connection
+                                    if (sourceConn) {
                                         const models = modelsByConnection[sourceConn] || []
                                         // The embedding purpose only accepts
                                         // embedding-capable models; every
                                         // other purpose only accepts chat
-                                        // (non-embedding) models. The
-                                        // currently-saved id is still
-                                        // appended below as a safety net so
-                                        // existing config never disappears
-                                        // from the dropdown.
+                                        // (non-embedding) models.
                                         const wantsEmbedding = modelData.key === "embedding"
                                         for (let i = 0; i < models.length; i++) {
                                             const m = models[i]
@@ -277,7 +270,7 @@ ColumnLayout {
                                     // models at all, e.g. Bedrock without
                                     // network).
                                     const cur = modelData.model
-                                    if (cur && cur !== "primary"
+                                    if (cur
                                         && !base.some(function(m) { return m.value === cur })) {
                                         base.push({ value: cur, label: cur })
                                     }
