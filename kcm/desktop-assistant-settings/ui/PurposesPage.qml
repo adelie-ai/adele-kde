@@ -312,6 +312,7 @@ ColumnLayout {
                                 id: modelBox
                                 Layout.fillWidth: true
                                 textRole: "label"
+                                valueRole: "value"
                                 property var items: []
                                 model: items
                                 function rebuild() {
@@ -351,17 +352,20 @@ ColumnLayout {
                                 Component.onCompleted: {
                                     rebuild()
                                     // Imperative connect — bypasses every
-                                    // declarative form (`onActivated:`,
-                                    // `Connections { function onActivated() }`)
-                                    // that the QML compiler keeps dropping
-                                    // in this delegate context.
+                                    // declarative form that the QML
+                                    // compiler kept dropping in this
+                                    // delegate context. Use the ComboBox's
+                                    // built-in currentValue rather than
+                                    // peeking into items[idx], which was
+                                    // returning undefined for reasons that
+                                    // are not worth the time to chase.
                                     modelBox.activated.connect(function(idx) {
                                         persistCalls += 1
-                                        persistLast = "[modelBox imperative " + purposeCard.rowData.key + "] idx=" + idx
-                                        const entry = modelBox.items[idx]
-                                        if (!entry) return
+                                        const value = modelBox.currentValue
+                                        persistLast = "[modelBox imperative " + purposeCard.rowData.key + "] idx=" + idx + " value=" + value
+                                        if (!value) return
                                         const updated = purposes.slice()
-                                        updated[purposeCard.rowIndex] = Object.assign({}, purposeCard.rowData, { model: entry.value })
+                                        updated[purposeCard.rowIndex] = Object.assign({}, purposeCard.rowData, { model: value })
                                         purposes = updated
                                         persist(purposeCard.rowIndex)
                                     })
