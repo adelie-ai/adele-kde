@@ -26,8 +26,6 @@ ColumnLayout {
     property var modelsByConnection: ({})
     property bool loadingPurposes: false
     property bool loadingConnections: false
-    property int persistCalls: 0
-    property string persistLast: "(no persist call yet)"
 
     // Keys are the purpose slugs; mirror the daemon's PurposeKindApi. Order
     // matters in the UI so we walk this list rather than iterating over
@@ -132,11 +130,7 @@ ColumnLayout {
     // mutating `purposes` triggers Repeater delegate rebuilds that kill
     // the calling JS context before persist() got to run.
     function persist(item) {
-        persistCalls += 1
-        if (!item) {
-            persistLast = "#" + persistCalls + " persist called with no item"
-            return
-        }
+        if (!item) return
         const config = {
             connection: item.connection || "",
             model: item.model || "",
@@ -144,7 +138,6 @@ ColumnLayout {
         if (item.effort && item.effort.length > 0) {
             config.effort = item.effort
         }
-        persistLast = "#" + persistCalls + " " + item.key + " " + JSON.stringify(config)
         kcm.wsCall("set_purpose", { purpose: item.key, config: config }, function(_result, error) {
             if (error) {
                 statusText = "Failed to save purpose '" + item.key + "': " + error
@@ -167,39 +160,6 @@ ColumnLayout {
         visible: statusText.length > 0
         text: statusText
         type: Kirigami.MessageType.Warning
-    }
-
-    QQC2.Label {
-        Layout.fillWidth: true
-        font.family: "monospace"
-        font.italic: true
-        opacity: 0.7
-        wrapMode: Text.Wrap
-        text: "persist calls: " + persistCalls + " — last: " + persistLast
-    }
-
-    // Plain top-level ComboBox to confirm whether ComboBox.activated
-    // works at all in this page (independent of the Repeater delegate
-    // context where the production ComboBoxes live).
-    RowLayout {
-        Layout.fillWidth: true
-        QQC2.Label { text: "TEST ComboBox:" }
-        QQC2.ComboBox {
-            id: testCombo
-            Layout.fillWidth: true
-            model: ["alpha", "beta", "gamma"]
-            onActivated: {
-                persistCalls += 1
-                persistLast = "[TEST inline-onActivated] idx=" + index + " value=" + testCombo.model[index]
-            }
-        }
-        Connections {
-            target: testCombo
-            function onActivated(idx) {
-                persistCalls += 1
-                persistLast = "[TEST Connections.onActivated] idx=" + idx + " value=" + testCombo.model[idx]
-            }
-        }
     }
 
     QQC2.Label {
@@ -424,27 +384,6 @@ ColumnLayout {
                                 }
                             }
 
-                            // Sibling test ComboBox inside the same delegate
-                            // to prove whether ComboBox.activated fires
-                            // *inside* the Repeater delegate context. If the
-                            // page-level test combo fires but this one
-                            // doesn't, the bug is the delegate context.
-                            QQC2.ComboBox {
-                                id: rowTestCombo
-                                Layout.preferredWidth: 120
-                                model: ["test-a", "test-b", "test-c"]
-                                onActivated: {
-                                    persistCalls += 1
-                                    persistLast = "[ROW-TEST inline " + purposeCard.rowData.key + "] idx=" + index
-                                }
-                                Connections {
-                                    target: rowTestCombo
-                                    function onActivated(idx) {
-                                        persistCalls += 1
-                                        persistLast = "[ROW-TEST Connections " + purposeCard.rowData.key + "] idx=" + idx
-                                    }
-                                }
-                            }
                         }
                     }
                 }
