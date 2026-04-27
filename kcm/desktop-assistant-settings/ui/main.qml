@@ -510,16 +510,6 @@ KCM.SimpleKCM {
             }
         }
 
-        RowLayout {
-            Layout.fillWidth: true
-
-            QQC2.Button {
-                text: "Reload"
-                icon.name: "view-refresh"
-                onClicked: kcm.load()
-            }
-        }
-
         QQC2.Label {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
