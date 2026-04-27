@@ -404,6 +404,28 @@ ColumnLayout {
                                     }
                                 }
                             }
+
+                            // Sibling test ComboBox inside the same delegate
+                            // to prove whether ComboBox.activated fires
+                            // *inside* the Repeater delegate context. If the
+                            // page-level test combo fires but this one
+                            // doesn't, the bug is the delegate context.
+                            QQC2.ComboBox {
+                                id: rowTestCombo
+                                Layout.preferredWidth: 120
+                                model: ["test-a", "test-b", "test-c"]
+                                onActivated: {
+                                    persistCalls += 1
+                                    persistLast = "[ROW-TEST inline " + purposeCard.rowData.key + "] idx=" + index
+                                }
+                                Connections {
+                                    target: rowTestCombo
+                                    function onActivated(idx) {
+                                        persistCalls += 1
+                                        persistLast = "[ROW-TEST Connections " + purposeCard.rowData.key + "] idx=" + idx
+                                    }
+                                }
+                            }
                         }
                     }
                 }
