@@ -313,12 +313,22 @@ ColumnLayout {
                                 Connections {
                                     target: modelBox
                                     function onActivated(idx) {
+                                        persistCalls += 1
+                                        persistLast = "[modelBox.activated " + purposeCard.rowData.key + " idx=" + idx + "]"
                                         const entry = modelBox.model[idx]
                                         if (!entry) return
                                         const updated = purposes.slice()
                                         updated[purposeCard.rowIndex] = Object.assign({}, purposeCard.rowData, { model: entry.value })
                                         purposes = updated
                                         persist(purposeCard.rowIndex)
+                                    }
+                                    function onCurrentIndexChanged() {
+                                        persistCalls += 1
+                                        persistLast = "[modelBox.currentIndexChanged " + purposeCard.rowData.key + " ci=" + modelBox.currentIndex + "]"
+                                    }
+                                    function onPressedChanged() {
+                                        persistCalls += 1
+                                        persistLast = "[modelBox.pressedChanged " + purposeCard.rowData.key + " pressed=" + modelBox.pressed + "]"
                                     }
                                 }
                             }
