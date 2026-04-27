@@ -10,6 +10,7 @@ class QDBusMessage;
 
 class DesktopAssistantKcm : public KQuickConfigModule {
     Q_OBJECT
+    Q_PROPERTY(QString buildStamp READ buildStamp CONSTANT)
     Q_PROPERTY(QString connector READ connector WRITE setConnector NOTIFY connectorChanged)
     Q_PROPERTY(QString model READ model WRITE setModel NOTIFY modelChanged)
     Q_PROPERTY(QString baseUrl READ baseUrl WRITE setBaseUrl NOTIFY baseUrlChanged)
@@ -55,6 +56,8 @@ class DesktopAssistantKcm : public KQuickConfigModule {
 
 public:
     DesktopAssistantKcm(QObject *parent, const KPluginMetaData &metaData, const QVariantList &args);
+
+    QString buildStamp() const;
 
     QString connector() const;
     void setConnector(const QString &value);
@@ -169,7 +172,6 @@ public:
     Q_INVOKABLE void applyChatDefaults();
     Q_INVOKABLE void applySearchDefaults();
     Q_INVOKABLE void applyBackendDefaults();
-    Q_INVOKABLE void restartDaemon();
     Q_INVOKABLE void addRemoteConnection(const QString &name);
     Q_INVOKABLE void removeSelectedConnection();
 
@@ -244,6 +246,14 @@ private:
     bool saveWidgetConnectionSettings();
     void setSelectedConnectionByIndex(int index);
     void emitConnectionSelectionChanged();
+    // Per-section immediate-save helpers. Each setter that previously
+    // toggled setNeedsSave(true) now calls one of these directly so
+    // changes hit the daemon as soon as the user makes them; there is no
+    // Apply gesture (the daemon hot-reloads inside each Set* handler).
+    void pushPersistenceSettings();
+    void pushDatabaseSettings();
+    void pushBackendTasksSettings();
+    void pushWsAuthSettings();
 
     QString m_connector;
     QString m_model;

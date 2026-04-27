@@ -1,6 +1,9 @@
 #include "desktopassistantkcm.h"
 
 #include <algorithm>
+#include <dlfcn.h>
+#include <sys/stat.h>
+#include <QDateTime>
 
 #include <QDBusInterface>
 #include <QDBusMessage>
@@ -14,7 +17,6 @@
 #include <QJsonObject>
 #include <QJsonValue>
 #include <QPointer>
-#include <QProcess>
 #include <QRegularExpression>
 #include <QStandardPaths>
 #include <QUrl>
@@ -99,8 +101,29 @@ DesktopAssistantKcm::DesktopAssistantKcm(QObject *parent, const KPluginMetaData 
     : KQuickConfigModule(parent, metaData)
 {
     Q_UNUSED(args);
-    setButtons(Apply);
+    // Immediate-save throughout: each setter fires its own D-Bus call, so
+    // the System Settings "Apply" chrome would be misleading. The daemon
+    // already hot-reloads each Set* method, so no separate Apply gesture
+    // (or daemon restart) is needed.
+    setButtons(NoAdditionalButton);
     load();
+}
+
+QString DesktopAssistantKcm::buildStamp() const
+{
+    // Reads the .so's own mtime so every reinstall produces a fresh stamp
+    // visible from QML — even when only QML files changed in this build.
+    // (__DATE__/__TIME__ would only refresh when this translation unit
+    // itself recompiled, which doesn't happen for QML-only edits.)
+    Dl_info info;
+    if (dladdr(reinterpret_cast<const void *>(&DesktopAssistantKcm::staticMetaObject), &info) && info.dli_fname) {
+        struct stat st {};
+        if (stat(info.dli_fname, &st) == 0) {
+            const auto dt = QDateTime::fromSecsSinceEpoch(static_cast<qint64>(st.st_mtime));
+            return QStringLiteral("built ") + dt.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+        }
+    }
+    return QStringLiteral("built (unknown)");
 }
 
 QString DesktopAssistantKcm::connector() const
@@ -116,7 +139,7 @@ void DesktopAssistantKcm::setConnector(const QString &value)
 
     m_connector = value;
     Q_EMIT connectorChanged();
-    setNeedsSave(true);
+    // Vestigial setter; UI no longer binds this property. No-op save path.
 }
 
 QString DesktopAssistantKcm::model() const
@@ -132,7 +155,7 @@ void DesktopAssistantKcm::setModel(const QString &value)
 
     m_model = value;
     Q_EMIT modelChanged();
-    setNeedsSave(true);
+    // Vestigial setter; UI no longer binds this property. No-op save path.
 }
 
 QString DesktopAssistantKcm::baseUrl() const
@@ -148,7 +171,7 @@ void DesktopAssistantKcm::setBaseUrl(const QString &value)
 
     m_baseUrl = value;
     Q_EMIT baseUrlChanged();
-    setNeedsSave(true);
+    // Vestigial setter; UI no longer binds this property. No-op save path.
 }
 
 QString DesktopAssistantKcm::embConnector() const
@@ -164,7 +187,7 @@ void DesktopAssistantKcm::setEmbConnector(const QString &value)
 
     m_embConnector = value;
     Q_EMIT embConnectorChanged();
-    setNeedsSave(true);
+    // Vestigial setter; UI no longer binds this property. No-op save path.
 }
 
 QString DesktopAssistantKcm::embModel() const
@@ -180,7 +203,7 @@ void DesktopAssistantKcm::setEmbModel(const QString &value)
 
     m_embModel = value;
     Q_EMIT embModelChanged();
-    setNeedsSave(true);
+    // Vestigial setter; UI no longer binds this property. No-op save path.
 }
 
 QString DesktopAssistantKcm::embBaseUrl() const
@@ -196,7 +219,7 @@ void DesktopAssistantKcm::setEmbBaseUrl(const QString &value)
 
     m_embBaseUrl = value;
     Q_EMIT embBaseUrlChanged();
-    setNeedsSave(true);
+    // Vestigial setter; UI no longer binds this property. No-op save path.
 }
 
 bool DesktopAssistantKcm::embHasApiKey() const
@@ -227,7 +250,7 @@ void DesktopAssistantKcm::setApiKeyInput(const QString &value)
 
     m_apiKeyInput = value;
     Q_EMIT apiKeyInputChanged();
-    setNeedsSave(true);
+    // Vestigial setter; UI no longer binds this property. No-op save path.
 }
 
 bool DesktopAssistantKcm::hasApiKey() const
@@ -252,7 +275,7 @@ void DesktopAssistantKcm::setGitEnabled(bool value)
     }
     m_gitEnabled = value;
     Q_EMIT gitEnabledChanged();
-    setNeedsSave(true);
+    pushPersistenceSettings();
 }
 
 QString DesktopAssistantKcm::gitRemoteUrl() const
@@ -267,7 +290,7 @@ void DesktopAssistantKcm::setGitRemoteUrl(const QString &value)
     }
     m_gitRemoteUrl = value;
     Q_EMIT gitRemoteUrlChanged();
-    setNeedsSave(true);
+    pushPersistenceSettings();
 }
 
 QString DesktopAssistantKcm::gitRemoteName() const
@@ -282,7 +305,7 @@ void DesktopAssistantKcm::setGitRemoteName(const QString &value)
     }
     m_gitRemoteName = value;
     Q_EMIT gitRemoteNameChanged();
-    setNeedsSave(true);
+    pushPersistenceSettings();
 }
 
 bool DesktopAssistantKcm::gitPushOnUpdate() const
@@ -297,7 +320,7 @@ void DesktopAssistantKcm::setGitPushOnUpdate(bool value)
     }
     m_gitPushOnUpdate = value;
     Q_EMIT gitPushOnUpdateChanged();
-    setNeedsSave(true);
+    pushPersistenceSettings();
 }
 
 QString DesktopAssistantKcm::dbUrl() const
@@ -312,7 +335,7 @@ void DesktopAssistantKcm::setDbUrl(const QString &value)
     }
     m_dbUrl = value;
     Q_EMIT dbUrlChanged();
-    setNeedsSave(true);
+    pushDatabaseSettings();
 }
 
 int DesktopAssistantKcm::dbMaxConnections() const
@@ -327,7 +350,7 @@ void DesktopAssistantKcm::setDbMaxConnections(int value)
     }
     m_dbMaxConnections = value;
     Q_EMIT dbMaxConnectionsChanged();
-    setNeedsSave(true);
+    pushDatabaseSettings();
 }
 
 QStringList DesktopAssistantKcm::connectionNames() const
@@ -357,7 +380,7 @@ void DesktopAssistantKcm::setDefaultConnectionName(const QString &value)
 
     m_defaultConnectionName = normalized;
     Q_EMIT defaultConnectionNameChanged();
-    setNeedsSave(true);
+    saveWidgetConnectionSettings();
 }
 
 QString DesktopAssistantKcm::selectedConnectionName() const
@@ -407,7 +430,7 @@ void DesktopAssistantKcm::setSelectedConnectionDbusService(const QString &value)
 
     m_connections[index].dbusService = normalized;
     Q_EMIT selectedConnectionDbusServiceChanged();
-    setNeedsSave(true);
+    saveWidgetConnectionSettings();
 }
 
 QString DesktopAssistantKcm::selectedConnectionWsUrl() const
@@ -433,7 +456,7 @@ void DesktopAssistantKcm::setSelectedConnectionWsUrl(const QString &value)
 
     m_connections[index].wsUrl = normalized;
     Q_EMIT selectedConnectionWsUrlChanged();
-    setNeedsSave(true);
+    saveWidgetConnectionSettings();
 }
 
 QString DesktopAssistantKcm::selectedConnectionWsSubject() const
@@ -459,7 +482,7 @@ void DesktopAssistantKcm::setSelectedConnectionWsSubject(const QString &value)
 
     m_connections[index].wsSubject = normalized;
     Q_EMIT selectedConnectionWsSubjectChanged();
-    setNeedsSave(true);
+    saveWidgetConnectionSettings();
 }
 
 bool DesktopAssistantKcm::selectedConnectionRemovable() const
@@ -479,7 +502,7 @@ void DesktopAssistantKcm::setBtDreamingEnabled(bool value)
     }
     m_btDreamingEnabled = value;
     Q_EMIT btDreamingEnabledChanged();
-    setNeedsSave(true);
+    pushBackendTasksSettings();
 }
 
 int DesktopAssistantKcm::btDreamingIntervalSecs() const
@@ -494,7 +517,7 @@ void DesktopAssistantKcm::setBtDreamingIntervalSecs(int value)
     }
     m_btDreamingIntervalSecs = value;
     Q_EMIT btDreamingIntervalSecsChanged();
-    setNeedsSave(true);
+    pushBackendTasksSettings();
 }
 
 int DesktopAssistantKcm::btArchiveAfterDays() const
@@ -509,7 +532,7 @@ void DesktopAssistantKcm::setBtArchiveAfterDays(int value)
     }
     m_btArchiveAfterDays = value;
     Q_EMIT btArchiveAfterDaysChanged();
-    setNeedsSave(true);
+    pushBackendTasksSettings();
 }
 
 bool DesktopAssistantKcm::btHasSeparateLlm() const
@@ -529,7 +552,7 @@ void DesktopAssistantKcm::setBtLlmConnector(const QString &value)
     }
     m_btLlmConnector = value;
     Q_EMIT btLlmConnectorChanged();
-    setNeedsSave(true);
+    // Vestigial setter; UI no longer binds this property. No-op save path.
 }
 
 QString DesktopAssistantKcm::btLlmModel() const
@@ -544,7 +567,7 @@ void DesktopAssistantKcm::setBtLlmModel(const QString &value)
     }
     m_btLlmModel = value;
     Q_EMIT btLlmModelChanged();
-    setNeedsSave(true);
+    // Vestigial setter; UI no longer binds this property. No-op save path.
 }
 
 QString DesktopAssistantKcm::btLlmBaseUrl() const
@@ -559,7 +582,7 @@ void DesktopAssistantKcm::setBtLlmBaseUrl(const QString &value)
     }
     m_btLlmBaseUrl = value;
     Q_EMIT btLlmBaseUrlChanged();
-    setNeedsSave(true);
+    // Vestigial setter; UI no longer binds this property. No-op save path.
 }
 
 int DesktopAssistantKcm::hostedToolSearch() const
@@ -574,7 +597,7 @@ void DesktopAssistantKcm::setHostedToolSearch(int value)
     }
     m_hostedToolSearch = value;
     Q_EMIT hostedToolSearchChanged();
-    setNeedsSave(true);
+    // Vestigial setter; UI no longer binds this property. No-op save path.
 }
 
 bool DesktopAssistantKcm::hostedToolSearchAvailable() const
@@ -593,11 +616,11 @@ void DesktopAssistantKcm::setWsAuthPasswordEnabled(bool value)
     if (value && !m_wsAuthMethods.contains(method)) {
         m_wsAuthMethods.append(method);
         Q_EMIT wsAuthMethodsChanged();
-        setNeedsSave(true);
+        pushWsAuthSettings();
     } else if (!value && m_wsAuthMethods.contains(method)) {
         m_wsAuthMethods.removeAll(method);
         Q_EMIT wsAuthMethodsChanged();
-        setNeedsSave(true);
+        pushWsAuthSettings();
     }
 }
 
@@ -612,11 +635,11 @@ void DesktopAssistantKcm::setWsAuthOidcEnabled(bool value)
     if (value && !m_wsAuthMethods.contains(method)) {
         m_wsAuthMethods.append(method);
         Q_EMIT wsAuthMethodsChanged();
-        setNeedsSave(true);
+        pushWsAuthSettings();
     } else if (!value && m_wsAuthMethods.contains(method)) {
         m_wsAuthMethods.removeAll(method);
         Q_EMIT wsAuthMethodsChanged();
-        setNeedsSave(true);
+        pushWsAuthSettings();
     }
 }
 
@@ -626,7 +649,7 @@ void DesktopAssistantKcm::setOidcIssuer(const QString &value)
     if (m_oidcIssuer == value) return;
     m_oidcIssuer = value;
     Q_EMIT oidcIssuerChanged();
-    setNeedsSave(true);
+    pushWsAuthSettings();
 }
 
 QString DesktopAssistantKcm::oidcAuthEndpoint() const { return m_oidcAuthEndpoint; }
@@ -635,7 +658,7 @@ void DesktopAssistantKcm::setOidcAuthEndpoint(const QString &value)
     if (m_oidcAuthEndpoint == value) return;
     m_oidcAuthEndpoint = value;
     Q_EMIT oidcAuthEndpointChanged();
-    setNeedsSave(true);
+    pushWsAuthSettings();
 }
 
 QString DesktopAssistantKcm::oidcTokenEndpoint() const { return m_oidcTokenEndpoint; }
@@ -644,7 +667,7 @@ void DesktopAssistantKcm::setOidcTokenEndpoint(const QString &value)
     if (m_oidcTokenEndpoint == value) return;
     m_oidcTokenEndpoint = value;
     Q_EMIT oidcTokenEndpointChanged();
-    setNeedsSave(true);
+    pushWsAuthSettings();
 }
 
 QString DesktopAssistantKcm::oidcClientId() const { return m_oidcClientId; }
@@ -653,7 +676,7 @@ void DesktopAssistantKcm::setOidcClientId(const QString &value)
     if (m_oidcClientId == value) return;
     m_oidcClientId = value;
     Q_EMIT oidcClientIdChanged();
-    setNeedsSave(true);
+    pushWsAuthSettings();
 }
 
 QString DesktopAssistantKcm::oidcScopes() const { return m_oidcScopes; }
@@ -662,7 +685,7 @@ void DesktopAssistantKcm::setOidcScopes(const QString &value)
     if (m_oidcScopes == value) return;
     m_oidcScopes = value;
     Q_EMIT oidcScopesChanged();
-    setNeedsSave(true);
+    pushWsAuthSettings();
 }
 
 void DesktopAssistantKcm::load()
@@ -822,39 +845,39 @@ void DesktopAssistantKcm::load()
 
 void DesktopAssistantKcm::save()
 {
+    // Immediate-save throughout: each setter has already pushed its
+    // change via the corresponding D-Bus method, so save() is a no-op.
+    // Kept for KQuickConfigModule's vtable / for any future hooks.
+}
+
+void DesktopAssistantKcm::pushPersistenceSettings()
+{
     QDBusInterface iface(SERVICE, PATH, IFACE, QDBusConnection::sessionBus());
-
-    QDBusMessage settingsReply = iface.call("SetLlmSettings", m_connector, m_model, m_baseUrl);
-    if (setStatusFromDbusError(settingsReply)) {
-        return;
-    }
-
-    QDBusMessage embeddingsReply = iface.call("SetEmbeddingsSettings", m_embConnector, m_embModel, m_embBaseUrl);
-    if (setStatusFromDbusError(embeddingsReply)) {
-        return;
-    }
-
-    QDBusMessage gitSaveReply = iface.call(
+    QDBusMessage reply = iface.call(
         "SetPersistenceSettings",
         m_gitEnabled,
         m_gitRemoteUrl,
         m_gitRemoteName,
         m_gitPushOnUpdate
     );
-    if (setStatusFromDbusError(gitSaveReply)) {
-        return;
-    }
+    setStatusFromDbusError(reply);
+}
 
-    QDBusMessage dbSaveReply = iface.call(
+void DesktopAssistantKcm::pushDatabaseSettings()
+{
+    QDBusInterface iface(SERVICE, PATH, IFACE, QDBusConnection::sessionBus());
+    QDBusMessage reply = iface.call(
         "SetDatabaseSettings",
         m_dbUrl,
         static_cast<uint>(m_dbMaxConnections)
     );
-    if (setStatusFromDbusError(dbSaveReply)) {
-        return;
-    }
+    setStatusFromDbusError(reply);
+}
 
-    QDBusMessage btSaveReply = iface.call(
+void DesktopAssistantKcm::pushBackendTasksSettings()
+{
+    QDBusInterface iface(SERVICE, PATH, IFACE, QDBusConnection::sessionBus());
+    QDBusMessage reply = iface.call(
         "SetBackendTasksSettings",
         m_btLlmConnector,
         m_btLlmModel,
@@ -863,11 +886,13 @@ void DesktopAssistantKcm::save()
         static_cast<qulonglong>(m_btDreamingIntervalSecs),
         static_cast<uint>(m_btArchiveAfterDays)
     );
-    if (setStatusFromDbusError(btSaveReply)) {
-        return;
-    }
+    setStatusFromDbusError(reply);
+}
 
-    QDBusMessage wsAuthSaveReply = iface.call(
+void DesktopAssistantKcm::pushWsAuthSettings()
+{
+    QDBusInterface iface(SERVICE, PATH, IFACE, QDBusConnection::sessionBus());
+    QDBusMessage reply = iface.call(
         "SetWsAuthSettings",
         m_wsAuthMethods,
         m_oidcIssuer,
@@ -876,30 +901,7 @@ void DesktopAssistantKcm::save()
         m_oidcClientId,
         m_oidcScopes
     );
-    if (setStatusFromDbusError(wsAuthSaveReply)) {
-        return;
-    }
-
-    if (!saveWidgetConnectionSettings()) {
-        return;
-    }
-
-    if (!m_apiKeyInput.trimmed().isEmpty()) {
-        QDBusMessage secretReply = iface.call("SetApiKey", m_apiKeyInput);
-        if (setStatusFromDbusError(secretReply)) {
-            return;
-        }
-        m_apiKeyInput.clear();
-        Q_EMIT apiKeyInputChanged();
-        if (!m_hasApiKey) {
-            m_hasApiKey = true;
-            Q_EMIT hasApiKeyChanged();
-        }
-    }
-
-    m_statusText = QStringLiteral("Saved settings");
-    Q_EMIT statusTextChanged();
-    setNeedsSave(false);
+    setStatusFromDbusError(reply);
 }
 
 void DesktopAssistantKcm::defaults()
@@ -908,7 +910,7 @@ void DesktopAssistantKcm::defaults()
     applySearchDefaults();
     applyBackendDefaults();
     setApiKeyInput(QString());
-    m_statusText = QStringLiteral("Applied connector defaults; click Apply to save");
+    m_statusText = QStringLiteral("Applied connector defaults");
     Q_EMIT statusTextChanged();
 }
 
@@ -983,23 +985,6 @@ void DesktopAssistantKcm::applyBackendDefaults()
     setBtLlmBaseUrl(defaults.llmBaseUrl);
 }
 
-void DesktopAssistantKcm::restartDaemon()
-{
-    QProcess process;
-    process.start(QStringLiteral("systemctl"), {QStringLiteral("--user"), QStringLiteral("restart"), QStringLiteral("desktop-assistant-daemon")});
-    process.waitForFinished(10000);
-
-    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
-        m_statusText = QStringLiteral("Failed to restart daemon: ") + QString::fromUtf8(process.readAllStandardError()).trimmed();
-        if (m_statusText.trimmed().endsWith(QLatin1Char(':'))) {
-            m_statusText = QStringLiteral("Failed to restart daemon");
-        }
-    } else {
-        m_statusText = QStringLiteral("Restarted desktop-assistant-daemon");
-    }
-    Q_EMIT statusTextChanged();
-}
-
 void DesktopAssistantKcm::addRemoteConnection(const QString &name)
 {
     const auto normalized = normalizeConnectionName(name);
@@ -1035,7 +1020,7 @@ void DesktopAssistantKcm::addRemoteConnection(const QString &name)
     setSelectedConnectionByIndex(m_connections.size() - 1);
     m_statusText = QStringLiteral("Added connection '%1'").arg(normalized);
     Q_EMIT statusTextChanged();
-    setNeedsSave(true);
+    saveWidgetConnectionSettings();
 }
 
 void DesktopAssistantKcm::removeSelectedConnection()
@@ -1065,7 +1050,7 @@ void DesktopAssistantKcm::removeSelectedConnection()
     setSelectedConnectionName(m_defaultConnectionName);
     m_statusText = QStringLiteral("Removed connection '%1'").arg(name);
     Q_EMIT statusTextChanged();
-    setNeedsSave(true);
+    saveWidgetConnectionSettings();
 }
 
 bool DesktopAssistantKcm::setStatusFromDbusError(const QDBusMessage &message)

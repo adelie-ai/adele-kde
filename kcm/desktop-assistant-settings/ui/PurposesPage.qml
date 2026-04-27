@@ -137,15 +137,12 @@ ColumnLayout {
         if (item.effort && item.effort.length > 0) {
             config.effort = item.effort
         }
-
         kcm.wsCall("set_purpose", { purpose: item.key, config: config }, function(_result, error) {
             if (error) {
                 statusText = "Failed to save purpose '" + item.key + "': " + error
-                console.warn("set_purpose failed", item.key, JSON.stringify(config), "→", error)
                 return
             }
-            statusText = "Updated purpose '" + item.key + "'."
-            console.info("set_purpose ok", item.key, JSON.stringify(config))
+            statusText = ""
         })
     }
 
@@ -161,7 +158,7 @@ ColumnLayout {
         Layout.fillWidth: true
         visible: statusText.length > 0
         text: statusText
-        type: Kirigami.MessageType.Information
+        type: Kirigami.MessageType.Warning
     }
 
     QQC2.Label {
@@ -182,13 +179,20 @@ ColumnLayout {
             Repeater {
                 model: purposes
                 delegate: Kirigami.AbstractCard {
+                    id: purposeCard
                     Layout.fillWidth: true
+                    // Capture the Repeater's row index into a named property
+                    // so signal handlers below can reference it without
+                    // colliding with the ComboBox.activated signal's own
+                    // `index` parameter.
+                    property int rowIndex: index
+                    property var rowData: modelData
 
                     contentItem: ColumnLayout {
                         spacing: 4
 
                         QQC2.Label {
-                            text: modelData.label
+                            text: purposeCard.rowData.label
                             font.bold: true
                         }
 
@@ -197,6 +201,7 @@ ColumnLayout {
                             spacing: 6
 
                             QQC2.ComboBox {
+                                id: connectionBox
                                 Layout.fillWidth: true
                                 textRole: "label"
                                 model: {
@@ -209,7 +214,7 @@ ColumnLayout {
                                     // before list_connections completes (or
                                     // when the connection has been deleted
                                     // out from under this purpose).
-                                    const cur = modelData.connection
+                                    const cur = purposeCard.rowData.connection
                                     if (cur
                                         && !base.some(function(m) { return m.value === cur })) {
                                         base.push({ value: cur, label: cur })
@@ -217,17 +222,25 @@ ColumnLayout {
                                     return base
                                 }
                                 currentIndex: {
-                                    const current = modelData.connection
+                                    const current = purposeCard.rowData.connection
                                     for (let i = 0; i < count; i++) {
                                         if (model[i] && model[i].value === current) return i
                                     }
                                     return 0
                                 }
-                                onActivated: function(idx) {
-                                    const entry = model[idx]
+                                // Inline statement form ensures Qt 6's QML
+                                // compiler attaches this handler. The
+                                // function-form (`function(idx) { ... }`)
+                                // version was being silently dropped, so
+                                // dropdown picks never reached persist().
+                                // `index` here is the activated item's
+                                // index in the popup; the Repeater's row
+                                // index is captured into purposeCard.rowIndex.
+                                onActivated: {
+                                    const entry = connectionBox.model[index]
                                     if (!entry) return
                                     const updated = purposes.slice()
-                                    updated[index] = Object.assign({}, modelData, { connection: entry.value })
+                                    updated[purposeCard.rowIndex] = Object.assign({}, purposeCard.rowData, { connection: entry.value })
                                     // Try to swap in a capability-matching
                                     // model from the new connection. If
                                     // nothing matches (e.g. the model list
@@ -237,36 +250,37 @@ ColumnLayout {
                                     // the model dropdown after the list
                                     // populates.
                                     const modelsForConn = modelsByConnection[entry.value] || []
-                                    const wantsEmbedding = modelData.key === "embedding"
+                                    const wantsEmbedding = purposeCard.rowData.key === "embedding"
                                     const still = modelsForConn.find(function(m) {
-                                        return m.id === modelData.model
+                                        return m.id === purposeCard.rowData.model
                                     })
                                     if (!still) {
                                         const fallback = modelsForConn.find(function(m) {
                                             return Boolean(m.embedding) === wantsEmbedding
                                         })
                                         if (fallback) {
-                                            updated[index].model = fallback.id
+                                            updated[purposeCard.rowIndex].model = fallback.id
                                         }
                                     }
                                     purposes = updated
-                                    persist(index)
+                                    persist(purposeCard.rowIndex)
                                 }
                             }
 
                             QQC2.ComboBox {
+                                id: modelBox
                                 Layout.fillWidth: true
                                 textRole: "label"
                                 model: {
                                     const base = []
-                                    const sourceConn = modelData.connection
+                                    const sourceConn = purposeCard.rowData.connection
                                     if (sourceConn) {
                                         const models = modelsByConnection[sourceConn] || []
                                         // The embedding purpose only accepts
                                         // embedding-capable models; every
                                         // other purpose only accepts chat
                                         // (non-embedding) models.
-                                        const wantsEmbedding = modelData.key === "embedding"
+                                        const wantsEmbedding = purposeCard.rowData.key === "embedding"
                                         for (let i = 0; i < models.length; i++) {
                                             const m = models[i]
                                             if (Boolean(m.embedding) !== wantsEmbedding) continue
@@ -279,7 +293,7 @@ ColumnLayout {
                                     // (or when the connection can't enumerate
                                     // models at all, e.g. Bedrock without
                                     // network).
-                                    const cur = modelData.model
+                                    const cur = purposeCard.rowData.model
                                     if (cur
                                         && !base.some(function(m) { return m.value === cur })) {
                                         base.push({ value: cur, label: cur })
@@ -287,23 +301,24 @@ ColumnLayout {
                                     return base
                                 }
                                 currentIndex: {
-                                    const current = modelData.model
+                                    const current = purposeCard.rowData.model
                                     for (let i = 0; i < count; i++) {
                                         if (model[i] && model[i].value === current) return i
                                     }
                                     return 0
                                 }
-                                onActivated: function(idx) {
-                                    const entry = model[idx]
+                                onActivated: {
+                                    const entry = modelBox.model[index]
                                     if (!entry) return
                                     const updated = purposes.slice()
-                                    updated[index] = Object.assign({}, modelData, { model: entry.value })
+                                    updated[purposeCard.rowIndex] = Object.assign({}, purposeCard.rowData, { model: entry.value })
                                     purposes = updated
-                                    persist(index)
+                                    persist(purposeCard.rowIndex)
                                 }
                             }
 
                             QQC2.ComboBox {
+                                id: effortBox
                                 Layout.preferredWidth: 140
                                 textRole: "label"
                                 model: [
@@ -313,19 +328,19 @@ ColumnLayout {
                                     { value: "high", label: "Effort: High" },
                                 ]
                                 currentIndex: {
-                                    const current = modelData.effort || ""
+                                    const current = purposeCard.rowData.effort || ""
                                     for (let i = 0; i < count; i++) {
                                         if (model[i] && model[i].value === current) return i
                                     }
                                     return 0
                                 }
-                                onActivated: function(idx) {
-                                    const entry = model[idx]
+                                onActivated: {
+                                    const entry = effortBox.model[index]
                                     if (!entry) return
                                     const updated = purposes.slice()
-                                    updated[index] = Object.assign({}, modelData, { effort: entry.value })
+                                    updated[purposeCard.rowIndex] = Object.assign({}, purposeCard.rowData, { effort: entry.value })
                                     purposes = updated
-                                    persist(index)
+                                    persist(purposeCard.rowIndex)
                                 }
                             }
                         }

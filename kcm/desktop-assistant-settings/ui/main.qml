@@ -24,6 +24,14 @@ KCM.SimpleKCM {
         anchors.fill: parent
         spacing: 10
 
+        QQC2.Label {
+            Layout.fillWidth: true
+            horizontalAlignment: Text.AlignRight
+            font.italic: true
+            opacity: 0.6
+            text: "kcm_desktopassistant " + kcm.buildStamp
+        }
+
         QQC2.TabBar {
             id: tabs
             Layout.fillWidth: true
@@ -507,17 +515,8 @@ KCM.SimpleKCM {
 
             QQC2.Button {
                 text: "Reload"
+                icon.name: "view-refresh"
                 onClicked: kcm.load()
-            }
-
-            QQC2.Button {
-                text: "Apply"
-                onClicked: kcm.save()
-            }
-
-            QQC2.Button {
-                text: "Restart Daemon"
-                onClicked: kcm.restartDaemon()
             }
         }
 
