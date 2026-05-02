@@ -1365,16 +1365,49 @@ void DesktopAssistantKcm::daemonCall(const QString &command, const QJSValue &pay
         return QString::fromUtf8(QJsonDocument(value.toObject()).toJson(QJsonDocument::Compact));
     };
 
+    // Knowledge management commands route to the dedicated
+    // `org.desktopAssistant.Knowledge` interface on a different object
+    // path (#73). The Connections interface stays as before.
+    const bool isKnowledge = snake.startsWith(QLatin1String("list_knowledge_"))
+        || snake.startsWith(QLatin1String("get_knowledge_"))
+        || snake.startsWith(QLatin1String("search_knowledge_"))
+        || snake.startsWith(QLatin1String("create_knowledge_"))
+        || snake.startsWith(QLatin1String("update_knowledge_"))
+        || snake.startsWith(QLatin1String("delete_knowledge_"));
+
+    const QString objectPath = isKnowledge
+        ? QStringLiteral("/org/desktopAssistant/Knowledge")
+        : QStringLiteral("/org/desktopAssistant/Connections");
+    const QString interfaceName = isKnowledge
+        ? QStringLiteral("org.desktopAssistant.Knowledge")
+        : QStringLiteral("org.desktopAssistant.Connections");
+
     QDBusInterface iface(
         QStringLiteral("org.desktopAssistant"),
-        QStringLiteral("/org/desktopAssistant/Connections"),
-        QStringLiteral("org.desktopAssistant.Connections"),
+        objectPath,
+        interfaceName,
         QDBusConnection::sessionBus()
     );
     if (!iface.isValid()) {
         fail(QStringLiteral("Daemon is not running on the session bus"));
         return;
     }
+
+    auto serializeArrayField = [&payloadObj](const QString &key) -> QString {
+        const QJsonValue value = payloadObj.value(key);
+        if (value.isNull() || value.isUndefined()) {
+            return QStringLiteral("null");
+        }
+        return QString::fromUtf8(QJsonDocument(value.toArray()).toJson(QJsonDocument::Compact));
+    };
+    auto serializeValueField = [&payloadObj](const QString &key) -> QString {
+        const QJsonValue value = payloadObj.value(key);
+        if (value.isNull() || value.isUndefined()) {
+            return QString();
+        }
+        return QString::fromUtf8(
+            QJsonDocument::fromVariant(value.toVariant()).toJson(QJsonDocument::Compact));
+    };
 
     // Build the D-Bus call argument list per command. Methods that return a
     // JSON-encoded `CommandResult` produce a string we re-parse below; the
@@ -1408,6 +1441,41 @@ void DesktopAssistantKcm::daemonCall(const QString &command, const QJSValue &pay
         const QString purpose = payloadObj.value(QStringLiteral("purpose")).toString();
         const QString configJson = serializePayloadField(QStringLiteral("config"));
         reply = iface.call(QStringLiteral("SetPurpose"), purpose, configJson);
+    } else if (snake == QLatin1String("list_knowledge_entries")) {
+        const uint limit = static_cast<uint>(
+            payloadObj.value(QStringLiteral("limit")).toInt(50));
+        const uint offset = static_cast<uint>(
+            payloadObj.value(QStringLiteral("offset")).toInt(0));
+        const QString tagFilterJson = serializeArrayField(QStringLiteral("tag_filter"));
+        reply = iface.call(QStringLiteral("ListEntries"), limit, offset, tagFilterJson);
+        returnsJson = true;
+    } else if (snake == QLatin1String("get_knowledge_entry")) {
+        const QString id = payloadObj.value(QStringLiteral("id")).toString();
+        reply = iface.call(QStringLiteral("GetEntry"), id);
+        returnsJson = true;
+    } else if (snake == QLatin1String("search_knowledge_entries")) {
+        const QString query = payloadObj.value(QStringLiteral("query")).toString();
+        const QString tagFilterJson = serializeArrayField(QStringLiteral("tag_filter"));
+        const uint limit = static_cast<uint>(
+            payloadObj.value(QStringLiteral("limit")).toInt(50));
+        reply = iface.call(QStringLiteral("SearchEntries"), query, tagFilterJson, limit);
+        returnsJson = true;
+    } else if (snake == QLatin1String("create_knowledge_entry")) {
+        const QString content = payloadObj.value(QStringLiteral("content")).toString();
+        const QString tagsJson = serializeArrayField(QStringLiteral("tags"));
+        const QString metadataJson = serializeValueField(QStringLiteral("metadata"));
+        reply = iface.call(QStringLiteral("CreateEntry"), content, tagsJson, metadataJson);
+        returnsJson = true;
+    } else if (snake == QLatin1String("update_knowledge_entry")) {
+        const QString id = payloadObj.value(QStringLiteral("id")).toString();
+        const QString content = payloadObj.value(QStringLiteral("content")).toString();
+        const QString tagsJson = serializeArrayField(QStringLiteral("tags"));
+        const QString metadataJson = serializeValueField(QStringLiteral("metadata"));
+        reply = iface.call(QStringLiteral("UpdateEntry"), id, content, tagsJson, metadataJson);
+        returnsJson = true;
+    } else if (snake == QLatin1String("delete_knowledge_entry")) {
+        const QString id = payloadObj.value(QStringLiteral("id")).toString();
+        reply = iface.call(QStringLiteral("DeleteEntry"), id);
     } else {
         fail(QStringLiteral("daemonCall: unsupported command '%1'").arg(snake));
         return;
