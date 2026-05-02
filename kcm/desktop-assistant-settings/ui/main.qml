@@ -41,6 +41,7 @@ KCM.SimpleKCM {
             // desktop-assistant#17). Connections + Purposes replace it.
             QQC2.TabButton { text: "Connections" }
             QQC2.TabButton { text: "Purposes" }
+            QQC2.TabButton { text: "Knowledge" }
             QQC2.TabButton { text: "Backend Tasks" }
             QQC2.TabButton { text: "Data Sync" }
             QQC2.TabButton { text: "Daemon Instances" }
@@ -69,6 +70,16 @@ KCM.SimpleKCM {
                 PurposesPage {
                     width: purposesScroll.availableWidth
                     height: purposesScroll.availableHeight
+                }
+            }
+
+            QQC2.ScrollView {
+                id: knowledgeScroll
+                clip: true
+                contentWidth: availableWidth
+                KnowledgePage {
+                    width: knowledgeScroll.availableWidth
+                    height: knowledgeScroll.availableHeight
                 }
             }
 
