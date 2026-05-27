@@ -881,6 +881,184 @@ def ensure_conversation(title: str) -> str:
     return create_conversation(title)
 
 
+def list_background_tasks(
+    include_finished: bool = False,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """Return the daemon's background-task list.
+
+    Mirrors `Command::ListBackgroundTasks` from `desktop-assistant-api-model`.
+    Returns an empty list on D-Bus transport so the badge / window degrade
+    gracefully until the daemon-side D-Bus task interface (#116) ships.
+    """
+    if TRANSPORT != "ws":
+        return []
+
+    payload: dict[str, Any] = {"include_finished": bool(include_finished)}
+    if limit is not None:
+        payload["limit"] = int(limit)
+    response = _ws_request({"list_background_tasks": payload})
+    tasks = _ws_expect_variant(response, "background_tasks")
+    if not isinstance(tasks, list):
+        raise WsError(f"unexpected list_background_tasks payload: {tasks}")
+    # Pass TaskView objects through verbatim — the QML side reads the
+    # same field names (id, title, status, started_at, ended_at,
+    # progress_hint, last_error, kind, parent, children). Keeping the
+    # shape stable avoids a translation layer that would need updating
+    # every time the daemon adds a field.
+    return [t for t in tasks if isinstance(t, dict)]
+
+
+def cancel_background_task(task_id: str) -> None:
+    """Request cancellation of a background task.
+
+    Translates to `Command::CancelBackgroundTask`. The daemon Acks
+    synchronously; the actual lifecycle transition arrives later as
+    `Event::TaskCompleted` with `status == cancelled`.
+    """
+    if TRANSPORT != "ws":
+        raise WsError("cancel_background_task requires WebSocket transport (#116)")
+    tid = (task_id or "").strip()
+    if not tid:
+        raise WsError("cancel_background_task: empty task id")
+    _ws_request({"cancel_background_task": {"id": tid}})
+
+
+def get_background_task_logs(
+    task_id: str,
+    after_seq: int | None = None,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """Fetch a page of log entries for a background task.
+
+    Returns ``{"entries": [...], "next_seq": int}``. Pass the returned
+    ``next_seq`` back as ``after_seq`` to resume paging.
+    """
+    if TRANSPORT != "ws":
+        return {"entries": [], "next_seq": 0}
+    tid = (task_id or "").strip()
+    if not tid:
+        raise WsError("get_background_task_logs: empty task id")
+    payload: dict[str, Any] = {"id": tid}
+    if after_seq is not None:
+        payload["after_seq"] = int(after_seq)
+    if limit is not None:
+        payload["limit"] = int(limit)
+    response = _ws_request({"get_background_task_logs": payload})
+    body = _ws_expect_variant(response, "background_task_logs")
+    if not isinstance(body, dict):
+        raise WsError(f"unexpected background_task_logs payload: {body}")
+    entries = body.get("entries", [])
+    next_seq = body.get("next_seq", 0)
+    return {
+        "entries": [e for e in entries if isinstance(e, dict)],
+        "next_seq": int(next_seq) if isinstance(next_seq, (int, float)) else 0,
+    }
+
+
+def subscribe_background_tasks() -> None:
+    """Subscribe this connection to ``Task*`` events for the calling user.
+
+    The daemon serializes this unit variant as the bare string
+    ``"subscribe_background_tasks"``.
+    """
+    if TRANSPORT != "ws":
+        # Subscriptions only flow over WS today; on D-Bus the QML side
+        # polls list_background_tasks via Timer instead. Quiet no-op
+        # keeps the call sites uniform.
+        return
+    _ws_request("subscribe_background_tasks")
+
+
+# Statuses that mean "in flight" for the purpose of the badge counter.
+# `Pending` is included because, from the user's perspective, a queued
+# task is also "work I asked for that hasn't finished".
+_RUNNING_STATUSES = frozenset({"pending", "running"})
+
+
+def _count_running(tasks: list[dict[str, Any]]) -> int:
+    return sum(
+        1 for t in tasks if isinstance(t, dict) and str(t.get("status", "")) in _RUNNING_STATUSES
+    )
+
+
+def apply_task_event(
+    tasks: list[dict[str, Any]],
+    event: Any,
+) -> tuple[list[dict[str, Any]], int]:
+    """Apply a single ``Event::Task*`` payload to an in-memory task list.
+
+    Returns ``(next_tasks, running_count)``. The function is pure: the
+    input list is not mutated. This is the substitute for a stateful
+    C++ ``TasksModel`` — the QML side calls it whenever an event
+    arrives (or on a polling tick) and replaces its model array.
+
+    Unknown events, malformed events, and events referencing unknown
+    task ids are dropped on the floor: returning the input unchanged is
+    safer than corrupting the model with half-built rows.
+    """
+    if not isinstance(tasks, list):
+        tasks = []
+    if not isinstance(event, dict) or len(event) != 1:
+        return list(tasks), _count_running(tasks)
+
+    [(kind, body)] = event.items()
+    if not isinstance(body, dict):
+        return list(tasks), _count_running(tasks)
+
+    next_tasks = list(tasks)
+
+    if kind == "task_started":
+        task = body.get("task")
+        if not isinstance(task, dict) or not task.get("id"):
+            return next_tasks, _count_running(next_tasks)
+        new_id = task["id"]
+        # Replace in place if we already know the id (idempotent under
+        # reconnect-replay of the initial ListBackgroundTasks +
+        # subsequent TaskStarted events).
+        for idx, existing in enumerate(next_tasks):
+            if isinstance(existing, dict) and existing.get("id") == new_id:
+                next_tasks[idx] = task
+                return next_tasks, _count_running(next_tasks)
+        next_tasks.append(task)
+        return next_tasks, _count_running(next_tasks)
+
+    if kind == "task_completed":
+        task_id = body.get("id")
+        if not task_id:
+            return next_tasks, _count_running(next_tasks)
+        for idx, existing in enumerate(next_tasks):
+            if isinstance(existing, dict) and existing.get("id") == task_id:
+                updated = dict(existing)
+                updated["status"] = body.get("status", existing.get("status", "completed"))
+                if "last_error" in body and body["last_error"] is not None:
+                    updated["last_error"] = body["last_error"]
+                next_tasks[idx] = updated
+                return next_tasks, _count_running(next_tasks)
+        # Unknown id — drop the event rather than fabricate a row.
+        return next_tasks, _count_running(next_tasks)
+
+    if kind == "task_progress":
+        task_id = body.get("id")
+        if not task_id:
+            return next_tasks, _count_running(next_tasks)
+        for idx, existing in enumerate(next_tasks):
+            if isinstance(existing, dict) and existing.get("id") == task_id:
+                updated = dict(existing)
+                if "progress_hint" in body:
+                    updated["progress_hint"] = body["progress_hint"]
+                next_tasks[idx] = updated
+                return next_tasks, _count_running(next_tasks)
+        return next_tasks, _count_running(next_tasks)
+
+    if kind == "task_log_appended":
+        # Log entries are not materialized in the task list itself; the
+        # QML side fetches them lazily via get_background_task_logs.
+        return next_tasks, _count_running(next_tasks)
+
+    return next_tasks, _count_running(next_tasks)
+
+
 def cmd_status() -> int:
     payload: dict[str, Any] = {
         "selected_connection": CONNECTION_NAME,
@@ -1022,6 +1200,27 @@ def main() -> int:
         choices=["", "low", "medium", "high"],
     )
 
+    # Background tasks (#7 / desktop-assistant#114). WS-only today.
+    tasks_list_cmd = subparsers.add_parser("tasks-list")
+    tasks_list_cmd.add_argument("--include-finished", action="store_true")
+    tasks_list_cmd.add_argument("--limit", type=int, default=0)
+
+    tasks_cancel_cmd = subparsers.add_parser("tasks-cancel")
+    tasks_cancel_cmd.add_argument("task_id")
+
+    tasks_logs_cmd = subparsers.add_parser("tasks-logs")
+    tasks_logs_cmd.add_argument("task_id")
+    tasks_logs_cmd.add_argument("--after-seq", type=int, default=-1)
+    tasks_logs_cmd.add_argument("--limit", type=int, default=0)
+
+    subparsers.add_parser("tasks-subscribe")
+
+    # `tasks-apply-event` reads JSON `{tasks: [...], event: {...}}` from
+    # stdin and prints `{tasks: [...], running_count: N}` so the QML
+    # side can route incoming events through the pure transformer
+    # without re-implementing it in JS.
+    subparsers.add_parser("tasks-apply-event")
+
     args = parser.parse_args()
     payload = _load_widget_settings_payload()
     connections, default_connection = _load_widget_connections(payload)
@@ -1161,6 +1360,42 @@ def main() -> int:
             return 0
         if args.command == "get-purposes":
             print(json.dumps({"purposes": get_purposes()}))
+            return 0
+        if args.command == "tasks-list":
+            limit = args.limit if args.limit > 0 else None
+            tasks = list_background_tasks(
+                include_finished=bool(args.include_finished),
+                limit=limit,
+            )
+            print(json.dumps({"tasks": tasks, "running_count": _count_running(tasks)}))
+            return 0
+        if args.command == "tasks-cancel":
+            cancel_background_task(args.task_id)
+            print(json.dumps({"cancelled": True, "id": args.task_id}))
+            return 0
+        if args.command == "tasks-logs":
+            after = args.after_seq if args.after_seq >= 0 else None
+            limit = args.limit if args.limit > 0 else None
+            body = get_background_task_logs(args.task_id, after_seq=after, limit=limit)
+            print(json.dumps(body))
+            return 0
+        if args.command == "tasks-subscribe":
+            subscribe_background_tasks()
+            print(json.dumps({"subscribed": True}))
+            return 0
+        if args.command == "tasks-apply-event":
+            try:
+                payload = json.loads(sys.stdin.read() or "{}")
+            except json.JSONDecodeError as exc:
+                print(json.dumps({"error": f"invalid stdin JSON: {exc}"}))
+                return 1
+            tasks_in = payload.get("tasks", []) if isinstance(payload, dict) else []
+            event = payload.get("event") if isinstance(payload, dict) else None
+            next_tasks, running = apply_task_event(
+                tasks_in if isinstance(tasks_in, list) else [],
+                event,
+            )
+            print(json.dumps({"tasks": next_tasks, "running_count": running}))
             return 0
         if args.command == "set-purpose":
             config: dict[str, Any] = {

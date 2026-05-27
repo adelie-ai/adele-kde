@@ -148,6 +148,168 @@ Item {
     property var modelEffortOverrides: ({})
     property string autoLabel: "Auto (coming soon)"
 
+    // --- Background tasks (adele-kde#7) --------------------------------------
+    // `tasksList` is the polled `Vec<TaskView>` from the daemon's
+    // `ListBackgroundTasks`. `runningTaskCount` drives the header badge and
+    // is recomputed on every list refresh — Pending and Running both count.
+    // `taskLogBuffers` is a per-task log buffer keyed by id; the QML tasks
+    // window reads it via `taskLogs(id)`. Polling cadence matches the
+    // existing service-status timer (5s) so we don't open a second
+    // long-running subprocess. The pseudo-subscribe call below is a hint to
+    // the daemon and a no-op on D-Bus until #116 ships.
+    property var tasksList: []
+    property int runningTaskCount: 0
+    property var taskLogBuffers: ({})
+    property bool tasksFetchInFlight: false
+
+    readonly property var tasksBackend: ({
+        get tasks() { return root.tasksList },
+        get runningTaskCount() { return root.runningTaskCount },
+        cancelTask: function(id) { root.cancelBackgroundTask(id) },
+        openConversation: function(id) { root.openTaskConversation(id) },
+        refreshLogs: function(id) { root.refreshTaskLogs(id) },
+        taskLogs: function(id) { return root.taskLogBuffers[String(id || "")] || "" }
+    })
+
+    function refreshBackgroundTasks() {
+        if (tasksFetchInFlight) {
+            return
+        }
+        tasksFetchInFlight = true
+        runCommand(
+            helperCommand("tasks-list --include-finished"),
+            function(stdout) {
+                tasksFetchInFlight = false
+                let payload
+                try {
+                    payload = JSON.parse(stdout)
+                } catch (e) {
+                    return
+                }
+                if (payload && !payload.error) {
+                    tasksList = payload.tasks || []
+                    runningTaskCount = Number(payload.running_count || 0)
+                }
+            },
+            function(_stderr) {
+                tasksFetchInFlight = false
+            },
+            false
+        )
+    }
+
+    function subscribeBackgroundTasksHint() {
+        // Fire-and-forget: the daemon subscribes this connection to Task*
+        // events. We don't have a persistent connection (the helper exits
+        // after each call), so polling is still required — but registering
+        // intent is cheap and lights up server-side reconnect-replay.
+        runCommand(
+            helperCommand("tasks-subscribe"),
+            function(_out) {},
+            function(_err) {},
+            false
+        )
+    }
+
+    function cancelBackgroundTask(taskId) {
+        const id = String(taskId || "").trim()
+        if (id.length === 0) {
+            return
+        }
+        runCommand(
+            helperCommand("tasks-cancel " + shellEscape(id)),
+            function(_out) {
+                appendStatus("Cancelling task " + id)
+                refreshBackgroundTasks()
+            },
+            function(stderr) {
+                appendStatus("Cancel task failed: " + stderr)
+            },
+            false
+        )
+    }
+
+    function refreshTaskLogs(taskId) {
+        const id = String(taskId || "").trim()
+        if (id.length === 0) {
+            return
+        }
+        runCommand(
+            helperCommand("tasks-logs " + shellEscape(id)),
+            function(stdout) {
+                let payload
+                try {
+                    payload = JSON.parse(stdout)
+                } catch (e) {
+                    return
+                }
+                if (!payload || payload.error) {
+                    return
+                }
+                const entries = payload.entries || []
+                const lines = []
+                for (let i = 0; i < entries.length; i++) {
+                    const entry = entries[i]
+                    const ts = entry.timestamp ? String(entry.timestamp) : ""
+                    const level = String(entry.level || "info")
+                    const msg = String(entry.message || "")
+                    lines.push("[" + level + "] " + ts + " " + msg)
+                }
+                // QV4 GC HAZARD — assign new object to QML property var (a GC root)
+                // before keying into it. See the GC hazard block above.
+                taskLogBuffers = Object.assign({}, taskLogBuffers)
+                taskLogBuffers[id] = lines.join("\n")
+            },
+            function(_stderr) {},
+            false
+        )
+    }
+
+    function openTaskConversation(taskId) {
+        const id = String(taskId || "").trim()
+        if (id.length === 0) {
+            return
+        }
+        const target = findConversationIdForTask(id)
+        if (target.length === 0) {
+            appendStatus("Task " + id + " has no associated conversation")
+            return
+        }
+        const idx = conversationIndexById(target)
+        if (idx >= 0) {
+            switchConversation(idx)
+        } else {
+            // The task's conversation isn't in our cached list — set the
+            // id directly and let refreshConversation hydrate the rest.
+            conversationId = target
+            transcriptEntries = []
+            refreshConversation()
+            reloadConversationList()
+        }
+    }
+
+    function findConversationIdForTask(taskId) {
+        for (let i = 0; i < tasksList.length; i++) {
+            const task = tasksList[i]
+            if (!task || task.id !== taskId) {
+                continue
+            }
+            const kind = task.kind || {}
+            if (kind.conversation && kind.conversation.conversation_id) {
+                return String(kind.conversation.conversation_id)
+            }
+            if (kind.subagent && kind.subagent.conversation_id) {
+                return String(kind.subagent.conversation_id)
+            }
+            if (kind.standalone && kind.standalone.conversation_id) {
+                return String(kind.standalone.conversation_id)
+            }
+        }
+        return ""
+    }
+
+    signal tasksBadgeClicked()
+
     function toImageSource(pathValue) {
         const value = String(pathValue || "").trim()
         if (value.length === 0) {
@@ -1418,6 +1580,14 @@ Item {
     }
 
     Timer {
+        id: tasksPollTimer
+        interval: 5000
+        repeat: true
+        running: true
+        onTriggered: root.refreshBackgroundTasks()
+    }
+
+    Timer {
         id: lateResponsePollTimer
         interval: 5000
         repeat: true
@@ -1502,6 +1672,16 @@ Item {
                 font.bold: true
                 color: root.themeTextColor
                 Layout.fillWidth: true
+            }
+
+            // Tasks badge (adele-kde#7). Hidden when no running tasks; the
+            // click signal is bubbled up to the plasmoid root so the
+            // separate process-manager Window can toggle visible.
+            TasksBadge {
+                id: headerTasksBadge
+                backend: root.tasksBackend
+                Layout.alignment: Qt.AlignVCenter
+                onClicked: root.tasksBadgeClicked()
             }
         }
 
@@ -1960,6 +2140,10 @@ Item {
             // service is up; the selector stays empty on daemons that don't
             // ship multi-connection yet (which is fine).
             reloadModelList()
+            // Subscribe + pull the initial task page so the header badge
+            // appears on first paint when work is already in flight.
+            subscribeBackgroundTasksHint()
+            refreshBackgroundTasks()
         })
     }
 }

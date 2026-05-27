@@ -52,6 +52,11 @@ PlasmoidItem {
             onLoaded: {
                 if (item) {
                     item.panelMode = true
+                    if (typeof item.tasksBadgeClicked !== "undefined") {
+                        item.tasksBadgeClicked.connect(function() {
+                            tasksWindowLoader.show()
+                        })
+                    }
                 }
             }
             onStatusChanged: {
@@ -59,6 +64,37 @@ PlasmoidItem {
                     sourceIndex += 1
                     source = sourceCandidates[sourceIndex]
                 }
+            }
+        }
+    }
+
+    // Separate process-manager window (adele-kde#7). The popup is
+    // height-constrained, so the tasks list lives in its own window.
+    // Loaded lazily from the shared module path with a fallback to the
+    // desktopchat copy.
+    Loader {
+        id: tasksWindowLoader
+        active: true
+        property int sourceIndex: 0
+        readonly property var sourceCandidates: [
+            "file://" + normalizedDataHome + "/desktop-assistant/chat-module/ui/TasksWindow.qml",
+            Qt.resolvedUrl("../../../org.desktopassistant.desktopchat/contents/ui/TasksWindow.qml")
+        ]
+        source: sourceCandidates[sourceIndex]
+        function show() {
+            if (item) {
+                if (chatViewLoader.item && chatViewLoader.item.tasksBackend) {
+                    item.backend = chatViewLoader.item.tasksBackend
+                }
+                item.visible = true
+                if (typeof item.raise === "function") item.raise()
+                if (typeof item.requestActivate === "function") item.requestActivate()
+            }
+        }
+        onStatusChanged: {
+            if (status === Loader.Error && sourceIndex < sourceCandidates.length - 1) {
+                sourceIndex += 1
+                source = sourceCandidates[sourceIndex]
             }
         }
     }

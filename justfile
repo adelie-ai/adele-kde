@@ -10,6 +10,12 @@ shared_chat_module_src := "shared/chat-module"
 shared_chat_module_dst := env_var_or_default("XDG_DATA_HOME", env_var("HOME") + "/.local/share") + "/desktop-assistant/chat-module"
 shared_chatview_src := "shared/chat-module/ui/ChatView.qml"
 desktop_chatview_fallback := "plasmoid/org.desktopassistant.desktopchat/contents/ui/ChatView.qml"
+shared_tasks_view_src := "shared/chat-module/ui/TasksView.qml"
+shared_tasks_window_src := "shared/chat-module/ui/TasksWindow.qml"
+shared_tasks_badge_src := "shared/chat-module/ui/TasksBadge.qml"
+desktop_tasks_view_fallback := "plasmoid/org.desktopassistant.desktopchat/contents/ui/TasksView.qml"
+desktop_tasks_window_fallback := "plasmoid/org.desktopassistant.desktopchat/contents/ui/TasksWindow.qml"
+desktop_tasks_badge_fallback := "plasmoid/org.desktopassistant.desktopchat/contents/ui/TasksBadge.qml"
 
 # List available commands
 default: list
@@ -24,17 +30,23 @@ chat-module-sync:
     rm -rf "{{shared_chat_module_dst}}"
     cp -a "{{shared_chat_module_src}}" "{{shared_chat_module_dst}}"
 
-# Sync shared ChatView into desktop plasmoid fallback copy
+# Sync shared ChatView + Tasks*.qml into desktop plasmoid fallback copies
 chatview-sync:
     [ -f "{{shared_chatview_src}}" ] || (echo "Missing shared ChatView: {{shared_chatview_src}}" >&2; exit 1)
     mkdir -p "$(dirname '{{desktop_chatview_fallback}}')"
     cp -a "{{shared_chatview_src}}" "{{desktop_chatview_fallback}}"
+    cp -a "{{shared_tasks_view_src}}" "{{desktop_tasks_view_fallback}}"
+    cp -a "{{shared_tasks_window_src}}" "{{desktop_tasks_window_fallback}}"
+    cp -a "{{shared_tasks_badge_src}}" "{{desktop_tasks_badge_fallback}}"
 
-# Verify desktop plasmoid fallback ChatView matches shared ChatView
+# Verify desktop plasmoid fallback copies match shared sources
 chatview-verify:
     [ -f "{{shared_chatview_src}}" ] || (echo "Missing shared ChatView: {{shared_chatview_src}}" >&2; exit 1)
     [ -f "{{desktop_chatview_fallback}}" ] || (echo "Missing fallback ChatView: {{desktop_chatview_fallback}}" >&2; exit 1)
     cmp -s "{{shared_chatview_src}}" "{{desktop_chatview_fallback}}" || (echo "ChatView drift detected: run 'just chatview-sync'" >&2; exit 1)
+    cmp -s "{{shared_tasks_view_src}}" "{{desktop_tasks_view_fallback}}" || (echo "TasksView drift detected: run 'just chatview-sync'" >&2; exit 1)
+    cmp -s "{{shared_tasks_window_src}}" "{{desktop_tasks_window_fallback}}" || (echo "TasksWindow drift detected: run 'just chatview-sync'" >&2; exit 1)
+    cmp -s "{{shared_tasks_badge_src}}" "{{desktop_tasks_badge_fallback}}" || (echo "TasksBadge drift detected: run 'just chatview-sync'" >&2; exit 1)
 
 # Install all KDE Plasma widgets for the current user
 widget-install:
