@@ -8,6 +8,8 @@ import org.kde.plasma.core as PlasmaCore
 import org.kde.plasma.components as PlasmaComponents
 import org.kde.plasma.plasma5support as Plasma5Support
 
+import "LinkSafety.js" as LinkSafety
+
 Item {
     id: root
     clip: true
@@ -1941,7 +1943,12 @@ Item {
                                 selectedTextColor: (isAssistant || isTool) ? root.themeHighlightedTextColor : root.themeTextColor
                                 selectionColor: (isAssistant || isTool) ? root.themeHighlightColor : root.themeBackgroundColor
                                 onLinkActivated: function(link) {
-                                    Qt.openUrlExternally(link)
+                                    // #11: assistant messages are MarkdownText and
+                                    // a hostile daemon/LLM could embed
+                                    // javascript:, magnet:, file:, ... — gate on
+                                    // a scheme allowlist before handing the URL
+                                    // to the user's system handler.
+                                    LinkSafety.openLinkSafely(link, Qt.openUrlExternally)
                                 }
                             }
                             }
