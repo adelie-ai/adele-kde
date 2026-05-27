@@ -186,6 +186,19 @@ uninstall:
     just widget-remove
     just kcm-cleanup
 
+# Run Python unit tests
+test-python:
+    ./tests/run_python_tests.sh
+
+# Run QML autotests via qmltestrunner
+test-qml:
+    ./tests/run_qml_tests.sh
+
+# Run all tests
+test:
+    just test-python
+    just test-qml
+
 # Clean build artifacts
 clean:
     rm -rf {{kcm_build_dir}} build/kde-kcm-system
