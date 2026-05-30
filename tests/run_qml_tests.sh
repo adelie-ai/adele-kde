@@ -8,6 +8,13 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
 
+# Run headless by default. The TestCases use `when: windowShown`, so without an
+# offscreen platform each one opens a REAL window: on a running Plasma session
+# that pops windows onto the developer's desktop and can stall on window
+# exposure (and it's what headless CI needs anyway). Override to watch the
+# windows, e.g. `QT_QPA_PLATFORM=xcb ./tests/run_qml_tests.sh`.
+export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
+
 # Prefer the Qt6 qmltestrunner — KDE Plasma 6 is the target runtime, and
 # the legacy `/usr/bin/qmltestrunner` symlink points at the Qt5 build on
 # many distros (Arch / CachyOS in particular).
