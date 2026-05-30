@@ -54,8 +54,8 @@ Kirigami.FormLayout {
         id: connectionNameField
         Kirigami.FormData.label: i18n("Adelie connection")
         placeholderText: i18n("(empty uses Settings default)")
-        ToolTip.visible: hovered
-        ToolTip.text: i18n("Set a named connection (for example: local, my-cluster)")
+        QQC2.ToolTip.visible: hovered
+        QQC2.ToolTip.text: i18n("Set a named connection (for example: local, my-cluster)")
     }
 
     QQC2.Label {
@@ -70,8 +70,8 @@ Kirigami.FormLayout {
         id: userAvatarPathField
         Kirigami.FormData.label: i18n("User avatar path")
         placeholderText: i18n("/home/you/.face.icon or file:///…")
-        ToolTip.visible: hovered
-        ToolTip.text: i18n("Leave empty to use your system user avatar")
+        QQC2.ToolTip.visible: hovered
+        QQC2.ToolTip.text: i18n("Leave empty to use your system user avatar")
     }
 
     QQC2.Label {
@@ -90,8 +90,8 @@ Kirigami.FormLayout {
         stepSize: 1
         editable: true
         value: 7
-        ToolTip.visible: hovered
-        ToolTip.text: i18n("Hide previous sessions older than this many days (0 disables filtering)")
+        QQC2.ToolTip.visible: hovered
+        QQC2.ToolTip.text: i18n("Hide previous sessions older than this many days (0 disables filtering)")
     }
 
     QQC2.SpinBox {
@@ -102,8 +102,8 @@ Kirigami.FormLayout {
         stepSize: 5
         editable: true
         value: 50
-        ToolTip.visible: hovered
-        ToolTip.text: i18n("Maximum recent messages to load in chat view (0 loads full conversation)")
+        QQC2.ToolTip.visible: hovered
+        QQC2.ToolTip.text: i18n("Maximum recent messages to load in chat view (0 loads full conversation)")
     }
 
     Item {
