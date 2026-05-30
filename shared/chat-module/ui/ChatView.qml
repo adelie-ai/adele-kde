@@ -2006,8 +2006,8 @@ Item {
 
             QQC2.ToolButton {
                 text: "⟳"
-                ToolTip.text: "Refresh model list"
-                ToolTip.visible: hovered
+                QQC2.ToolTip.text: "Refresh model list"
+                QQC2.ToolTip.visible: hovered
                 enabled: !modelListLoading
                 onClicked: reloadModelList()
             }
