@@ -215,6 +215,12 @@ test:
     just test-python
     just test-qml
 
+# Smoke test to run after a change: widgets load (QML) + the widget client
+# connects to the daemon over D-Bus. The D-Bus leg needs the daemon running.
+smoke:
+    just test-qml
+    ./tests/smoke/dbus_smoke.sh
+
 # Clean build artifacts
 clean:
     rm -rf {{kcm_build_dir}} build/kde-kcm-system
