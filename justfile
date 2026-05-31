@@ -224,3 +224,30 @@ smoke:
 # Clean build artifacts
 clean:
     rm -rf {{kcm_build_dir}} build/kde-kcm-system
+
+# --- Local verification ("local CI") -----------------------------------------
+# Run locally instead of GitHub Actions. `install-hooks` wires `check` into a
+# git pre-push hook so it runs automatically before every push. (Not Rust, so
+# there's no cargo gate — this runs the QML/C++/Python checks that apply here.)
+
+# Full local gate: shared-QML drift, qmllint, KCM C++ build, Python + QML tests
+check: chatview-verify lint kcm-build test
+
+# Lint every QML file (production + tests) with qmllint; excludes build artifacts
+lint:
+    find . -name '*.qml' -not -path './build/*' -print0 | xargs -0 -r qmllint
+
+# Smoke / integration test — needs the daemon running for the D-Bus leg
+test-integration:
+    just smoke
+
+# Rebase onto latest origin/main then run the gate (catches clean-rebase-but-broken-build)
+premerge:
+    git fetch origin
+    git rebase origin/main
+    just check
+
+# Install git hooks (pre-push runs `just check`). Local config; run once per clone.
+install-hooks:
+    git config core.hooksPath .githooks
+    @echo "pre-push hook active — bypass once with: git push --no-verify"
