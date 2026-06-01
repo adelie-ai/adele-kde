@@ -57,6 +57,21 @@ Item {
         return s === "running" || s === "pending"
     }
 
+    // Short label for the task kind, mirroring adele-gtk's kind badge.
+    // `task.kind` is the externally-tagged serde shape of api-model's
+    // `TaskKind` (rename_all = "snake_case"), i.e. one of:
+    //   { conversation: { conversation_id } }            -> "Chat"
+    //   { subagent: { parent_task_id, conversation_id, name } } -> "Subagent"
+    //   { standalone: { name, conversation_id } }        -> "Agent"
+    // Unknown / missing kinds return "" so the badge stays hidden.
+    function kindLabel(task) {
+        const kind = (task && task.kind) || {}
+        if (kind.conversation) return "Chat"
+        if (kind.subagent) return "Subagent"
+        if (kind.standalone) return "Agent"
+        return ""
+    }
+
     onSelectedTaskIdChanged: {
         if (selectedTaskId.length > 0 && backend && typeof backend.refreshLogs === "function") {
             backend.refreshLogs(selectedTaskId)
@@ -102,11 +117,25 @@ Item {
 
                         contentItem: ColumnLayout {
                             spacing: 1
-                            QQC2.Label {
+                            // Title line: a dim kind badge ("Chat" / "Subagent"
+                            // / "Agent") + the title, so the row says what kind
+                            // of work this is, not just its name. Parity with
+                            // adele-gtk#58.
+                            RowLayout {
                                 Layout.fillWidth: true
-                                text: String(taskDelegate.modelData.title || taskDelegate.modelData.id || "?")
-                                elide: Text.ElideRight
-                                font.bold: root.isRunningStatus(taskDelegate.modelData.status)
+                                spacing: 4
+                                QQC2.Label {
+                                    text: root.kindLabel(taskDelegate.modelData)
+                                    visible: text.length > 0
+                                    color: Kirigami.Theme.disabledTextColor
+                                    font.pointSize: Kirigami.Theme.smallFont.pointSize
+                                }
+                                QQC2.Label {
+                                    Layout.fillWidth: true
+                                    text: String(taskDelegate.modelData.title || taskDelegate.modelData.id || "?")
+                                    elide: Text.ElideRight
+                                    font.bold: root.isRunningStatus(taskDelegate.modelData.status)
+                                }
                             }
                             QQC2.Label {
                                 Layout.fillWidth: true
