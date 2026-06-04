@@ -19,6 +19,30 @@ PlasmoidItem {
     switchHeight: 560
     Plasmoid.status: PlasmaCore.Types.ActiveStatus
 
+    // The chat view lives inside the (lazily-instantiated) fullRepresentation,
+    // so the top-level contextual action below can't reach it directly. The
+    // loader publishes its item here on load and clears it on teardown.
+    property Item chatView: null
+
+    // "Enable 'Hey Adele'" lives in the plasmoid's right-click menu
+    // (adele-kde#29). Visible only once the popup has been opened and the voice
+    // daemon is on the bus, so it never dangles as a dead toggle. The chat view
+    // owns the D-Bus plumbing; this action just reflects/forwards it.
+    Plasmoid.contextualActions: [
+        PlasmaCore.Action {
+            text: "Enable “Hey Adele”"
+            icon.name: "audio-input-microphone"
+            checkable: true
+            visible: root.chatView ? root.chatView.voiceAvailable : false
+            checked: root.chatView ? root.chatView.voiceEnabled : false
+            onTriggered: {
+                if (root.chatView) {
+                    root.chatView.setVoiceEnabled(checked)
+                }
+            }
+        }
+    ]
+
     compactRepresentation: PlasmaComponents.ToolButton {
         text: "Adele AI"
         icon.source: Qt.resolvedUrl("../images/adele.png")
@@ -52,6 +76,7 @@ PlasmoidItem {
             onLoaded: {
                 if (item) {
                     item.panelMode = true
+                    root.chatView = item
                     if (typeof item.tasksBadgeClicked !== "undefined") {
                         item.tasksBadgeClicked.connect(function() {
                             tasksWindowLoader.show()
@@ -63,6 +88,11 @@ PlasmoidItem {
                 if (status === Loader.Error && sourceIndex < sourceCandidates.length - 1) {
                     sourceIndex += 1
                     source = sourceCandidates[sourceIndex]
+                }
+            }
+            Component.onDestruction: {
+                if (root.chatView === item) {
+                    root.chatView = null
                 }
             }
         }
