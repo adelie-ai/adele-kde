@@ -312,6 +312,238 @@ Item {
 
     signal tasksBadgeClicked()
 
+    // --- Voice service (adele-kde#29, repo adelie-ai/voice) -------------------
+    // The plasmoid is just another client of the voice daemon
+    // (org.desktopAssistant.Voice — a DISTINCT bus name from the orchestrator).
+    // We never receive its StateChanged signal directly: the Python helper is a
+    // one-shot subprocess (it exits after each gdbus call), exactly like the
+    // background-tasks path. So we POLL `voice-status` on the same 5s cadence;
+    // that one call folds in availability + state + enabled + current voice.
+    //
+    // `voiceAvailable` gates the whole UI: when the service has no bus owner
+    // (not installed / not running / masked) every voice control disables
+    // cleanly rather than surfacing a ServiceUnknown D-Bus error.
+    property bool voiceAvailable: false
+    property string voiceState: "Idle"   // Idle | Listening | Processing | Speaking
+    property bool voiceEnabled: false
+    property string voiceId: ""
+    property int voiceSpeakerId: -1
+    property var voiceChoices: []
+    property bool voiceStatusInFlight: false
+    property bool voiceVoicesLoaded: false
+
+    readonly property string voiceStateLabel: {
+        if (!voiceAvailable) return ""
+        switch (voiceState) {
+            case "Listening": return "Listening…"
+            case "Processing": return "Thinking…"
+            case "Speaking": return "Speaking…"
+            default: return "Idle"
+        }
+    }
+
+    // Icon that tracks pipeline state so the mic button reads at a glance.
+    readonly property string voiceStateIcon: {
+        switch (voiceState) {
+            case "Listening": return "audio-input-microphone"
+            case "Processing": return "view-refresh-symbolic"
+            case "Speaking": return "audio-volume-high"
+            default: return "audio-input-microphone-muted"
+        }
+    }
+
+    function refreshVoiceStatus() {
+        if (voiceStatusInFlight) {
+            return
+        }
+        voiceStatusInFlight = true
+        runCommand(
+            helperCommand("voice-status"),
+            function(stdout) {
+                voiceStatusInFlight = false
+                let payload
+                try {
+                    payload = JSON.parse(stdout)
+                } catch (e) {
+                    return
+                }
+                if (!payload || payload.error) {
+                    voiceAvailable = false
+                    return
+                }
+                const nowAvailable = payload.available === true
+                voiceAvailable = nowAvailable
+                if (!nowAvailable) {
+                    // Service went away — forget any cached voice list so it is
+                    // re-fetched fresh when it comes back.
+                    voiceVoicesLoaded = false
+                    return
+                }
+                if (typeof payload.state === "string") {
+                    voiceState = payload.state
+                }
+                if (typeof payload.enabled === "boolean") {
+                    voiceEnabled = payload.enabled
+                }
+                if (payload.voice && typeof payload.voice === "object") {
+                    voiceId = String(payload.voice.voice_id || "")
+                    voiceSpeakerId = Number(payload.voice.speaker_id)
+                    if (!Number.isFinite(voiceSpeakerId)) {
+                        voiceSpeakerId = -1
+                    }
+                }
+                // Lazily pull the installed-voice list once the service is up.
+                if (!voiceVoicesLoaded) {
+                    reloadVoiceList()
+                }
+            },
+            function(_stderr) {
+                voiceStatusInFlight = false
+                voiceAvailable = false
+            },
+            false
+        )
+    }
+
+    // Build a short, legible label for the voice switcher: "Amy (en_US)".
+    function buildVoiceLabel(entry) {
+        const name = String(entry.display_name || entry.voice_id || "")
+        const lang = String(entry.language || "")
+        if (lang.length === 0) return name
+        return name + " (" + lang + ")"
+    }
+
+    function reloadVoiceList() {
+        runCommand(
+            helperCommand("voice-list-voices"),
+            function(stdout) {
+                let payload
+                try {
+                    payload = JSON.parse(stdout)
+                } catch (e) {
+                    return
+                }
+                if (!payload || payload.error) {
+                    return
+                }
+                voiceVoicesLoaded = true
+                const entries = payload.voices || []
+                const choices = []
+                for (let i = 0; i < entries.length; i++) {
+                    const entry = entries[i]
+                    if (!entry || !entry.voice_id) {
+                        continue
+                    }
+                    choices.push({
+                        voice_id: String(entry.voice_id),
+                        display_name: String(entry.display_name || entry.voice_id),
+                        language: String(entry.language || ""),
+                        num_speakers: Number(entry.num_speakers || 1),
+                        label: buildVoiceLabel(entry),
+                    })
+                }
+                voiceChoices = choices
+            },
+            function(_stderr) {},
+            false
+        )
+    }
+
+    function voiceIndexById(id) {
+        for (let i = 0; i < voiceChoices.length; i++) {
+            if (voiceChoices[i].voice_id === id) {
+                return i
+            }
+        }
+        return -1
+    }
+
+    function voiceSpeakerCount(id) {
+        const idx = voiceIndexById(id)
+        return idx >= 0 ? Math.max(1, Number(voiceChoices[idx].num_speakers || 1)) : 1
+    }
+
+    // Change the active TTS voice. `speaker` is -1 for single-speaker / default.
+    function selectVoice(voiceIdValue, speaker) {
+        const id = String(voiceIdValue || "").trim()
+        if (id.length === 0 || !voiceAvailable) {
+            return
+        }
+        let args = "voice-set-voice " + shellEscape(id)
+        if (Number.isFinite(speaker) && speaker >= 0) {
+            args += " --speaker " + speaker
+        }
+        runCommand(
+            helperCommand(args),
+            function(_stdout) {
+                voiceId = id
+                voiceSpeakerId = (Number.isFinite(speaker) && speaker >= 0) ? speaker : -1
+                appendStatus("Voice set to " + id)
+            },
+            function(stderr) {
+                appendStatus("Set voice failed: " + stderr)
+            },
+            false
+        )
+    }
+
+    // Start an explicit dictation turn (push-to-talk). Works even when the
+    // wake word is off. Optimistically reflect Listening so the UI responds
+    // immediately; the next poll confirms the real pipeline state.
+    function voicePushToTalk() {
+        if (!voiceAvailable) {
+            return
+        }
+        if (voiceState === "Speaking") {
+            // Barge-in: stop playback first so PTT isn't fighting the speaker.
+            voiceStopSpeaking()
+        }
+        runCommand(
+            helperCommand("voice-push-to-talk"),
+            function(_stdout) {
+                voiceState = "Listening"
+                refreshVoiceStatus()
+            },
+            function(stderr) {
+                appendStatus("Push-to-talk failed: " + stderr)
+            },
+            false
+        )
+    }
+
+    function voiceStopSpeaking() {
+        if (!voiceAvailable) {
+            return
+        }
+        runCommand(
+            helperCommand("voice-stop-speaking"),
+            function(_stdout) { refreshVoiceStatus() },
+            function(_stderr) {},
+            false
+        )
+    }
+
+    // Toggle resident "Hey Adele" wake-word listening. Optimistically flips the
+    // local flag so the checkbox feels instant; the poll reconciles on error.
+    function setVoiceEnabled(enabled) {
+        if (!voiceAvailable) {
+            return
+        }
+        const target = enabled === true
+        runCommand(
+            helperCommand("voice-set-enabled " + (target ? "true" : "false")),
+            function(_stdout) {
+                voiceEnabled = target
+                appendStatus(target ? "“Hey Adele” enabled" : "“Hey Adele” disabled")
+            },
+            function(stderr) {
+                appendStatus("Toggle “Hey Adele” failed: " + stderr)
+                refreshVoiceStatus()
+            },
+            false
+        )
+    }
+
     function toImageSource(pathValue) {
         const value = String(pathValue || "").trim()
         if (value.length === 0) {
@@ -1589,6 +1821,19 @@ Item {
         onTriggered: root.refreshBackgroundTasks()
     }
 
+    // Poll the voice service for availability + pipeline state. The helper is
+    // one-shot (no persistent StateChanged subscription), so polling is how the
+    // Idle/Listening/Processing/Speaking indicator stays current. A faster
+    // 1.5s cadence keeps the mic button feeling live during a dictation turn
+    // without a second long-running subprocess.
+    Timer {
+        id: voicePollTimer
+        interval: 1500
+        repeat: true
+        running: true
+        onTriggered: root.refreshVoiceStatus()
+    }
+
     Timer {
         id: lateResponsePollTimer
         interval: 5000
@@ -2013,8 +2258,107 @@ Item {
             }
         }
 
+        // TTS voice switcher (adele-kde#29). Hidden entirely unless the voice
+        // service is up AND at least one voice is installed, so it never shows
+        // an empty/dead control. The speaker picker only appears for
+        // multi-speaker voices (num_speakers > 1).
+        RowLayout {
+            id: voiceSwitcherRow
+            Layout.fillWidth: true
+            visible: root.voiceAvailable && root.voiceChoices.length > 0 && !root.ultraNarrow
+            spacing: 6
+
+            QQC2.Label {
+                text: "Voice:"
+                color: root.themeDisabledTextColor
+                Layout.alignment: Qt.AlignVCenter
+            }
+
+            QQC2.ComboBox {
+                id: voiceSelectorCombo
+                Layout.fillWidth: true
+                enabled: !root.busy && root.voiceChoices.length > 0
+                model: {
+                    const labels = []
+                    for (let i = 0; i < root.voiceChoices.length; i++) {
+                        labels.push(root.voiceChoices[i].label)
+                    }
+                    return labels
+                }
+                currentIndex: Math.max(0, root.voiceIndexById(root.voiceId))
+                onActivated: function(index) {
+                    if (index < 0 || index >= root.voiceChoices.length) {
+                        return
+                    }
+                    const entry = root.voiceChoices[index]
+                    // Switching voice resets the speaker to default (-1); a
+                    // multi-speaker voice then lets the user pick a speaker.
+                    root.selectVoice(entry.voice_id, -1)
+                }
+
+                delegate: QQC2.ItemDelegate {
+                    width: parent ? parent.width : implicitWidth
+                    text: voiceText.text
+                    contentItem: QQC2.Label {
+                        id: voiceText
+                        text: voiceSelectorCombo.model[index]
+                        color: root.themeTextColor
+                        elide: Text.ElideRight
+                    }
+                    highlighted: voiceSelectorCombo.highlightedIndex === index
+                }
+            }
+
+            // Multi-speaker selector — only meaningful for voices that ship
+            // more than one speaker (e.g. VCTK). Speaker ids are 0-based.
+            QQC2.ComboBox {
+                id: voiceSpeakerCombo
+                visible: root.voiceSpeakerCount(root.voiceId) > 1
+                Layout.preferredWidth: 110
+                enabled: !root.busy
+                model: {
+                    const count = root.voiceSpeakerCount(root.voiceId)
+                    const labels = []
+                    for (let i = 0; i < count; i++) {
+                        labels.push("Speaker " + i)
+                    }
+                    return labels
+                }
+                currentIndex: root.voiceSpeakerId >= 0 ? root.voiceSpeakerId : 0
+                onActivated: function(index) {
+                    root.selectVoice(root.voiceId, index)
+                }
+            }
+        }
+
         RowLayout {
             Layout.fillWidth: true
+
+            // Push-to-talk / record button (adele-kde#29). Starts a dictation
+            // turn via PushToTalk (works even with the wake word off). The icon
+            // and tooltip track the live pipeline state. Hidden when the voice
+            // service isn't available so it never dangles as a dead control.
+            QQC2.ToolButton {
+                id: micButton
+                visible: root.voiceAvailable
+                enabled: root.voiceAvailable && !root.busy
+                Layout.alignment: Qt.AlignTop
+                icon.name: root.voiceStateIcon
+                // Highlight while the mic is actually open.
+                highlighted: root.voiceState === "Listening"
+                display: QQC2.AbstractButton.IconOnly
+                QQC2.ToolTip.text: root.voiceState === "Speaking"
+                    ? "Stop speaking"
+                    : ("Push to talk" + (root.voiceStateLabel.length > 0 ? " — " + root.voiceStateLabel : ""))
+                QQC2.ToolTip.visible: hovered
+                onClicked: {
+                    if (root.voiceState === "Speaking") {
+                        root.voiceStopSpeaking()
+                    } else {
+                        root.voicePushToTalk()
+                    }
+                }
+            }
 
             QQC2.ScrollView {
                 id: promptInputScroll
@@ -2151,6 +2495,9 @@ Item {
             // appears on first paint when work is already in flight.
             subscribeBackgroundTasksHint()
             refreshBackgroundTasks()
+            // Probe the voice service so the mic button + voice switcher paint
+            // correctly (or stay hidden) on first show.
+            refreshVoiceStatus()
         })
     }
 }

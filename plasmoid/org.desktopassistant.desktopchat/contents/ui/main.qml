@@ -20,6 +20,26 @@ PlasmoidItem {
         ? PlasmaCore.Types.HiddenStatus
         : PlasmaCore.Types.ActiveStatus
 
+    // "Enable 'Hey Adele'" lives in the plasmoid's right-click menu
+    // (adele-kde#29). It mirrors the voice service's resident wake-word state
+    // and is only visible when the voice daemon is actually on the bus, so it
+    // never dangles as a dead toggle when voice isn't installed. The chat view
+    // owns the D-Bus plumbing; this action just reflects/forwards it.
+    Plasmoid.contextualActions: [
+        PlasmaCore.Action {
+            text: "Enable “Hey Adele”"
+            icon.name: "audio-input-microphone"
+            checkable: true
+            visible: chatViewLoader.item ? chatViewLoader.item.voiceAvailable : false
+            checked: chatViewLoader.item ? chatViewLoader.item.voiceEnabled : false
+            onTriggered: {
+                if (chatViewLoader.item) {
+                    chatViewLoader.item.setVoiceEnabled(checked)
+                }
+            }
+        }
+    ]
+
     Loader {
         id: chatViewLoader
         anchors.fill: parent

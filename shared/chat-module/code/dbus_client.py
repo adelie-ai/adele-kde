@@ -28,6 +28,13 @@ PATH = "/org/desktopAssistant/Conversations"
 IFACE = "org.desktopAssistant.Conversations"
 SETTINGS_PATH_DBUS = "/org/desktopAssistant/Settings"
 SETTINGS_IFACE = "org.desktopAssistant.Settings"
+# The voice daemon (repo adelie-ai/voice) owns a DISTINCT well-known name from
+# the orchestrator. The plasmoid is just another client of it: it calls these
+# methods over the session bus and degrades gracefully (controls disabled)
+# when the name has no owner (service not installed / not running).
+VOICE_SERVICE = "org.desktopAssistant.Voice"
+VOICE_PATH = "/org/desktopAssistant/Voice"
+VOICE_IFACE = "org.desktopAssistant.Voice"
 DBUS_DAEMON_DEST = "org.freedesktop.DBus"
 DBUS_DAEMON_PATH = "/org/freedesktop/DBus"
 DBUS_DAEMON_IFACE = "org.freedesktop.DBus"
@@ -203,6 +210,26 @@ def _run_gdbus_settings(method: str, *args: str) -> Any:
         *args,
     ]
     return _run_command(command, f"gdbus settings call failed: {method}")
+
+
+def _run_gdbus_voice(method: str, *args: str) -> Any:
+    # The voice daemon is always reached over D-Bus (it's a local session-bus
+    # service), regardless of which transport the chat connection uses. We do
+    # NOT route voice through the WebSocket orchestrator — it's a separate
+    # service with its own well-known name.
+    command = [
+        "gdbus",
+        "call",
+        "--session",
+        "--dest",
+        VOICE_SERVICE,
+        "--object-path",
+        VOICE_PATH,
+        "--method",
+        f"{VOICE_IFACE}.{method}",
+        *args,
+    ]
+    return _run_command(command, f"gdbus voice call failed: {method}")
 
 
 def _ws_connect(ws_url: str, token: str, timeout_sec: float = DEFAULT_WS_TIMEOUT_SEC) -> socket.socket:
@@ -1059,6 +1086,124 @@ def apply_task_event(
     return next_tasks, _count_running(next_tasks)
 
 
+# --- Voice service (repo adelie-ai/voice, org.desktopAssistant.Voice) --------
+# The chat plasmoid is just another client of the voice daemon. Each function
+# below shells out to `gdbus call` against the Voice interface and returns a
+# plain Python value the QML side serializes to JSON. Callers should first
+# check `voice_available()` (NameHasOwner) so the UI can disable cleanly when
+# the service isn't installed/running rather than surfacing a D-Bus error.
+
+
+def voice_available() -> bool:
+    """True when org.desktopAssistant.Voice currently has an owner on the bus.
+
+    Returns False (rather than raising) on any probe failure so the widget can
+    treat "can't tell" the same as "not running" and disable its voice UI.
+    """
+    try:
+        return _name_has_owner(VOICE_SERVICE)
+    except DbusError:
+        return False
+
+
+def voice_get_state() -> str:
+    response = _run_gdbus_voice("GetState")
+    if isinstance(response, tuple) and len(response) > 0:
+        return str(response[0])
+    return str(response)
+
+
+def voice_get_enabled() -> bool:
+    response = _run_gdbus_voice("GetEnabled")
+    if isinstance(response, tuple) and len(response) > 0:
+        return bool(response[0])
+    return bool(response)
+
+
+def voice_set_enabled(enabled: bool) -> None:
+    _run_gdbus_voice("SetEnabled", "true" if enabled else "false")
+
+
+def voice_push_to_talk() -> None:
+    _run_gdbus_voice("PushToTalk")
+
+
+def voice_stop_speaking() -> None:
+    _run_gdbus_voice("StopSpeaking")
+
+
+def voice_say_text(text: str) -> None:
+    _run_gdbus_voice("SayText", text)
+
+
+def voice_list_voices() -> list[dict[str, Any]]:
+    """Return installed TTS voices as a list of dicts.
+
+    Daemon shape is `a(sssu)` — (voice_id, display_name, language,
+    num_speakers). gdbus renders it as a 1-tuple wrapping the array.
+    """
+    response = _run_gdbus_voice("ListVoices")
+    rows = response[0] if isinstance(response, tuple) and len(response) == 1 else response
+    if not isinstance(rows, list):
+        return []
+    voices: list[dict[str, Any]] = []
+    for item in rows:
+        if not isinstance(item, (list, tuple)) or len(item) < 4:
+            continue
+        voices.append(
+            {
+                "voice_id": str(item[0]),
+                "display_name": str(item[1]),
+                "language": str(item[2]),
+                "num_speakers": int(item[3]),
+            }
+        )
+    return voices
+
+
+def voice_get_voice() -> dict[str, Any]:
+    """Return the active voice as {voice_id, speaker_id}; speaker_id -1 = unset."""
+    response = _run_gdbus_voice("GetVoice")
+    if isinstance(response, tuple) and len(response) >= 2:
+        return {"voice_id": str(response[0]), "speaker_id": int(response[1])}
+    # gdbus wraps the struct return in an outer tuple: ((id, speaker),)
+    if isinstance(response, tuple) and len(response) == 1 and isinstance(response[0], (list, tuple)):
+        inner = response[0]
+        if len(inner) >= 2:
+            return {"voice_id": str(inner[0]), "speaker_id": int(inner[1])}
+    return {"voice_id": "", "speaker_id": -1}
+
+
+def voice_set_voice(voice_id: str, speaker: int) -> None:
+    # gdbus parses a bare leading '-' as an option flag, so the negative
+    # sentinel speaker id must carry an explicit GVariant type annotation.
+    speaker_arg = f"int32 {speaker}" if speaker < 0 else str(speaker)
+    _run_gdbus_voice("SetVoice", voice_id, speaker_arg)
+
+
+def cmd_voice_status() -> int:
+    """Emit a single JSON object describing the voice service for the widget.
+
+    Always exits 0: "voice service down" is a normal, expected state the UI
+    renders as disabled controls, not an error. When the service is present we
+    also fold in the current state/enabled/voice so the widget can paint its
+    initial UI from one round-trip.
+    """
+    payload: dict[str, Any] = {"available": voice_available()}
+    if payload["available"]:
+        try:
+            payload["state"] = voice_get_state()
+            payload["enabled"] = voice_get_enabled()
+            payload["voice"] = voice_get_voice()
+        except DbusError as exc:
+            # The name had an owner a moment ago but a call failed (e.g. the
+            # daemon is mid-shutdown). Treat as unavailable for UI purposes.
+            payload["available"] = False
+            payload["error"] = str(exc)
+    print(json.dumps(payload))
+    return 0
+
+
 def cmd_status() -> int:
     payload: dict[str, Any] = {
         "selected_connection": CONNECTION_NAME,
@@ -1220,6 +1365,27 @@ def main() -> int:
     # side can route incoming events through the pure transformer
     # without re-implementing it in JS.
     subparsers.add_parser("tasks-apply-event")
+
+    # Voice service (adele-kde#29 / repo adelie-ai/voice). Always over D-Bus.
+    subparsers.add_parser("voice-status")
+    subparsers.add_parser("voice-state")
+    subparsers.add_parser("voice-get-enabled")
+
+    voice_enable_cmd = subparsers.add_parser("voice-set-enabled")
+    voice_enable_cmd.add_argument("enabled", choices=["true", "false"])
+
+    subparsers.add_parser("voice-push-to-talk")
+    subparsers.add_parser("voice-stop-speaking")
+
+    voice_say_cmd = subparsers.add_parser("voice-say")
+    voice_say_cmd.add_argument("text")
+
+    subparsers.add_parser("voice-list-voices")
+    subparsers.add_parser("voice-get-voice")
+
+    voice_set_voice_cmd = subparsers.add_parser("voice-set-voice")
+    voice_set_voice_cmd.add_argument("voice_id")
+    voice_set_voice_cmd.add_argument("--speaker", type=int, default=-1)
 
     args = parser.parse_args()
     payload = _load_widget_settings_payload()
@@ -1407,6 +1573,40 @@ def main() -> int:
                 config["effort"] = effort
             set_purpose(args.purpose, config)
             print(json.dumps({"ok": True, "purpose": args.purpose}))
+            return 0
+        if args.command == "voice-status":
+            return cmd_voice_status()
+        if args.command == "voice-state":
+            print(json.dumps({"state": voice_get_state()}))
+            return 0
+        if args.command == "voice-get-enabled":
+            print(json.dumps({"enabled": voice_get_enabled()}))
+            return 0
+        if args.command == "voice-set-enabled":
+            voice_set_enabled(args.enabled == "true")
+            print(json.dumps({"enabled": args.enabled == "true"}))
+            return 0
+        if args.command == "voice-push-to-talk":
+            voice_push_to_talk()
+            print(json.dumps({"ok": True}))
+            return 0
+        if args.command == "voice-stop-speaking":
+            voice_stop_speaking()
+            print(json.dumps({"ok": True}))
+            return 0
+        if args.command == "voice-say":
+            voice_say_text(args.text)
+            print(json.dumps({"ok": True}))
+            return 0
+        if args.command == "voice-list-voices":
+            print(json.dumps({"voices": voice_list_voices()}))
+            return 0
+        if args.command == "voice-get-voice":
+            print(json.dumps({"voice": voice_get_voice()}))
+            return 0
+        if args.command == "voice-set-voice":
+            voice_set_voice(args.voice_id, args.speaker)
+            print(json.dumps({"ok": True, "voice_id": args.voice_id, "speaker": args.speaker}))
             return 0
         raise DbusError("unknown command")
     except (DbusError, WsError) as exc:
