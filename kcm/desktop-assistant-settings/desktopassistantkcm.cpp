@@ -5,6 +5,7 @@
 #include <sys/stat.h>
 #include <QDateTime>
 
+#include <QDBusArgument>
 #include <QDBusInterface>
 #include <QDBusMessage>
 #include <QDBusReply>
@@ -17,9 +18,14 @@
 #include <QJsonObject>
 #include <QJsonValue>
 #include <QPointer>
+#include <QProcess>
 #include <QRegularExpression>
 #include <QStandardPaths>
+#include <QStringList>
+#include <QTextStream>
 #include <QUrl>
+#include <QVariantList>
+#include <QVariantMap>
 
 #include <KPluginFactory>
 
@@ -30,6 +36,11 @@ constexpr auto IFACE = "org.desktopAssistant.Settings";
 constexpr auto DEFAULT_CONNECTION_NAME = "local";
 constexpr auto DEFAULT_WS_URL = "ws://127.0.0.1:11339/ws";
 constexpr auto DEFAULT_WS_SUBJECT = "desktop-widget";
+// Voice daemon (repo adelie-ai/voice). Distinct bus name from the orchestrator.
+constexpr auto VOICE_SERVICE = "org.desktopAssistant.Voice";
+constexpr auto VOICE_PATH = "/org/desktopAssistant/Voice";
+constexpr auto VOICE_IFACE = "org.desktopAssistant.Voice";
+constexpr auto VOICE_UNIT = "adele-voice.service";
 
 QString normalizeConnector(const QString &connector)
 {
@@ -802,6 +813,10 @@ void DesktopAssistantKcm::load()
 
     loadWidgetConnectionSettings();
 
+    // Probe the voice service + read its config so the Voice tab is populated
+    // on open. This emits voiceChanged/voiceConfigChanged itself.
+    loadVoiceSettings();
+
     Q_EMIT connectorChanged();
     Q_EMIT modelChanged();
     Q_EMIT baseUrlChanged();
@@ -1314,6 +1329,518 @@ void DesktopAssistantKcm::emitConnectionSelectionChanged()
     Q_EMIT selectedConnectionWsUrlChanged();
     Q_EMIT selectedConnectionWsSubjectChanged();
     Q_EMIT selectedConnectionRemovableChanged();
+}
+
+// === Voice page (adele-kde#30) ==============================================
+
+QString DesktopAssistantKcm::voiceConfigPath()
+{
+    // The voice daemon reads ~/.config/adele-voice/config.toml (XDG config).
+    const auto configHome = QStandardPaths::writableLocation(QStandardPaths::ConfigLocation);
+    return QDir(configHome).filePath(QStringLiteral("adele-voice/config.toml"));
+}
+
+bool DesktopAssistantKcm::probeVoiceAvailable() const
+{
+    // NameHasOwner on the session bus — cheap, and (unlike constructing a
+    // QDBusInterface) it does NOT D-Bus-activate the service, so a masked /
+    // uninstalled daemon reports false instead of being spawned.
+    QDBusInterface dbusDaemon(
+        QStringLiteral("org.freedesktop.DBus"),
+        QStringLiteral("/org/freedesktop/DBus"),
+        QStringLiteral("org.freedesktop.DBus"),
+        QDBusConnection::sessionBus()
+    );
+    if (!dbusDaemon.isValid()) {
+        return false;
+    }
+    QDBusReply<bool> reply = dbusDaemon.call(QStringLiteral("NameHasOwner"), QString::fromUtf8(VOICE_SERVICE));
+    return reply.isValid() && reply.value();
+}
+
+QString DesktopAssistantKcm::runSystemctlUser(const QStringList &args, bool *ok) const
+{
+    if (ok != nullptr) {
+        *ok = false;
+    }
+    QProcess proc;
+    proc.start(QStringLiteral("systemctl"), QStringList{QStringLiteral("--user")} + args);
+    if (!proc.waitForStarted(3000)) {
+        return QString();
+    }
+    if (!proc.waitForFinished(5000)) {
+        proc.kill();
+        proc.waitForFinished(1000);
+        return QString();
+    }
+    const QString out = QString::fromUtf8(proc.readAllStandardOutput()).trimmed();
+    if (ok != nullptr) {
+        *ok = proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0;
+    }
+    return out;
+}
+
+int DesktopAssistantKcm::probeVoiceAutostart() const
+{
+    // `systemctl --user is-enabled adele-voice.service`:
+    //   "enabled"  -> 1 (starts at login)
+    //   "disabled"/"masked"/anything else -> 0
+    //   unit not installed (non-zero, "not-found"/empty) -> -1 (unknown)
+    bool ok = false;
+    const QString state = runSystemctlUser(
+        QStringList{QStringLiteral("is-enabled"), QString::fromUtf8(VOICE_UNIT)}, &ok);
+    if (state == QLatin1String("enabled") || state == QLatin1String("enabled-runtime")) {
+        return 1;
+    }
+    if (state == QLatin1String("disabled") || state == QLatin1String("masked")
+        || state == QLatin1String("masked-runtime") || state == QLatin1String("static")) {
+        return 0;
+    }
+    // "not-found", empty, or any unexpected token -> treat as not-installed.
+    return -1;
+}
+
+void DesktopAssistantKcm::readVoiceConfig()
+{
+    // Reset to the daemon's documented defaults, then overlay whatever the
+    // config file specifies. We only care about a handful of scalar keys under
+    // [audio], [wake_word], and [stt]; everything else is left untouched on
+    // write (see writeVoiceConfig).
+    m_sttLanguage = QStringLiteral("en");
+    m_wakeSensitivity = 0.5;
+    m_inputDevice = QStringLiteral("default");
+    m_outputDevice = QStringLiteral("default");
+
+    QFile file(voiceConfigPath());
+    if (!file.exists() || !file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return;
+    }
+
+    QString currentSection;
+    QTextStream in(&file);
+    while (!in.atEnd()) {
+        QString line = in.readLine();
+        const QString trimmed = line.trimmed();
+        if (trimmed.isEmpty() || trimmed.startsWith(QLatin1Char('#'))) {
+            continue;
+        }
+        if (trimmed.startsWith(QLatin1Char('[')) && trimmed.endsWith(QLatin1Char(']'))) {
+            currentSection = trimmed.mid(1, trimmed.size() - 2).trimmed();
+            continue;
+        }
+        const int eq = trimmed.indexOf(QLatin1Char('='));
+        if (eq < 0) {
+            continue;
+        }
+        const QString key = trimmed.left(eq).trimmed();
+        QString value = trimmed.mid(eq + 1).trimmed();
+        // Strip surrounding double quotes from string values.
+        if (value.size() >= 2 && value.startsWith(QLatin1Char('"')) && value.endsWith(QLatin1Char('"'))) {
+            value = value.mid(1, value.size() - 2);
+        }
+
+        if (currentSection == QLatin1String("audio")) {
+            if (key == QLatin1String("input_device")) {
+                m_inputDevice = value;
+            } else if (key == QLatin1String("output_device")) {
+                m_outputDevice = value;
+            }
+        } else if (currentSection == QLatin1String("wake_word")) {
+            if (key == QLatin1String("sensitivity")) {
+                bool parsed = false;
+                const double d = value.toDouble(&parsed);
+                if (parsed) {
+                    m_wakeSensitivity = d;
+                }
+            }
+        } else if (currentSection == QLatin1String("stt")) {
+            if (key == QLatin1String("language")) {
+                m_sttLanguage = value;
+            }
+        }
+    }
+    file.close();
+}
+
+bool DesktopAssistantKcm::writeVoiceConfig()
+{
+    // Surgical, section-aware merge: rewrite only the four keys we own,
+    // preserving every other line (model paths, comments, unknown keys) so the
+    // user's hand-tuned config survives a settings change from this page.
+    const QString path = voiceConfigPath();
+
+    QStringList lines;
+    {
+        QFile in(path);
+        if (in.exists() && in.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QTextStream stream(&in);
+            while (!stream.atEnd()) {
+                lines.push_back(stream.readLine());
+            }
+            in.close();
+        }
+    }
+
+    struct Target {
+        QString section;
+        QString key;
+        QString value; // already TOML-formatted (quoted string or bare number)
+        bool quoted;
+        bool done = false;
+    };
+    QVector<Target> targets = {
+        {QStringLiteral("audio"), QStringLiteral("input_device"), m_inputDevice, true, false},
+        {QStringLiteral("audio"), QStringLiteral("output_device"), m_outputDevice, true, false},
+        {QStringLiteral("wake_word"), QStringLiteral("sensitivity"),
+         QString::number(m_wakeSensitivity, 'g', 4), false, false},
+        {QStringLiteral("stt"), QStringLiteral("language"), m_sttLanguage, true, false},
+    };
+
+    auto formatLine = [](const Target &t) -> QString {
+        const QString rhs = t.quoted ? (QLatin1Char('"') + t.value + QLatin1Char('"')) : t.value;
+        return t.key + QStringLiteral(" = ") + rhs;
+    };
+
+    // First pass: update existing keys in place within their section.
+    QString currentSection;
+    QStringList merged;
+    for (const QString &raw : lines) {
+        const QString trimmed = raw.trimmed();
+        if (trimmed.startsWith(QLatin1Char('[')) && trimmed.endsWith(QLatin1Char(']'))) {
+            currentSection = trimmed.mid(1, trimmed.size() - 2).trimmed();
+            merged.push_back(raw);
+            continue;
+        }
+        bool replaced = false;
+        const int eq = trimmed.indexOf(QLatin1Char('='));
+        if (eq > 0 && !trimmed.startsWith(QLatin1Char('#'))) {
+            const QString key = trimmed.left(eq).trimmed();
+            for (auto &t : targets) {
+                if (!t.done && currentSection == t.section && key == t.key) {
+                    merged.push_back(formatLine(t));
+                    t.done = true;
+                    replaced = true;
+                    break;
+                }
+            }
+        }
+        if (!replaced) {
+            merged.push_back(raw);
+        }
+    }
+
+    // Second pass: append any keys whose section exists but lacked the key, or
+    // whose section is missing entirely. Group appends by section so we emit a
+    // section header at most once.
+    auto sectionPresent = [&merged](const QString &section) -> bool {
+        const QString header = QStringLiteral("[") + section + QStringLiteral("]");
+        for (const QString &l : merged) {
+            if (l.trimmed() == header) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // Collect remaining (not-done) targets grouped by section, preserving order.
+    QStringList sectionsNeedingAppend;
+    for (const auto &t : targets) {
+        if (!t.done && !sectionsNeedingAppend.contains(t.section)) {
+            sectionsNeedingAppend.push_back(t.section);
+        }
+    }
+    for (const QString &section : sectionsNeedingAppend) {
+        if (sectionPresent(section)) {
+            // Insert the missing key(s) right after the existing header.
+            const QString header = QStringLiteral("[") + section + QStringLiteral("]");
+            QStringList rebuilt;
+            for (const QString &l : merged) {
+                rebuilt.push_back(l);
+                if (l.trimmed() == header) {
+                    for (auto &t : targets) {
+                        if (!t.done && t.section == section) {
+                            rebuilt.push_back(formatLine(t));
+                            t.done = true;
+                        }
+                    }
+                }
+            }
+            merged = rebuilt;
+        } else {
+            // Append a fresh section at the end.
+            if (!merged.isEmpty() && !merged.last().trimmed().isEmpty()) {
+                merged.push_back(QString());
+            }
+            merged.push_back(QStringLiteral("[") + section + QStringLiteral("]"));
+            for (auto &t : targets) {
+                if (!t.done && t.section == section) {
+                    merged.push_back(formatLine(t));
+                    t.done = true;
+                }
+            }
+        }
+    }
+
+    QFileInfo fileInfo(path);
+    QDir dir;
+    if (!dir.mkpath(fileInfo.absolutePath())) {
+        m_statusText = QStringLiteral("Unable to create voice config directory");
+        Q_EMIT statusTextChanged();
+        return false;
+    }
+    QFile out(path);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+        m_statusText = QStringLiteral("Unable to write voice config file");
+        Q_EMIT statusTextChanged();
+        return false;
+    }
+    QTextStream stream(&out);
+    for (const QString &l : merged) {
+        stream << l << '\n';
+    }
+    out.close();
+    return true;
+}
+
+bool DesktopAssistantKcm::voiceServiceAvailable() const
+{
+    return m_voiceServiceAvailable;
+}
+
+bool DesktopAssistantKcm::voiceEnabled() const
+{
+    return m_voiceEnabled;
+}
+
+void DesktopAssistantKcm::setVoiceEnabled(bool value)
+{
+    if (m_voiceEnabled == value) {
+        return;
+    }
+    if (!m_voiceServiceAvailable) {
+        // No live daemon to toggle — reflect the request but don't pretend it
+        // took. The next loadVoiceSettings() reconciles.
+        return;
+    }
+    QDBusInterface iface(VOICE_SERVICE, VOICE_PATH, VOICE_IFACE, QDBusConnection::sessionBus());
+    QDBusMessage reply = iface.call(QStringLiteral("SetEnabled"), value);
+    if (reply.type() == QDBusMessage::ErrorMessage) {
+        m_statusText = reply.errorMessage().isEmpty()
+            ? QStringLiteral("Failed to toggle voice")
+            : reply.errorMessage();
+        Q_EMIT statusTextChanged();
+        return;
+    }
+    m_voiceEnabled = value;
+    m_statusText = value ? QStringLiteral("“Hey Adele” enabled") : QStringLiteral("“Hey Adele” disabled");
+    Q_EMIT voiceChanged();
+    Q_EMIT statusTextChanged();
+}
+
+QVariantList DesktopAssistantKcm::voiceList() const
+{
+    return m_voiceList;
+}
+
+QString DesktopAssistantKcm::voiceCurrentId() const
+{
+    return m_voiceCurrentId;
+}
+
+int DesktopAssistantKcm::voiceCurrentSpeaker() const
+{
+    return m_voiceCurrentSpeaker;
+}
+
+int DesktopAssistantKcm::voiceAutostart() const
+{
+    return m_voiceAutostart;
+}
+
+QString DesktopAssistantKcm::sttLanguage() const
+{
+    return m_sttLanguage;
+}
+
+void DesktopAssistantKcm::setSttLanguage(const QString &value)
+{
+    const QString normalized = value.trimmed();
+    if (m_sttLanguage == normalized) {
+        return;
+    }
+    m_sttLanguage = normalized;
+    Q_EMIT voiceConfigChanged();
+    writeVoiceConfig();
+}
+
+double DesktopAssistantKcm::wakeSensitivity() const
+{
+    return m_wakeSensitivity;
+}
+
+void DesktopAssistantKcm::setWakeSensitivity(double value)
+{
+    // Rustpotter sensitivity is a 0..1 confidence threshold.
+    const double clamped = std::clamp(value, 0.0, 1.0);
+    if (qFuzzyCompare(m_wakeSensitivity + 1.0, clamped + 1.0)) {
+        return;
+    }
+    m_wakeSensitivity = clamped;
+    Q_EMIT voiceConfigChanged();
+    writeVoiceConfig();
+}
+
+QString DesktopAssistantKcm::inputDevice() const
+{
+    return m_inputDevice;
+}
+
+void DesktopAssistantKcm::setInputDevice(const QString &value)
+{
+    const QString normalized = value.trimmed().isEmpty() ? QStringLiteral("default") : value.trimmed();
+    if (m_inputDevice == normalized) {
+        return;
+    }
+    m_inputDevice = normalized;
+    Q_EMIT voiceConfigChanged();
+    writeVoiceConfig();
+}
+
+QString DesktopAssistantKcm::outputDevice() const
+{
+    return m_outputDevice;
+}
+
+void DesktopAssistantKcm::setOutputDevice(const QString &value)
+{
+    const QString normalized = value.trimmed().isEmpty() ? QStringLiteral("default") : value.trimmed();
+    if (m_outputDevice == normalized) {
+        return;
+    }
+    m_outputDevice = normalized;
+    Q_EMIT voiceConfigChanged();
+    writeVoiceConfig();
+}
+
+void DesktopAssistantKcm::loadVoiceSettings()
+{
+    m_voiceServiceAvailable = probeVoiceAvailable();
+
+    if (m_voiceServiceAvailable) {
+        QDBusInterface iface(VOICE_SERVICE, VOICE_PATH, VOICE_IFACE, QDBusConnection::sessionBus());
+
+        QDBusReply<bool> enabledReply = iface.call(QStringLiteral("GetEnabled"));
+        if (enabledReply.isValid()) {
+            m_voiceEnabled = enabledReply.value();
+        }
+
+        // ListVoices -> a(sssu). Marshal into a QVariantList of maps the QML
+        // page reads by key (voice_id / display_name / language / num_speakers).
+        m_voiceList.clear();
+        QDBusMessage voicesReply = iface.call(QStringLiteral("ListVoices"));
+        if (voicesReply.type() != QDBusMessage::ErrorMessage && !voicesReply.arguments().isEmpty()) {
+            const QDBusArgument arg = voicesReply.arguments().first().value<QDBusArgument>();
+            arg.beginArray();
+            while (!arg.atEnd()) {
+                arg.beginStructure();
+                QString id;
+                QString name;
+                QString lang;
+                uint speakers = 0;
+                arg >> id >> name >> lang >> speakers;
+                arg.endStructure();
+                QVariantMap entry;
+                entry.insert(QStringLiteral("voice_id"), id);
+                entry.insert(QStringLiteral("display_name"), name);
+                entry.insert(QStringLiteral("language"), lang);
+                entry.insert(QStringLiteral("num_speakers"), static_cast<int>(speakers));
+                m_voiceList.push_back(entry);
+            }
+            arg.endArray();
+        }
+
+        // GetVoice -> (si): (voice_id, speaker_id); speaker_id -1 if unset.
+        QDBusMessage currentReply = iface.call(QStringLiteral("GetVoice"));
+        if (currentReply.type() != QDBusMessage::ErrorMessage) {
+            const auto args = currentReply.arguments();
+            if (args.size() >= 2) {
+                m_voiceCurrentId = args[0].toString();
+                m_voiceCurrentSpeaker = args[1].toInt();
+            } else if (args.size() == 1) {
+                // Some bindings wrap the struct; unpack via QDBusArgument.
+                const QDBusArgument inner = args.first().value<QDBusArgument>();
+                inner.beginStructure();
+                inner >> m_voiceCurrentId >> m_voiceCurrentSpeaker;
+                inner.endStructure();
+            }
+        }
+    } else {
+        m_voiceEnabled = false;
+        m_voiceList.clear();
+        m_voiceCurrentId.clear();
+        m_voiceCurrentSpeaker = -1;
+    }
+
+    m_voiceAutostart = probeVoiceAutostart();
+    readVoiceConfig();
+
+    Q_EMIT voiceChanged();
+    Q_EMIT voiceConfigChanged();
+}
+
+void DesktopAssistantKcm::setVoice(const QString &voiceId, int speaker)
+{
+    if (!m_voiceServiceAvailable) {
+        return;
+    }
+    const QString id = voiceId.trimmed();
+    if (id.isEmpty()) {
+        return;
+    }
+    QDBusInterface iface(VOICE_SERVICE, VOICE_PATH, VOICE_IFACE, QDBusConnection::sessionBus());
+    QDBusMessage reply = iface.call(QStringLiteral("SetVoice"), id, speaker);
+    if (reply.type() == QDBusMessage::ErrorMessage) {
+        m_statusText = reply.errorMessage().isEmpty()
+            ? QStringLiteral("Failed to set voice")
+            : reply.errorMessage();
+        Q_EMIT statusTextChanged();
+        return;
+    }
+    m_voiceCurrentId = id;
+    m_voiceCurrentSpeaker = speaker;
+    m_statusText = QStringLiteral("Voice set to %1").arg(id);
+    Q_EMIT voiceChanged();
+    Q_EMIT statusTextChanged();
+}
+
+void DesktopAssistantKcm::setVoiceAutostart(bool enabled)
+{
+    if (m_voiceAutostart < 0) {
+        // Unit isn't installed — nothing to enable/disable.
+        m_statusText = QStringLiteral("Voice service unit is not installed");
+        Q_EMIT statusTextChanged();
+        return;
+    }
+    bool ok = false;
+    runSystemctlUser(
+        QStringList{enabled ? QStringLiteral("enable") : QStringLiteral("disable"),
+                    QString::fromUtf8(VOICE_UNIT)},
+        &ok);
+    if (!ok) {
+        m_statusText = enabled
+            ? QStringLiteral("Failed to enable voice autostart")
+            : QStringLiteral("Failed to disable voice autostart");
+        Q_EMIT statusTextChanged();
+    } else {
+        m_statusText = enabled
+            ? QStringLiteral("Voice will start at login")
+            : QStringLiteral("Voice autostart disabled");
+        Q_EMIT statusTextChanged();
+    }
+    // Re-probe so the toggle reflects the real unit state (enable can be
+    // refused, e.g. for a static unit).
+    m_voiceAutostart = probeVoiceAutostart();
+    Q_EMIT voiceChanged();
 }
 
 void DesktopAssistantKcm::daemonCall(const QString &command, const QJSValue &payload, const QJSValue &callback)
