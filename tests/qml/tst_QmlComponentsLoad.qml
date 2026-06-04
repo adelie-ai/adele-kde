@@ -74,6 +74,11 @@ TestCase {
                 instantiate: false,
             },
             {
+                tag: "kcm/VoicePage",
+                path: "../../kcm/desktop-assistant-settings/ui/VoicePage.qml",
+                instantiate: false,
+            },
+            {
                 tag: "kcm/ConnectionEditor",
                 path: "../../kcm/desktop-assistant-settings/ui/ConnectionEditor.qml",
                 instantiate: false,

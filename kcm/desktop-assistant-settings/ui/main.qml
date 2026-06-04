@@ -42,6 +42,7 @@ KCM.SimpleKCM {
             QQC2.TabButton { text: "Connections" }
             QQC2.TabButton { text: "Purposes" }
             QQC2.TabButton { text: "Knowledge" }
+            QQC2.TabButton { text: "Voice" }
             QQC2.TabButton { text: "Backend Tasks" }
             QQC2.TabButton { text: "Data Sync" }
             QQC2.TabButton { text: "Daemon Instances" }
@@ -80,6 +81,15 @@ KCM.SimpleKCM {
                 KnowledgePage {
                     width: knowledgeScroll.availableWidth
                     height: knowledgeScroll.availableHeight
+                }
+            }
+
+            QQC2.ScrollView {
+                id: voiceScroll
+                clip: true
+                contentWidth: availableWidth
+                VoicePage {
+                    width: voiceScroll.availableWidth
                 }
             }
 

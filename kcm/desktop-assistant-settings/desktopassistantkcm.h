@@ -53,6 +53,21 @@ class DesktopAssistantKcm : public KQuickConfigModule {
     Q_PROPERTY(QString oidcTokenEndpoint READ oidcTokenEndpoint WRITE setOidcTokenEndpoint NOTIFY oidcTokenEndpointChanged)
     Q_PROPERTY(QString oidcClientId READ oidcClientId WRITE setOidcClientId NOTIFY oidcClientIdChanged)
     Q_PROPERTY(QString oidcScopes READ oidcScopes WRITE setOidcScopes NOTIFY oidcScopesChanged)
+    // Voice page (adele-kde#30). The voice daemon (repo adelie-ai/voice) owns a
+    // distinct bus name and exposes only Enable + voice selection over D-Bus;
+    // STT/sensitivity/device settings live in its TOML config and autostart is
+    // a systemd user unit, so those are handled file/process-side here.
+    Q_PROPERTY(bool voiceServiceAvailable READ voiceServiceAvailable NOTIFY voiceChanged)
+    Q_PROPERTY(bool voiceEnabled READ voiceEnabled WRITE setVoiceEnabled NOTIFY voiceChanged)
+    Q_PROPERTY(QVariantList voiceList READ voiceList NOTIFY voiceChanged)
+    Q_PROPERTY(QString voiceCurrentId READ voiceCurrentId NOTIFY voiceChanged)
+    Q_PROPERTY(int voiceCurrentSpeaker READ voiceCurrentSpeaker NOTIFY voiceChanged)
+    // Tri-state autostart: -1 unknown/unit-not-installed, 0 disabled/masked, 1 enabled.
+    Q_PROPERTY(int voiceAutostart READ voiceAutostart NOTIFY voiceChanged)
+    Q_PROPERTY(QString sttLanguage READ sttLanguage WRITE setSttLanguage NOTIFY voiceConfigChanged)
+    Q_PROPERTY(double wakeSensitivity READ wakeSensitivity WRITE setWakeSensitivity NOTIFY voiceConfigChanged)
+    Q_PROPERTY(QString inputDevice READ inputDevice WRITE setInputDevice NOTIFY voiceConfigChanged)
+    Q_PROPERTY(QString outputDevice READ outputDevice WRITE setOutputDevice NOTIFY voiceConfigChanged)
 
 public:
     DesktopAssistantKcm(QObject *parent, const KPluginMetaData &metaData, const QVariantList &args);
@@ -166,6 +181,33 @@ public:
     QString oidcScopes() const;
     void setOidcScopes(const QString &value);
 
+    bool voiceServiceAvailable() const;
+    bool voiceEnabled() const;
+    void setVoiceEnabled(bool value);
+    QVariantList voiceList() const;
+    QString voiceCurrentId() const;
+    int voiceCurrentSpeaker() const;
+    int voiceAutostart() const;
+    QString sttLanguage() const;
+    void setSttLanguage(const QString &value);
+    double wakeSensitivity() const;
+    void setWakeSensitivity(double value);
+    QString inputDevice() const;
+    void setInputDevice(const QString &value);
+    QString outputDevice() const;
+    void setOutputDevice(const QString &value);
+
+    /// Re-probe the voice service (D-Bus) and re-read its TOML config + the
+    /// autostart unit state. Called when the Voice tab loads so the page
+    /// reflects current reality without a full KCM reload.
+    Q_INVOKABLE void loadVoiceSettings();
+    /// Set the active TTS voice (and speaker; -1 = default/single-speaker)
+    /// over D-Bus. Affects both spoken replies and SayText immediately.
+    Q_INVOKABLE void setVoice(const QString &voiceId, int speaker);
+    /// Enable/disable the adele-voice systemd user unit (autostart at login).
+    /// `enabled` true -> `systemctl --user enable`; false -> `disable`.
+    Q_INVOKABLE void setVoiceAutostart(bool enabled);
+
     Q_INVOKABLE void load() override;
     Q_INVOKABLE void save() override;
     Q_INVOKABLE void defaults() override;
@@ -229,6 +271,11 @@ Q_SIGNALS:
     void oidcTokenEndpointChanged();
     void oidcClientIdChanged();
     void oidcScopesChanged();
+    // Coarse "voice service / live D-Bus state changed" vs. "TOML config field
+    // changed" — kept separate so config-field text bindings don't churn when
+    // only the daemon's reported state (enabled / voice list) refreshes.
+    void voiceChanged();
+    void voiceConfigChanged();
 
 private:
     struct ConnectionProfile {
@@ -254,6 +301,25 @@ private:
     void pushDatabaseSettings();
     void pushBackendTasksSettings();
     void pushWsAuthSettings();
+
+    // --- Voice (adele-kde#30) -------------------------------------------------
+    // The voice daemon exposes Enable + voice selection over D-Bus only; the
+    // remaining knobs are file/process-backed:
+    //   * STT language / wake sensitivity / input+output device live in the
+    //     daemon's TOML config (~/.config/adele-voice/config.toml). We do a
+    //     surgical, section-aware merge so we never clobber model paths or
+    //     other fields the user set by hand. These take effect on the next
+    //     daemon (re)start, which the page surfaces in its help text.
+    //   * "Allow autostart" toggles the `adele-voice` systemd *user* unit.
+    bool probeVoiceAvailable() const;
+    void readVoiceConfig();
+    bool writeVoiceConfig();
+    int probeVoiceAutostart() const; // -1 unknown, 0 off, 1 on
+    // Run `systemctl --user <args>` synchronously; returns trimmed stdout and
+    // sets *ok to the exit==0 result. Empty/!ok on any failure.
+    QString runSystemctlUser(const QStringList &args, bool *ok) const;
+
+    static QString voiceConfigPath();
 
     QString m_connector;
     QString m_model;
@@ -291,4 +357,16 @@ private:
     QString m_oidcTokenEndpoint;
     QString m_oidcClientId;
     QString m_oidcScopes = QStringLiteral("openid profile email");
+
+    // Voice (adele-kde#30) runtime + config state.
+    bool m_voiceServiceAvailable = false;
+    bool m_voiceEnabled = false;
+    QVariantList m_voiceList;
+    QString m_voiceCurrentId;
+    int m_voiceCurrentSpeaker = -1;
+    int m_voiceAutostart = -1;
+    QString m_sttLanguage = QStringLiteral("en");
+    double m_wakeSensitivity = 0.5;
+    QString m_inputDevice = QStringLiteral("default");
+    QString m_outputDevice = QStringLiteral("default");
 };
