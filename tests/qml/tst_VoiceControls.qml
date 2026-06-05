@@ -105,4 +105,24 @@ TestCase {
         // No language -> just the name, no empty parens.
         compare(view.buildVoiceLabel({ display_name: "Amy", language: "" }), "Amy")
     }
+
+    function test_push_to_talk_dictates_into_active_conversation() {
+        // voice#24: with a conversation open, the mic button dictates into THAT
+        // conversation — the helper args carry --conversation-id <id> so the
+        // daemon routes the prompt + spoken reply to the chat in view.
+        var view = createTemporaryObject(chatViewComponent, testCase)
+        verify(view !== null, "ChatView instantiated")
+        var args = view.pushToTalkHelperArgs("conv-abc")
+        verify(args.indexOf("voice-push-to-talk") !== -1, "calls the PTT helper")
+        verify(args.indexOf("--conversation-id") !== -1, "passes the id flag")
+        verify(args.indexOf("conv-abc") !== -1, "includes the active conversation id")
+    }
+
+    function test_push_to_talk_without_conversation_uses_own_session() {
+        // No conversation open -> plain voice-push-to-talk (the daemon's own
+        // session); no id flag is appended.
+        var view = createTemporaryObject(chatViewComponent, testCase)
+        verify(view !== null, "ChatView instantiated")
+        compare(view.pushToTalkHelperArgs(""), "voice-push-to-talk")
+    }
 }

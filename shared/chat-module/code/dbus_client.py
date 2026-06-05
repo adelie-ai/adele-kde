@@ -1124,8 +1124,15 @@ def voice_set_enabled(enabled: bool) -> None:
     _run_gdbus_voice("SetEnabled", "true" if enabled else "false")
 
 
-def voice_push_to_talk() -> None:
-    _run_gdbus_voice("PushToTalk")
+def voice_push_to_talk(conversation_id: str = "") -> None:
+    # Dictate into a specific conversation (the chat the user is viewing) when
+    # given an orchestrator conversation id, so the spoken prompt and reply land
+    # in that chat. An empty id falls back to the daemon's own "Voice
+    # Conversation" session (plain PushToTalk), matching the wake word.
+    if conversation_id:
+        _run_gdbus_voice("PushToTalkInConversation", conversation_id)
+    else:
+        _run_gdbus_voice("PushToTalk")
 
 
 def voice_stop_speaking() -> None:
@@ -1374,7 +1381,8 @@ def main() -> int:
     voice_enable_cmd = subparsers.add_parser("voice-set-enabled")
     voice_enable_cmd.add_argument("enabled", choices=["true", "false"])
 
-    subparsers.add_parser("voice-push-to-talk")
+    voice_ptt_cmd = subparsers.add_parser("voice-push-to-talk")
+    voice_ptt_cmd.add_argument("--conversation-id", default="")
     subparsers.add_parser("voice-stop-speaking")
 
     voice_say_cmd = subparsers.add_parser("voice-say")
@@ -1587,7 +1595,7 @@ def main() -> int:
             print(json.dumps({"enabled": args.enabled == "true"}))
             return 0
         if args.command == "voice-push-to-talk":
-            voice_push_to_talk()
+            voice_push_to_talk(args.conversation_id)
             print(json.dumps({"ok": True}))
             return 0
         if args.command == "voice-stop-speaking":
