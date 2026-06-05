@@ -53,11 +53,57 @@ TestCase {
         // a thrown JS error here would abort the whole widget.
         view.voicePushToTalk()
         view.voiceStopSpeaking()
+        view.voiceStopListening()
+        view.voiceMicToggle()
         view.setVoiceEnabled(true)
         view.selectVoice("en_US-amy-medium", -1)
         compare(view.voiceAvailable, false)
         compare(view.voiceEnabled, false)
         compare(view.voiceState, "Idle")
+    }
+
+    function test_mic_toggle_picks_stop_vs_start_by_state() {
+        // The mic button is a toggle: it STARTS dictation only from Idle and
+        // STOPS the active turn for every in-flight state. micButtonStops is the
+        // pure predicate that decision is built on (so it's testable without a
+        // live daemon driving the click).
+        var view = createTemporaryObject(chatViewComponent, testCase)
+        verify(view !== null, "ChatView instantiated")
+        compare(view.micButtonStops("Idle"), false)
+        compare(view.micButtonStops("Listening"), true)
+        compare(view.micButtonStops("Processing"), true)
+        compare(view.micButtonStops("Speaking"), true)
+    }
+
+    function test_mic_tooltip_tracks_start_vs_stop() {
+        var view = createTemporaryObject(chatViewComponent, testCase)
+        verify(view !== null, "ChatView instantiated")
+        view.voiceAvailable = true
+        view.voiceState = "Idle"
+        compare(view.micButtonTooltip(), "Push to talk — Idle")
+        view.voiceState = "Listening"
+        verify(view.micButtonTooltip().indexOf("Stop listening") === 0,
+            "Listening tooltip offers to stop listening")
+        view.voiceState = "Speaking"
+        compare(view.micButtonTooltip(), "Stop speaking")
+    }
+
+    function test_voice_active_and_listening_flags() {
+        var view = createTemporaryObject(chatViewComponent, testCase)
+        verify(view !== null, "ChatView instantiated")
+        // Gated on availability: dormant while the service is down.
+        view.voiceState = "Listening"
+        compare(view.voiceActive, false)
+        compare(view.voiceListening, false)
+        // Once available, the flags track the pipeline state.
+        view.voiceAvailable = true
+        compare(view.voiceActive, true)
+        compare(view.voiceListening, true)
+        view.voiceState = "Speaking"
+        compare(view.voiceActive, true)
+        compare(view.voiceListening, false)
+        view.voiceState = "Idle"
+        compare(view.voiceActive, false)
     }
 
     function test_voice_index_and_speaker_count_lookup() {

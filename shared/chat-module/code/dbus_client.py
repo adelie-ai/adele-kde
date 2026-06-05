@@ -1139,6 +1139,13 @@ def voice_stop_speaking() -> None:
     _run_gdbus_voice("StopSpeaking")
 
 
+def voice_stop_listening() -> None:
+    # Abort an in-flight dictation/processing/speaking turn. The daemon's
+    # StopListening() takes no args and returns the pipeline to Idle, so the
+    # mic button can act as a toggle (start when Idle, stop otherwise).
+    _run_gdbus_voice("StopListening")
+
+
 def voice_say_text(text: str) -> None:
     _run_gdbus_voice("SayText", text)
 
@@ -1384,6 +1391,7 @@ def main() -> int:
     voice_ptt_cmd = subparsers.add_parser("voice-push-to-talk")
     voice_ptt_cmd.add_argument("--conversation-id", default="")
     subparsers.add_parser("voice-stop-speaking")
+    subparsers.add_parser("voice-stop-listening")
 
     voice_say_cmd = subparsers.add_parser("voice-say")
     voice_say_cmd.add_argument("text")
@@ -1600,6 +1608,10 @@ def main() -> int:
             return 0
         if args.command == "voice-stop-speaking":
             voice_stop_speaking()
+            print(json.dumps({"ok": True}))
+            return 0
+        if args.command == "voice-stop-listening":
+            voice_stop_listening()
             print(json.dumps({"ok": True}))
             return 0
         if args.command == "voice-say":

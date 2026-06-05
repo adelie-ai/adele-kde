@@ -352,6 +352,28 @@ Item {
         }
     }
 
+    // "A turn is in flight" — the mic is open, the daemon is thinking, or it's
+    // talking back. Drives the prominent in-widget indicator and the toggle.
+    readonly property bool voiceActive: voiceAvailable && voiceState !== "Idle"
+    // The mic is specifically OPEN and capturing. This is the state the user
+    // most needs to notice ("am I being recorded?"), so it gets the strongest
+    // accent + the breathing animation + the panel badge.
+    readonly property bool voiceListening: voiceAvailable && voiceState === "Listening"
+
+    // Accent colour per pipeline state, used for the mic ring and the state
+    // chip so the widget's conversational state reads at a glance:
+    //   Listening → negative/red  ("recording" — the one to really notice)
+    //   Speaking  → highlight/blue (the assistant is talking back)
+    //   Processing→ neutral text   (thinking; deliberately calm)
+    readonly property color voiceStateColor: {
+        switch (voiceState) {
+            case "Listening": return Kirigami.Theme.negativeTextColor
+            case "Speaking": return themeHighlightColor
+            case "Processing": return themeTextColor
+            default: return themeDisabledTextColor
+        }
+    }
+
     function refreshVoiceStatus() {
         if (voiceStatusInFlight) {
             return
@@ -536,6 +558,63 @@ Item {
             function(_stderr) {},
             false
         )
+    }
+
+    // Abort an in-flight dictation/processing/speaking turn via the daemon's
+    // StopListening() (returns the pipeline to Idle). Optimistically flip to
+    // Idle so the toggle feels instant; the next poll reconciles the truth.
+    function voiceStopListening() {
+        if (!voiceAvailable) {
+            return
+        }
+        runCommand(
+            helperCommand("voice-stop-listening"),
+            function(_stdout) {
+                voiceState = "Idle"
+                refreshVoiceStatus()
+            },
+            function(stderr) {
+                appendStatus("Stop listening failed: " + stderr)
+                refreshVoiceStatus()
+            },
+            false
+        )
+    }
+
+    // The mic button is a toggle: it STARTS a dictation turn only from Idle and
+    // otherwise STOPS the active turn. Factored out (and pure) so the start/stop
+    // decision is unit-testable without a live daemon. Any non-Idle pipeline
+    // state (Listening/Processing/Speaking) means "a turn is in flight → stop".
+    function micButtonStops(state) {
+        return state === "Listening" || state === "Processing" || state === "Speaking"
+    }
+
+    // Single onClicked entry point for the mic toggle. Speaking still routes
+    // through StopSpeaking (barge-in / cut playback); Listening and Processing
+    // route through StopListening (abort capture / pending turn).
+    function voiceMicToggle() {
+        if (!voiceAvailable) {
+            return
+        }
+        if (voiceState === "Speaking") {
+            voiceStopSpeaking()
+        } else if (micButtonStops(voiceState)) {
+            voiceStopListening()
+        } else {
+            voicePushToTalk()
+        }
+    }
+
+    // Tooltip text for the mic button, per pipeline state. Pulled out so the
+    // start-vs-stop affordance reads identically wherever the button is shown.
+    function micButtonTooltip() {
+        if (voiceState === "Speaking") {
+            return "Stop speaking"
+        }
+        if (micButtonStops(voiceState)) {
+            return "Stop listening" + (voiceStateLabel.length > 0 ? " — " + voiceStateLabel : "")
+        }
+        return "Push to talk" + (voiceStateLabel.length > 0 ? " — " + voiceStateLabel : "")
     }
 
     // Toggle resident "Hey Adele" wake-word listening. Optimistically flips the
@@ -2349,28 +2428,100 @@ Item {
         RowLayout {
             Layout.fillWidth: true
 
-            // Push-to-talk / record button (adele-kde#29). Starts a dictation
-            // turn via PushToTalk (works even with the wake word off). The icon
-            // and tooltip track the live pipeline state. Hidden when the voice
-            // service isn't available so it never dangles as a dead control.
+            // Push-to-talk / record button (adele-kde#29). Acts as a TOGGLE:
+            // starts a dictation turn from Idle (PushToTalk, works even with the
+            // wake word off) and STOPS the active turn otherwise (StopListening,
+            // or StopSpeaking while the assistant is talking). A coloured,
+            // breathing ring makes "the mic is open / recording" unmissable.
+            // Hidden when the voice service isn't available so it never dangles.
             QQC2.ToolButton {
                 id: micButton
                 visible: root.voiceAvailable
                 enabled: root.voiceAvailable && !root.busy
                 Layout.alignment: Qt.AlignTop
                 icon.name: root.voiceStateIcon
-                // Highlight while the mic is actually open.
-                highlighted: root.voiceState === "Listening"
+                // Highlight while a turn is in flight so the toggle reads as
+                // "active" (and the icon flips to the stop affordance).
+                highlighted: root.voiceActive
                 display: QQC2.AbstractButton.IconOnly
-                QQC2.ToolTip.text: root.voiceState === "Speaking"
-                    ? "Stop speaking"
-                    : ("Push to talk" + (root.voiceStateLabel.length > 0 ? " — " + root.voiceStateLabel : ""))
+                QQC2.ToolTip.text: root.micButtonTooltip()
                 QQC2.ToolTip.visible: hovered
-                onClicked: {
-                    if (root.voiceState === "Speaking") {
-                        root.voiceStopSpeaking()
-                    } else {
-                        root.voicePushToTalk()
+                onClicked: root.voiceMicToggle()
+
+                // Coloured state ring drawn over the button. Visible only while a
+                // turn is active; its colour tracks the pipeline state (red while
+                // Listening, blue while Speaking). While Listening it "breathes"
+                // (opacity pulse) so a recording mic is obvious at a glance.
+                Rectangle {
+                    id: micStateRing
+                    anchors.fill: parent
+                    anchors.margins: 1
+                    radius: Math.round(Math.min(width, height) / 4)
+                    color: "transparent"
+                    visible: root.voiceActive
+                    border.width: Math.max(2, Math.round(2 * root.uiScale))
+                    border.color: root.voiceStateColor
+                    // The "breathing" pulse: a smooth opacity cycle while the mic
+                    // is open. Frozen fully-opaque for the calmer non-listening
+                    // active states so only "recording" actively pulses.
+                    opacity: root.voiceListening ? 1.0 : 0.9
+                    SequentialAnimation on opacity {
+                        running: micStateRing.visible && root.voiceListening
+                        loops: Animation.Infinite
+                        alwaysRunToEnd: true
+                        NumberAnimation { from: 1.0; to: 0.35; duration: 750; easing.type: Easing.InOutSine }
+                        NumberAnimation { from: 0.35; to: 1.0; duration: 750; easing.type: Easing.InOutSine }
+                    }
+                }
+            }
+
+            // Prominent conversational-state chip (adele-kde voice-state). Sits
+            // right beside the mic button and spells out the state in words
+            // ("Listening…/Thinking…/Speaking…"), with a state-coloured dot, so
+            // the widget is unambiguous about what it's doing — not just an icon
+            // swap. Shown only while a turn is active; collapses to nothing at
+            // Idle so the input row keeps its full width when there's no voice
+            // activity.
+            Rectangle {
+                id: voiceStateChip
+                visible: root.voiceActive
+                Layout.alignment: Qt.AlignVCenter
+                implicitHeight: Math.round(24 * root.uiScale)
+                implicitWidth: voiceStateChipRow.implicitWidth + Math.round(16 * root.uiScale)
+                radius: implicitHeight / 2
+                color: Qt.rgba(root.voiceStateColor.r, root.voiceStateColor.g, root.voiceStateColor.b, 0.12)
+                border.width: 1
+                border.color: Qt.rgba(root.voiceStateColor.r, root.voiceStateColor.g, root.voiceStateColor.b, 0.45)
+
+                RowLayout {
+                    id: voiceStateChipRow
+                    anchors.centerIn: parent
+                    spacing: Math.round(6 * root.uiScale)
+
+                    Rectangle {
+                        id: voiceStateDot
+                        implicitWidth: Math.round(8 * root.uiScale)
+                        implicitHeight: implicitWidth
+                        radius: implicitWidth / 2
+                        color: root.voiceStateColor
+                        Layout.alignment: Qt.AlignVCenter
+                        // Pulse the dot in sympathy with the mic ring while
+                        // Listening so the chip and the button read as one.
+                        SequentialAnimation on opacity {
+                            running: voiceStateChip.visible && root.voiceListening
+                            loops: Animation.Infinite
+                            alwaysRunToEnd: true
+                            NumberAnimation { from: 1.0; to: 0.3; duration: 750; easing.type: Easing.InOutSine }
+                            NumberAnimation { from: 0.3; to: 1.0; duration: 750; easing.type: Easing.InOutSine }
+                        }
+                    }
+
+                    QQC2.Label {
+                        text: root.voiceStateLabel
+                        color: root.voiceStateColor
+                        font.bold: true
+                        font.pointSize: root.baseFontPointSize
+                        Layout.alignment: Qt.AlignVCenter
                     }
                 }
             }
