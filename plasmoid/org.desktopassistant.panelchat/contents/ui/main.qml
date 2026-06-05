@@ -5,6 +5,7 @@ import org.kde.kirigami as Kirigami
 import org.kde.plasma.plasmoid
 import org.kde.plasma.core as PlasmaCore
 import org.kde.plasma.components as PlasmaComponents
+import org.kde.plasma.plasma5support as Plasma5Support
 
 PlasmoidItem {
     id: root
@@ -23,6 +24,27 @@ PlasmoidItem {
     // so the top-level contextual action below can't reach it directly. The
     // loader publishes its item here on load and clears it on teardown.
     property Item chatView: null
+
+    // --- Panel voice state (so the taskbar icon overlay works while collapsed)
+    // The full ChatView polls `voice-status` itself, but it only EXISTS while
+    // the popup is expanded. For the compact (taskbar) icon to show a "mic is
+    // listening" badge while collapsed, a lightweight status poll has to live at
+    // the plasmoid root. We shell out to the same one-shot helper the chat view
+    // uses (`voice-status`, which folds availability + pipeline state into one
+    // JSON line) on a calm 2s cadence. When the popup is open we defer to the
+    // chat view's own (faster) state so the two never disagree.
+    readonly property string voiceHelperPath: Qt.resolvedUrl("../code/dbus_client.py").toString().replace("file://", "")
+    property bool rootVoiceAvailable: false
+    property string rootVoiceState: "Idle"   // Idle | Listening | Processing | Speaking
+
+    // Effective state the badge renders from: prefer the live chat view when
+    // it's loaded (it polls faster), else the root poll.
+    readonly property bool voiceAvailable: chatView ? chatView.voiceAvailable : rootVoiceAvailable
+    readonly property string voiceState: chatView ? chatView.voiceState : rootVoiceState
+    readonly property bool voiceListening: voiceAvailable && voiceState === "Listening"
+    readonly property bool voiceSpeaking: voiceAvailable && voiceState === "Speaking"
+    // Any in-flight turn (mic open, thinking, or talking back).
+    readonly property bool voiceActive: voiceAvailable && voiceState !== "Idle"
 
     // "Enable 'Hey Adele'" lives in the plasmoid's right-click menu
     // (adele-kde#29). Visible only once the popup has been opened and the voice
@@ -43,12 +65,96 @@ PlasmoidItem {
         }
     ]
 
+    // One-shot helper runner for the root-level voice poll. Mirrors the chat
+    // view's Plasma5Support usage: each `voice-status` call is a short-lived
+    // subprocess whose stdout we JSON.parse. Voice always talks over D-Bus and
+    // `voice-status` ignores the chat connection/transport, so no --service /
+    // --connection-name flags are needed here.
+    Plasma5Support.DataSource {
+        id: voiceStatusSource
+        engine: "executable"
+        connectedSources: []
+        onNewData: function(sourceName, data) {
+            disconnectSource(sourceName)
+            const stdout = data["stdout"] ? String(data["stdout"]) : ""
+            let payload
+            try {
+                payload = JSON.parse(stdout)
+            } catch (e) {
+                return
+            }
+            if (!payload || payload.error) {
+                root.rootVoiceAvailable = false
+                return
+            }
+            const nowAvailable = payload.available === true
+            root.rootVoiceAvailable = nowAvailable
+            if (nowAvailable && typeof payload.state === "string") {
+                root.rootVoiceState = payload.state
+            }
+        }
+    }
+
+    function refreshRootVoiceStatus() {
+        // Skip the extra subprocess while the popup is open — the chat view is
+        // already polling and we read its state directly.
+        if (root.chatView) {
+            return
+        }
+        voiceStatusSource.connectSource("python3 '" + voiceHelperPath + "' voice-status")
+    }
+
+    Timer {
+        id: rootVoicePollTimer
+        interval: 2000
+        repeat: true
+        running: true
+        triggeredOnStart: true
+        onTriggered: root.refreshRootVoiceStatus()
+    }
+
     compactRepresentation: PlasmaComponents.ToolButton {
+        id: compactRoot
         text: "Adele AI"
         icon.source: Qt.resolvedUrl("../images/adele.png")
         icon.width: Kirigami.Units.iconSizes.smallMedium
         icon.height: Kirigami.Units.iconSizes.smallMedium
         onClicked: root.expanded = !root.expanded
+
+        // Voice-state badge overlaid on the taskbar icon (adele-kde voice-state).
+        // A small coloured dot in the corner makes it obvious the mic is live
+        // even while the chat popup is collapsed: red + breathing while
+        // Listening (recording), blue while Speaking. Hidden at Idle / when the
+        // voice service isn't running so the icon stays clean.
+        Rectangle {
+            id: voiceBadge
+            visible: root.voiceListening || root.voiceSpeaking
+            // Anchor to the icon's bottom-right corner. The ToolButton centres
+            // its icon, so derive the corner from the icon box rather than the
+            // (often wider) button so the badge hugs the glyph.
+            readonly property real iconBox: Math.min(compactRoot.width, compactRoot.height)
+            width: Math.max(7, Math.round(iconBox * 0.34))
+            height: width
+            radius: width / 2
+            color: root.voiceListening
+                ? Kirigami.Theme.negativeTextColor
+                : Kirigami.Theme.highlightColor
+            // A thin contrasting outline so the dot reads on any icon/panel hue.
+            border.width: Math.max(1, Math.round(width * 0.16))
+            border.color: Kirigami.Theme.backgroundColor
+            x: compactRoot.width / 2 + iconBox / 2 - width
+            y: compactRoot.height / 2 + iconBox / 2 - height
+
+            // Breathing pulse while recording so an open mic is unmissable in
+            // the panel. Solid (no pulse) for the calmer Speaking state.
+            SequentialAnimation on opacity {
+                running: voiceBadge.visible && root.voiceListening
+                loops: Animation.Infinite
+                alwaysRunToEnd: true
+                NumberAnimation { from: 1.0; to: 0.35; duration: 750; easing.type: Easing.InOutSine }
+                NumberAnimation { from: 0.35; to: 1.0; duration: 750; easing.type: Easing.InOutSine }
+            }
+        }
     }
 
     fullRepresentation: Item {

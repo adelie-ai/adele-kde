@@ -234,6 +234,32 @@ class VoiceCliShapeTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(payload["ok"])
 
+    def test_voice_stop_listening_ok(self) -> None:
+        dbus_client._run_gdbus_voice = lambda *_a: None
+        rc, payload = self._run(["voice-stop-listening"])
+        self.assertEqual(rc, 0)
+        self.assertTrue(payload["ok"])
+
+    def test_voice_stop_listening_calls_stoplistening_no_args(self) -> None:
+        # The mic toggle's "stop" path must invoke the daemon's StopListening()
+        # method with no arguments (mirrors voice-stop-speaking → StopSpeaking).
+        captured: list[tuple] = []
+        dbus_client._run_gdbus_voice = lambda *a: captured.append(a) or None
+        rc, _payload = self._run(["voice-stop-listening"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured, [("StopListening",)])
+
+    def test_voice_stop_listening_error_maps_to_exit_1(self) -> None:
+        def boom(*_a):
+            raise dbus_client.DbusError(
+                "Error: GDBus.Error:org.freedesktop.DBus.Error.ServiceUnknown: gone"
+            )
+
+        dbus_client._run_gdbus_voice = boom
+        rc, payload = self._run(["voice-stop-listening"])
+        self.assertEqual(rc, 1)
+        self.assertIn("ServiceUnknown", payload["error"])
+
     def test_voice_push_to_talk_without_id_uses_own_session(self) -> None:
         # No conversation id -> plain PushToTalk() (the daemon's own "Voice
         # Conversation" session), matching the wake word. (voice#24)
