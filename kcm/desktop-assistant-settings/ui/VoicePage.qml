@@ -21,6 +21,8 @@ import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 
+import "VoiceBackends.js" as VoiceBackends
+
 ColumnLayout {
     id: root
     spacing: 12
@@ -38,6 +40,18 @@ ColumnLayout {
             }
         }
         return -1
+    }
+
+    // Backend / Polly-engine token<->index mapping lives in VoiceBackends.js so
+    // it can be unit-tested without the C++ `kcm` context (see
+    // tests/qml/tst_VoiceBackends.qml). These thin wrappers keep the existing
+    // `root.*` call sites and the binding-friendly signature.
+    function backendIndexById(id) {
+        return VoiceBackends.backendIndexById(id)
+    }
+
+    function pollyEngineIndexById(id) {
+        return VoiceBackends.pollyEngineIndexById(id)
     }
 
     function speakerCountFor(id) {
@@ -129,19 +143,143 @@ ColumnLayout {
 
     Kirigami.Separator { Layout.fillWidth: true }
 
-    // --- Voice (TTS, live D-Bus) --------------------------------------------
+    // --- Text-to-speech (backend + per-backend config + voice picker) -------
+    // The voice daemon (repo adelie-ai/voice) has pluggable TTS backends chosen
+    // by `tts.backend` in config.toml: Kokoro (local, default) / Piper (local) /
+    // Polly (AWS cloud, billable). The backend + per-backend keys are config —
+    // applied on the next service start — while the voice picker below is live
+    // over D-Bus and reflects whichever backend is currently running.
     QQC2.Label {
         font.bold: true
-        text: "Spoken voice"
+        text: "Text-to-speech"
+    }
+
+    RowLayout {
+        Layout.fillWidth: true
+        enabled: root.voicePresent
+        QQC2.Label {
+            text: "Backend"
+            Layout.preferredWidth: 150
+        }
+        QQC2.ComboBox {
+            id: ttsBackendCombo
+            Layout.fillWidth: true
+            textRole: "label"
+            // Keep `value` (the config token) and the index aligned via
+            // backendIndexById; onActivated writes the selected token.
+            model: [
+                { value: "kokoro", label: "Kokoro (local, default)" },
+                { value: "piper", label: "Piper (local)" },
+                { value: "polly", label: "Polly (cloud — billable)" },
+            ]
+            currentIndex: Math.max(0, root.backendIndexById(kcm.ttsBackend))
+            onActivated: kcm.ttsBackend = model[currentIndex].value
+        }
     }
 
     QQC2.Label {
         Layout.fillWidth: true
         wrapMode: Text.Wrap
+        opacity: 0.7
+        text: "Selects how spoken replies are synthesized. Applied the next time "
+              + "the voice service starts — use “Restart voice service” below to "
+              + "apply it now."
+    }
+
+    // Kokoro: espeak-ng phonemizer language (en-us / en-gb).
+    RowLayout {
+        Layout.fillWidth: true
+        visible: kcm.ttsBackend === "kokoro"
+        enabled: root.voicePresent
+        QQC2.Label {
+            text: "Kokoro language"
+            Layout.preferredWidth: 150
+        }
+        QQC2.TextField {
+            id: kokoroLangField
+            Layout.fillWidth: true
+            placeholderText: "en-us"
+            text: kcm.kokoroLang
+            onEditingFinished: kcm.kokoroLang = text
+        }
+    }
+
+    // Piper: path to the voice model (.onnx). Empty = daemon default.
+    RowLayout {
+        Layout.fillWidth: true
+        visible: kcm.ttsBackend === "piper"
+        enabled: root.voicePresent
+        QQC2.Label {
+            text: "Voice model path"
+            Layout.preferredWidth: 150
+        }
+        QQC2.TextField {
+            id: piperModelPathField
+            Layout.fillWidth: true
+            placeholderText: "~/.local/share/adele-voice/models/en_US-amy-medium.onnx"
+            text: kcm.piperModelPath
+            onEditingFinished: kcm.piperModelPath = text
+        }
+    }
+
+    // Polly (cloud, opt-in): engine + region + an explicit billing note.
+    RowLayout {
+        Layout.fillWidth: true
+        visible: kcm.ttsBackend === "polly"
+        enabled: root.voicePresent
+        QQC2.Label {
+            text: "Polly engine"
+            Layout.preferredWidth: 150
+        }
+        QQC2.ComboBox {
+            id: pollyEngineCombo
+            Layout.fillWidth: true
+            textRole: "label"
+            model: [
+                { value: "neural", label: "Neural (cheaper, every region)" },
+                { value: "generative", label: "Generative (most natural)" },
+            ]
+            currentIndex: Math.max(0, root.pollyEngineIndexById(kcm.pollyEngine))
+            onActivated: kcm.pollyEngine = model[currentIndex].value
+        }
+    }
+
+    RowLayout {
+        Layout.fillWidth: true
+        visible: kcm.ttsBackend === "polly"
+        enabled: root.voicePresent
+        QQC2.Label {
+            text: "Polly region"
+            Layout.preferredWidth: 150
+        }
+        QQC2.TextField {
+            id: pollyRegionField
+            Layout.fillWidth: true
+            placeholderText: "us-east-1"
+            text: kcm.pollyRegion
+            onEditingFinished: kcm.pollyRegion = text
+        }
+    }
+
+    Kirigami.InlineMessage {
+        Layout.fillWidth: true
+        visible: kcm.ttsBackend === "polly"
+        type: Kirigami.MessageType.Warning
+        text: "Polly is a cloud service billed per character of synthesized "
+              + "speech (your microphone audio is never sent — only the "
+              + "assistant's reply text). Credentials come from the standard AWS "
+              + "chain; for the systemd service set AWS_PROFILE/AWS_REGION in a "
+              + "drop-in (~/.config/systemd/user/adele-voice.service.d/aws.conf)."
+    }
+
+    // Voice picker (live, D-Bus): reflects the active backend's voices.
+    QQC2.Label {
+        Layout.fillWidth: true
+        wrapMode: Text.Wrap
         visible: kcm.voiceServiceAvailable && (kcm.voiceList || []).length === 0
         opacity: 0.7
-        text: "No TTS voices are installed. Add a Piper voice model to the "
-              + "voice daemon's model directory."
+        text: "No TTS voices are available from the running backend yet. After "
+              + "switching backend, restart the voice service to refresh this list."
     }
 
     RowLayout {
@@ -199,6 +337,26 @@ ColumnLayout {
         }
     }
 
+    RowLayout {
+        Layout.fillWidth: true
+        QQC2.Button {
+            text: "Restart voice service"
+            icon.name: "system-reboot"
+            // Restart applies config-file changes (backend, per-backend keys,
+            // STT, devices, sensitivity). Disabled when the unit isn't
+            // installed (autostart unknown) — there's nothing to restart.
+            enabled: kcm.voiceAutostart >= 0
+            onClicked: kcm.restartVoiceService()
+        }
+        QQC2.Label {
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+            opacity: 0.7
+            text: "Applies text-to-speech and speech-recognition changes below "
+                  + "without logging out."
+        }
+    }
+
     Kirigami.Separator { Layout.fillWidth: true }
 
     // --- Speech recognition + audio devices (config file) -------------------
@@ -228,6 +386,22 @@ ColumnLayout {
             placeholderText: "en"
             text: kcm.sttLanguage
             onEditingFinished: kcm.sttLanguage = text
+        }
+    }
+
+    RowLayout {
+        Layout.fillWidth: true
+        enabled: root.voicePresent
+        QQC2.Label {
+            text: "Whisper model path"
+            Layout.preferredWidth: 150
+        }
+        QQC2.TextField {
+            id: sttModelPathField
+            Layout.fillWidth: true
+            placeholderText: "~/.local/share/adele-voice/models/ggml-distil-large-v3.bin"
+            text: kcm.sttModelPath
+            onEditingFinished: kcm.sttModelPath = text
         }
     }
 
@@ -293,11 +467,25 @@ ColumnLayout {
     Item { Layout.fillHeight: true }
 
     // Keep editable text fields in sync when the KCM reloads config from disk.
+    // (The backend/engine ComboBoxes re-derive their index from kcm.* via their
+    // currentIndex bindings, so only the free-text fields need explicit sync.)
     Connections {
         target: kcm
         function onVoiceConfigChanged() {
             if (sttLanguageField.text !== kcm.sttLanguage) {
                 sttLanguageField.text = kcm.sttLanguage
+            }
+            if (sttModelPathField.text !== kcm.sttModelPath) {
+                sttModelPathField.text = kcm.sttModelPath
+            }
+            if (kokoroLangField.text !== kcm.kokoroLang) {
+                kokoroLangField.text = kcm.kokoroLang
+            }
+            if (piperModelPathField.text !== kcm.piperModelPath) {
+                piperModelPathField.text = kcm.piperModelPath
+            }
+            if (pollyRegionField.text !== kcm.pollyRegion) {
+                pollyRegionField.text = kcm.pollyRegion
             }
             if (inputDeviceField.text !== kcm.inputDevice) {
                 inputDeviceField.text = kcm.inputDevice

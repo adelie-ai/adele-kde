@@ -1404,12 +1404,19 @@ void DesktopAssistantKcm::readVoiceConfig()
 {
     // Reset to the daemon's documented defaults, then overlay whatever the
     // config file specifies. We only care about a handful of scalar keys under
-    // [audio], [wake_word], and [stt]; everything else is left untouched on
-    // write (see writeVoiceConfig).
+    // [audio], [wake_word], [stt], and [tts]; everything else is left untouched
+    // on write (see writeVoiceConfig). Defaults track the daemon's
+    // SttConfig/TtsConfig::default() (repo adelie-ai/voice).
     m_sttLanguage = QStringLiteral("en");
+    m_sttModelPath.clear();
     m_wakeSensitivity = 0.5;
     m_inputDevice = QStringLiteral("default");
     m_outputDevice = QStringLiteral("default");
+    m_ttsBackend = QStringLiteral("kokoro");
+    m_kokoroLang = QStringLiteral("en-us");
+    m_piperModelPath.clear();
+    m_pollyEngine = QStringLiteral("neural");
+    m_pollyRegion.clear();
 
     QFile file(voiceConfigPath());
     if (!file.exists() || !file.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -1456,6 +1463,22 @@ void DesktopAssistantKcm::readVoiceConfig()
         } else if (currentSection == QLatin1String("stt")) {
             if (key == QLatin1String("language")) {
                 m_sttLanguage = value;
+            } else if (key == QLatin1String("model_path")) {
+                m_sttModelPath = value;
+            }
+        } else if (currentSection == QLatin1String("tts")) {
+            if (key == QLatin1String("backend")) {
+                m_ttsBackend = value;
+            } else if (key == QLatin1String("kokoro_lang")) {
+                m_kokoroLang = value;
+            } else if (key == QLatin1String("model_path")) {
+                // [tts].model_path is the Piper voice model (distinct from
+                // [stt].model_path, the Whisper model).
+                m_piperModelPath = value;
+            } else if (key == QLatin1String("polly_engine")) {
+                m_pollyEngine = value;
+            } else if (key == QLatin1String("polly_region")) {
+                m_pollyRegion = value;
             }
         }
     }
@@ -1464,9 +1487,16 @@ void DesktopAssistantKcm::readVoiceConfig()
 
 bool DesktopAssistantKcm::writeVoiceConfig()
 {
-    // Surgical, section-aware merge: rewrite only the four keys we own,
-    // preserving every other line (model paths, comments, unknown keys) so the
-    // user's hand-tuned config survives a settings change from this page.
+    // Surgical, section-aware merge: rewrite only the keys we own, preserving
+    // every other line (comments, unknown keys, sections we don't manage) so
+    // the user's hand-tuned config survives a settings change from this page.
+    //
+    // Some keys are "omit when empty": the daemon types them as optional
+    // (polly_region) or computes a default path (model paths) when absent, so
+    // writing an empty string would override that default with a broken value.
+    // For those, an empty value means "drop the key" — we neither replace nor
+    // append it, and we delete any existing line so clearing the field in the
+    // GUI restores the daemon default.
     const QString path = voiceConfigPath();
 
     QStringList lines;
@@ -1484,24 +1514,38 @@ bool DesktopAssistantKcm::writeVoiceConfig()
     struct Target {
         QString section;
         QString key;
-        QString value; // already TOML-formatted (quoted string or bare number)
+        QString value; // raw string (formatLine adds quotes) or bare number
         bool quoted;
+        bool omitWhenEmpty = false; // empty value -> drop the key entirely
         bool done = false;
     };
     QVector<Target> targets = {
-        {QStringLiteral("audio"), QStringLiteral("input_device"), m_inputDevice, true, false},
-        {QStringLiteral("audio"), QStringLiteral("output_device"), m_outputDevice, true, false},
+        {QStringLiteral("audio"), QStringLiteral("input_device"), m_inputDevice, true, false, false},
+        {QStringLiteral("audio"), QStringLiteral("output_device"), m_outputDevice, true, false, false},
         {QStringLiteral("wake_word"), QStringLiteral("sensitivity"),
-         QString::number(m_wakeSensitivity, 'g', 4), false, false},
-        {QStringLiteral("stt"), QStringLiteral("language"), m_sttLanguage, true, false},
+         QString::number(m_wakeSensitivity, 'g', 4), false, false, false},
+        {QStringLiteral("stt"), QStringLiteral("language"), m_sttLanguage, true, false, false},
+        {QStringLiteral("stt"), QStringLiteral("model_path"), m_sttModelPath, true, true, false},
+        {QStringLiteral("tts"), QStringLiteral("backend"), m_ttsBackend, true, false, false},
+        {QStringLiteral("tts"), QStringLiteral("kokoro_lang"), m_kokoroLang, true, false, false},
+        {QStringLiteral("tts"), QStringLiteral("model_path"), m_piperModelPath, true, true, false},
+        {QStringLiteral("tts"), QStringLiteral("polly_engine"), m_pollyEngine, true, false, false},
+        {QStringLiteral("tts"), QStringLiteral("polly_region"), m_pollyRegion, true, true, false},
     };
 
     auto formatLine = [](const Target &t) -> QString {
         const QString rhs = t.quoted ? (QLatin1Char('"') + t.value + QLatin1Char('"')) : t.value;
         return t.key + QStringLiteral(" = ") + rhs;
     };
+    // Whether a target should actually be written. An omit-when-empty target
+    // with no value is dropped (not emitted, and its existing line removed).
+    auto shouldEmit = [](const Target &t) -> bool {
+        return !(t.omitWhenEmpty && t.value.isEmpty());
+    };
 
-    // First pass: update existing keys in place within their section.
+    // First pass: update existing keys in place within their section. For a
+    // dropped (omit-when-empty, blank) target we mark it done and skip the line
+    // so the key disappears from the file.
     QString currentSection;
     QStringList merged;
     for (const QString &raw : lines) {
@@ -1517,7 +1561,9 @@ bool DesktopAssistantKcm::writeVoiceConfig()
             const QString key = trimmed.left(eq).trimmed();
             for (auto &t : targets) {
                 if (!t.done && currentSection == t.section && key == t.key) {
-                    merged.push_back(formatLine(t));
+                    if (shouldEmit(t)) {
+                        merged.push_back(formatLine(t));
+                    }
                     t.done = true;
                     replaced = true;
                     break;
@@ -1541,6 +1587,15 @@ bool DesktopAssistantKcm::writeVoiceConfig()
         }
         return false;
     };
+
+    // A target still needs appending only if it's not done AND it should emit.
+    // Mark dropped (omit-when-empty, blank) targets done up front so they
+    // neither force a section to be created nor get appended.
+    for (auto &t : targets) {
+        if (!t.done && !shouldEmit(t)) {
+            t.done = true;
+        }
+    }
 
     // Collect remaining (not-done) targets grouped by section, preserving order.
     QStringList sectionsNeedingAppend;
@@ -1669,6 +1724,111 @@ void DesktopAssistantKcm::setSttLanguage(const QString &value)
         return;
     }
     m_sttLanguage = normalized;
+    Q_EMIT voiceConfigChanged();
+    writeVoiceConfig();
+}
+
+QString DesktopAssistantKcm::sttModelPath() const
+{
+    return m_sttModelPath;
+}
+
+void DesktopAssistantKcm::setSttModelPath(const QString &value)
+{
+    const QString normalized = value.trimmed();
+    if (m_sttModelPath == normalized) {
+        return;
+    }
+    m_sttModelPath = normalized;
+    Q_EMIT voiceConfigChanged();
+    writeVoiceConfig();
+}
+
+QString DesktopAssistantKcm::ttsBackend() const
+{
+    return m_ttsBackend;
+}
+
+void DesktopAssistantKcm::setTtsBackend(const QString &value)
+{
+    const QString normalized = value.trimmed();
+    // Constrain to the backends the daemon knows; ignore anything else so a
+    // stray binding can't write a bogus backend into the config.
+    if (normalized != QLatin1String("kokoro") && normalized != QLatin1String("piper")
+        && normalized != QLatin1String("polly")) {
+        return;
+    }
+    if (m_ttsBackend == normalized) {
+        return;
+    }
+    m_ttsBackend = normalized;
+    Q_EMIT voiceConfigChanged();
+    writeVoiceConfig();
+}
+
+QString DesktopAssistantKcm::kokoroLang() const
+{
+    return m_kokoroLang;
+}
+
+void DesktopAssistantKcm::setKokoroLang(const QString &value)
+{
+    const QString normalized = value.trimmed();
+    if (m_kokoroLang == normalized) {
+        return;
+    }
+    m_kokoroLang = normalized;
+    Q_EMIT voiceConfigChanged();
+    writeVoiceConfig();
+}
+
+QString DesktopAssistantKcm::piperModelPath() const
+{
+    return m_piperModelPath;
+}
+
+void DesktopAssistantKcm::setPiperModelPath(const QString &value)
+{
+    const QString normalized = value.trimmed();
+    if (m_piperModelPath == normalized) {
+        return;
+    }
+    m_piperModelPath = normalized;
+    Q_EMIT voiceConfigChanged();
+    writeVoiceConfig();
+}
+
+QString DesktopAssistantKcm::pollyEngine() const
+{
+    return m_pollyEngine;
+}
+
+void DesktopAssistantKcm::setPollyEngine(const QString &value)
+{
+    const QString normalized = value.trimmed();
+    // The GUI offers neural / generative; the daemon also accepts long-form /
+    // standard. Accept any non-empty token so a hand-edited config round-trips,
+    // but ignore empty so we never blank out the daemon default.
+    if (normalized.isEmpty() || m_pollyEngine == normalized) {
+        return;
+    }
+    m_pollyEngine = normalized;
+    Q_EMIT voiceConfigChanged();
+    writeVoiceConfig();
+}
+
+QString DesktopAssistantKcm::pollyRegion() const
+{
+    return m_pollyRegion;
+}
+
+void DesktopAssistantKcm::setPollyRegion(const QString &value)
+{
+    const QString normalized = value.trimmed();
+    if (m_pollyRegion == normalized) {
+        return;
+    }
+    m_pollyRegion = normalized;
     Q_EMIT voiceConfigChanged();
     writeVoiceConfig();
 }
@@ -1841,6 +2001,23 @@ void DesktopAssistantKcm::setVoiceAutostart(bool enabled)
     // refused, e.g. for a static unit).
     m_voiceAutostart = probeVoiceAutostart();
     Q_EMIT voiceChanged();
+}
+
+void DesktopAssistantKcm::restartVoiceService()
+{
+    // Config-file settings (TTS backend + per-backend keys, STT, devices,
+    // sensitivity) only take effect on (re)start, so this applies them without
+    // leaving the page. `restart` starts the unit if it was stopped, which is
+    // the behaviour we want from a "Restart voice service" button.
+    bool ok = false;
+    runSystemctlUser(
+        QStringList{QStringLiteral("restart"), QString::fromUtf8(VOICE_UNIT)}, &ok);
+    m_statusText = ok ? QStringLiteral("Voice service restarted")
+                      : QStringLiteral("Failed to restart the voice service");
+    Q_EMIT statusTextChanged();
+    // The restart re-spawns the daemon and re-reads config; reconcile the page
+    // (availability, enabled, voice list, autostart) against the new process.
+    loadVoiceSettings();
 }
 
 void DesktopAssistantKcm::daemonCall(const QString &command, const QJSValue &payload, const QJSValue &callback)
