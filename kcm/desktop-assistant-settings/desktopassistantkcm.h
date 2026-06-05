@@ -65,9 +65,18 @@ class DesktopAssistantKcm : public KQuickConfigModule {
     // Tri-state autostart: -1 unknown/unit-not-installed, 0 disabled/masked, 1 enabled.
     Q_PROPERTY(int voiceAutostart READ voiceAutostart NOTIFY voiceChanged)
     Q_PROPERTY(QString sttLanguage READ sttLanguage WRITE setSttLanguage NOTIFY voiceConfigChanged)
+    Q_PROPERTY(QString sttModelPath READ sttModelPath WRITE setSttModelPath NOTIFY voiceConfigChanged)
     Q_PROPERTY(double wakeSensitivity READ wakeSensitivity WRITE setWakeSensitivity NOTIFY voiceConfigChanged)
     Q_PROPERTY(QString inputDevice READ inputDevice WRITE setInputDevice NOTIFY voiceConfigChanged)
     Q_PROPERTY(QString outputDevice READ outputDevice WRITE setOutputDevice NOTIFY voiceConfigChanged)
+    // Pluggable TTS backend (adele-kde#33): tts.backend in config.toml, plus the
+    // per-backend keys the GUI exposes. Applied on the next service (re)start,
+    // not hot over D-Bus — hence the Restart button (restartVoiceService()).
+    Q_PROPERTY(QString ttsBackend READ ttsBackend WRITE setTtsBackend NOTIFY voiceConfigChanged)
+    Q_PROPERTY(QString kokoroLang READ kokoroLang WRITE setKokoroLang NOTIFY voiceConfigChanged)
+    Q_PROPERTY(QString piperModelPath READ piperModelPath WRITE setPiperModelPath NOTIFY voiceConfigChanged)
+    Q_PROPERTY(QString pollyEngine READ pollyEngine WRITE setPollyEngine NOTIFY voiceConfigChanged)
+    Q_PROPERTY(QString pollyRegion READ pollyRegion WRITE setPollyRegion NOTIFY voiceConfigChanged)
 
 public:
     DesktopAssistantKcm(QObject *parent, const KPluginMetaData &metaData, const QVariantList &args);
@@ -190,12 +199,24 @@ public:
     int voiceAutostart() const;
     QString sttLanguage() const;
     void setSttLanguage(const QString &value);
+    QString sttModelPath() const;
+    void setSttModelPath(const QString &value);
     double wakeSensitivity() const;
     void setWakeSensitivity(double value);
     QString inputDevice() const;
     void setInputDevice(const QString &value);
     QString outputDevice() const;
     void setOutputDevice(const QString &value);
+    QString ttsBackend() const;
+    void setTtsBackend(const QString &value);
+    QString kokoroLang() const;
+    void setKokoroLang(const QString &value);
+    QString piperModelPath() const;
+    void setPiperModelPath(const QString &value);
+    QString pollyEngine() const;
+    void setPollyEngine(const QString &value);
+    QString pollyRegion() const;
+    void setPollyRegion(const QString &value);
 
     /// Re-probe the voice service (D-Bus) and re-read its TOML config + the
     /// autostart unit state. Called when the Voice tab loads so the page
@@ -207,6 +228,10 @@ public:
     /// Enable/disable the adele-voice systemd user unit (autostart at login).
     /// `enabled` true -> `systemctl --user enable`; false -> `disable`.
     Q_INVOKABLE void setVoiceAutostart(bool enabled);
+    /// Restart the adele-voice systemd user unit so config-file changes (TTS
+    /// backend, per-backend keys, STT, devices, sensitivity) take effect
+    /// without leaving the page. Re-reads live state afterwards.
+    Q_INVOKABLE void restartVoiceService();
 
     Q_INVOKABLE void load() override;
     Q_INVOKABLE void save() override;
@@ -366,7 +391,17 @@ private:
     int m_voiceCurrentSpeaker = -1;
     int m_voiceAutostart = -1;
     QString m_sttLanguage = QStringLiteral("en");
+    QString m_sttModelPath;
     double m_wakeSensitivity = 0.5;
     QString m_inputDevice = QStringLiteral("default");
     QString m_outputDevice = QStringLiteral("default");
+    // TTS backend selection (adele-kde#33). Defaults mirror the daemon's
+    // TtsConfig::default() (repo adelie-ai/voice, crates/daemon/src/config.rs):
+    // Kokoro is the local default backend; polly_region is optional (omitted
+    // from the file when empty, since the daemon types it as Option<String>).
+    QString m_ttsBackend = QStringLiteral("kokoro");
+    QString m_kokoroLang = QStringLiteral("en-us");
+    QString m_piperModelPath;
+    QString m_pollyEngine = QStringLiteral("neural");
+    QString m_pollyRegion;
 };
