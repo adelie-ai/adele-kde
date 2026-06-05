@@ -234,6 +234,25 @@ class VoiceCliShapeTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(payload["ok"])
 
+    def test_voice_push_to_talk_without_id_uses_own_session(self) -> None:
+        # No conversation id -> plain PushToTalk() (the daemon's own "Voice
+        # Conversation" session), matching the wake word. (voice#24)
+        captured = []
+        dbus_client._run_gdbus_voice = lambda *a: captured.append(a) or None
+        rc, _payload = self._run(["voice-push-to-talk"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured, [("PushToTalk",)])
+
+    def test_voice_push_to_talk_routes_to_conversation(self) -> None:
+        # With --conversation-id, PTT must call PushToTalkInConversation(<id>)
+        # so the daemon dictates into the chat the user is viewing. (voice#24)
+        captured = []
+        dbus_client._run_gdbus_voice = lambda *a: captured.append(a) or None
+        rc, payload = self._run(["voice-push-to-talk", "--conversation-id", "conv-123"])
+        self.assertEqual(rc, 0)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(captured, [("PushToTalkInConversation", "conv-123")])
+
     def test_voice_command_error_maps_to_exit_1(self) -> None:
         def boom(*_a):
             raise dbus_client.DbusError(

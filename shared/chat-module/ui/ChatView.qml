@@ -487,6 +487,18 @@ Item {
         )
     }
 
+    // Build the push-to-talk helper invocation. Factored out (and exposed) so
+    // it's unit-testable without a live daemon: with an orchestrator
+    // conversation id the daemon dictates into THAT conversation (voice#24); an
+    // empty id falls back to its own "Voice Conversation" session. The id is
+    // shell-escaped because it's interpolated into the helper command line.
+    function pushToTalkHelperArgs(convId) {
+        if (convId && convId.length > 0) {
+            return "voice-push-to-talk --conversation-id " + shellEscape(convId)
+        }
+        return "voice-push-to-talk"
+    }
+
     // Start an explicit dictation turn (push-to-talk). Works even when the
     // wake word is off. Optimistically reflect Listening so the UI responds
     // immediately; the next poll confirms the real pipeline state.
@@ -498,8 +510,11 @@ Item {
             // Barge-in: stop playback first so PTT isn't fighting the speaker.
             voiceStopSpeaking()
         }
+        // Dictate into the conversation this view is showing (voice#24) so the
+        // spoken prompt and reply land in this chat, not the daemon's own
+        // session (see pushToTalkHelperArgs).
         runCommand(
-            helperCommand("voice-push-to-talk"),
+            helperCommand(pushToTalkHelperArgs(conversationId)),
             function(_stdout) {
                 voiceState = "Listening"
                 refreshVoiceStatus()
