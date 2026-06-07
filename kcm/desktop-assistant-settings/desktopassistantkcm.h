@@ -7,6 +7,9 @@
 #include <QVector>
 
 class QDBusMessage;
+class QFile;
+class QNetworkAccessManager;
+class QNetworkReply;
 
 class DesktopAssistantKcm : public KQuickConfigModule {
     Q_OBJECT
@@ -66,6 +69,17 @@ class DesktopAssistantKcm : public KQuickConfigModule {
     Q_PROPERTY(int voiceAutostart READ voiceAutostart NOTIFY voiceChanged)
     Q_PROPERTY(QString sttLanguage READ sttLanguage WRITE setSttLanguage NOTIFY voiceConfigChanged)
     Q_PROPERTY(QString sttModelPath READ sttModelPath WRITE setSttModelPath NOTIFY voiceConfigChanged)
+    // Whisper STT model download state (adele-kde#44). The Voice tab's model
+    // selector can fetch a missing catalog model into the models dir. Exposed so
+    // QML can show progress, disable the controls in flight, and surface errors.
+    //   * sttDownloadActive — a download is currently running.
+    //   * sttDownloadProgress — 0..100 (-1 = indeterminate / not started).
+    //   * sttDownloadError — last failure message ("" when none).
+    //   * sttDownloadingFile — basename of the model being fetched ("" when idle).
+    Q_PROPERTY(bool sttDownloadActive READ sttDownloadActive NOTIFY sttDownloadChanged)
+    Q_PROPERTY(int sttDownloadProgress READ sttDownloadProgress NOTIFY sttDownloadChanged)
+    Q_PROPERTY(QString sttDownloadError READ sttDownloadError NOTIFY sttDownloadChanged)
+    Q_PROPERTY(QString sttDownloadingFile READ sttDownloadingFile NOTIFY sttDownloadChanged)
     Q_PROPERTY(double wakeSensitivity READ wakeSensitivity WRITE setWakeSensitivity NOTIFY voiceConfigChanged)
     Q_PROPERTY(QString inputDevice READ inputDevice WRITE setInputDevice NOTIFY voiceConfigChanged)
     Q_PROPERTY(QString outputDevice READ outputDevice WRITE setOutputDevice NOTIFY voiceConfigChanged)
@@ -233,6 +247,10 @@ public:
     void setSttLanguage(const QString &value);
     QString sttModelPath() const;
     void setSttModelPath(const QString &value);
+    bool sttDownloadActive() const;
+    int sttDownloadProgress() const;
+    QString sttDownloadError() const;
+    QString sttDownloadingFile() const;
     double wakeSensitivity() const;
     void setWakeSensitivity(double value);
     QString inputDevice() const;
@@ -297,6 +315,27 @@ public:
     /// UnknownMethod / any failure fall back to restarting the systemd user
     /// unit. Forward-compatible — works whether or not voice#52 has landed.
     Q_INVOKABLE void applyVoiceChanges();
+
+    // --- Whisper STT model selector (adele-kde#44) ---------------------------
+    /// Absolute path of the directory the voice daemon resolves Whisper models
+    /// from: $XDG_DATA_HOME/adele-voice/models (fallback
+    /// ~/.local/share/adele-voice/models). QML composes the absolute model_path
+    /// it writes back as sttModelsDir() + "/" + <catalog file>.
+    Q_INVOKABLE QString sttModelsDir() const;
+    /// True when a Whisper model is present on disk. `fileOrPath` may be a bare
+    /// catalog filename (resolved against sttModelsDir()) or an absolute/relative
+    /// path (checked as given). Empty -> false.
+    Q_INVOKABLE bool sttModelInstalled(const QString &fileOrPath) const;
+    /// Download a catalog Whisper model into the models dir. `fileName` is the
+    /// catalog basename (also the on-disk name); `url` is its download URL.
+    /// Fetches to a temp file and atomically renames on success; updates the
+    /// sttDownload* properties (progress/active/error) as it runs. A no-op if a
+    /// download is already in flight. On success emits voiceConfigChanged() so
+    /// the page re-evaluates presence (the "not downloaded" warning clears).
+    Q_INVOKABLE void downloadSttModel(const QString &fileName, const QString &url);
+    /// Cancel an in-flight model download (aborts the transfer; the partial temp
+    /// file is removed). No-op when idle.
+    Q_INVOKABLE void cancelSttModelDownload();
 
     /// Re-enumerate input/output audio devices (PipeWire/Pulse via pactl,
     /// falling back to ALSA card names) into inputDeviceOptions/
@@ -389,6 +428,10 @@ Q_SIGNALS:
     // only the daemon's reported state (enabled / voice list) refreshes.
     void voiceChanged();
     void voiceConfigChanged();
+    // Whisper STT model download state changed (adele-kde#44): active/progress/
+    // error/file. Separate from voiceConfigChanged so progress ticks don't churn
+    // the config text bindings.
+    void sttDownloadChanged();
     // Enumerated audio device lists changed (loadAudioDevices()).
     void audioDevicesChanged();
     // Any of the seven personality traits changed (adele-kde#42). One shared
@@ -457,6 +500,13 @@ private:
     // caller prepends "Follow system default".
     QVariantList enumerateAudioDevices(const QString &direction) const;
 
+    // --- Whisper STT model download (adele-kde#44) ---------------------------
+    // Reset the sttDownload* state to idle and emit sttDownloadChanged.
+    void resetSttDownloadState();
+    // Tear down the in-flight download: abort+delete the reply, close+remove the
+    // temp file. `keepError` preserves m_sttDownloadError (set by the caller).
+    void cleanupSttDownload(bool keepError);
+
     static QString voiceConfigPath();
 
     QString m_connector;
@@ -505,6 +555,18 @@ private:
     int m_voiceAutostart = -1;
     QString m_sttLanguage = QStringLiteral("en");
     QString m_sttModelPath;
+    // Whisper model download (adele-kde#44). The QNAM is created lazily on first
+    // download and reused; reply + temp file live only for the duration of a
+    // single transfer.
+    QNetworkAccessManager *m_sttNam = nullptr;
+    QNetworkReply *m_sttReply = nullptr;
+    QFile *m_sttTempFile = nullptr;
+    QString m_sttDownloadTempPath;
+    QString m_sttDownloadDestPath;
+    QString m_sttDownloadingFile;
+    QString m_sttDownloadError;
+    int m_sttDownloadProgress = -1;
+    bool m_sttDownloadActive = false;
     double m_wakeSensitivity = 0.5;
     QString m_inputDevice = QStringLiteral("default");
     QString m_outputDevice = QStringLiteral("default");

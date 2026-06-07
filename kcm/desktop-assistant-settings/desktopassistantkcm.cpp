@@ -18,6 +18,9 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QPointer>
 #include <QProcess>
 #include <QRegularExpression>
@@ -1983,6 +1986,241 @@ void DesktopAssistantKcm::setSttModelPath(const QString &value)
     m_sttModelPath = normalized;
     Q_EMIT voiceConfigChanged();
     writeVoiceConfig();
+}
+
+// --- Whisper STT model selector (adele-kde#44) ------------------------------
+
+QString DesktopAssistantKcm::sttModelsDir() const
+{
+    // Match the voice daemon's resolution: $XDG_DATA_HOME/adele-voice/models
+    // (GenericDataLocation honours XDG_DATA_HOME and falls back to
+    // ~/.local/share). The path is absolute, which is what we write into
+    // stt.model_path (the daemon does not tilde-expand).
+    const QString dataHome = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
+    return QDir(dataHome).filePath(QStringLiteral("adele-voice/models"));
+}
+
+bool DesktopAssistantKcm::sttModelInstalled(const QString &fileOrPath) const
+{
+    const QString trimmed = fileOrPath.trimmed();
+    if (trimmed.isEmpty()) {
+        return false;
+    }
+    // A bare basename resolves against the models dir; anything that looks like a
+    // path (absolute or containing a separator) is checked as given.
+    const bool looksLikePath = trimmed.contains(QLatin1Char('/'));
+    const QString resolved =
+        looksLikePath ? trimmed : QDir(sttModelsDir()).filePath(trimmed);
+    return QFileInfo::exists(resolved);
+}
+
+bool DesktopAssistantKcm::sttDownloadActive() const
+{
+    return m_sttDownloadActive;
+}
+
+int DesktopAssistantKcm::sttDownloadProgress() const
+{
+    return m_sttDownloadProgress;
+}
+
+QString DesktopAssistantKcm::sttDownloadError() const
+{
+    return m_sttDownloadError;
+}
+
+QString DesktopAssistantKcm::sttDownloadingFile() const
+{
+    return m_sttDownloadingFile;
+}
+
+void DesktopAssistantKcm::resetSttDownloadState()
+{
+    m_sttDownloadActive = false;
+    m_sttDownloadProgress = -1;
+    m_sttDownloadingFile.clear();
+    m_sttDownloadTempPath.clear();
+    m_sttDownloadDestPath.clear();
+    Q_EMIT sttDownloadChanged();
+}
+
+void DesktopAssistantKcm::cleanupSttDownload(bool keepError)
+{
+    if (m_sttReply != nullptr) {
+        m_sttReply->disconnect(this);
+        if (m_sttReply->isRunning()) {
+            m_sttReply->abort();
+        }
+        m_sttReply->deleteLater();
+        m_sttReply = nullptr;
+    }
+    if (m_sttTempFile != nullptr) {
+        if (m_sttTempFile->isOpen()) {
+            m_sttTempFile->close();
+        }
+        if (!m_sttDownloadTempPath.isEmpty()) {
+            QFile::remove(m_sttDownloadTempPath);
+        }
+        delete m_sttTempFile;
+        m_sttTempFile = nullptr;
+    }
+    if (!keepError) {
+        m_sttDownloadError.clear();
+    }
+    resetSttDownloadState();
+}
+
+void DesktopAssistantKcm::cancelSttModelDownload()
+{
+    if (!m_sttDownloadActive) {
+        return;
+    }
+    cleanupSttDownload(/*keepError=*/false);
+    m_statusText = QStringLiteral("Model download cancelled");
+    Q_EMIT statusTextChanged();
+}
+
+void DesktopAssistantKcm::downloadSttModel(const QString &fileName, const QString &url)
+{
+    // One download at a time — ignore re-entrant requests rather than racing two
+    // transfers onto the same temp/dest path.
+    if (m_sttDownloadActive) {
+        return;
+    }
+
+    const QString cleanName = QFileInfo(fileName.trimmed()).fileName();
+    const QUrl src(url.trimmed());
+    // Guard against a malformed catalog entry or a non-HTTPS URL — we only fetch
+    // model files over https from the curated catalog.
+    if (cleanName.isEmpty() || !src.isValid() || src.scheme() != QLatin1String("https")) {
+        m_sttDownloadError = QStringLiteral("Invalid model download request");
+        m_statusText = m_sttDownloadError;
+        Q_EMIT statusTextChanged();
+        Q_EMIT sttDownloadChanged();
+        return;
+    }
+
+    const QString dir = sttModelsDir();
+    if (!QDir().mkpath(dir)) {
+        m_sttDownloadError = QStringLiteral("Unable to create the models directory");
+        m_statusText = m_sttDownloadError;
+        Q_EMIT statusTextChanged();
+        Q_EMIT sttDownloadChanged();
+        return;
+    }
+
+    m_sttDownloadDestPath = QDir(dir).filePath(cleanName);
+    // Download to a sibling temp file, then atomically rename on success so a
+    // half-finished file can never be mistaken for an installed model.
+    m_sttDownloadTempPath = m_sttDownloadDestPath + QStringLiteral(".part");
+    QFile::remove(m_sttDownloadTempPath);
+
+    m_sttTempFile = new QFile(m_sttDownloadTempPath);
+    if (!m_sttTempFile->open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        delete m_sttTempFile;
+        m_sttTempFile = nullptr;
+        m_sttDownloadError = QStringLiteral("Unable to open a temporary file for download");
+        m_statusText = m_sttDownloadError;
+        Q_EMIT statusTextChanged();
+        Q_EMIT sttDownloadChanged();
+        return;
+    }
+
+    if (m_sttNam == nullptr) {
+        m_sttNam = new QNetworkAccessManager(this);
+    }
+
+    m_sttDownloadActive = true;
+    m_sttDownloadProgress = 0;
+    m_sttDownloadingFile = cleanName;
+    m_sttDownloadError.clear();
+    m_statusText = QStringLiteral("Downloading %1…").arg(cleanName);
+    Q_EMIT statusTextChanged();
+    Q_EMIT sttDownloadChanged();
+
+    QNetworkRequest request(src);
+    // HuggingFace `resolve/main` URLs 302-redirect to a CDN; allow it.
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                         QNetworkRequest::NoLessSafeRedirectPolicy);
+    request.setHeader(QNetworkRequest::UserAgentHeader,
+                      QStringLiteral("adele-kde-kcm/1.0"));
+
+    m_sttReply = m_sttNam->get(request);
+
+    connect(m_sttReply, &QNetworkReply::readyRead, this, [this]() {
+        if (m_sttTempFile != nullptr && m_sttReply != nullptr) {
+            m_sttTempFile->write(m_sttReply->readAll());
+        }
+    });
+    connect(m_sttReply, &QNetworkReply::downloadProgress, this,
+            [this](qint64 received, qint64 total) {
+                const int pct = (total > 0)
+                    ? static_cast<int>((received * 100) / total)
+                    : -1;
+                if (pct != m_sttDownloadProgress) {
+                    m_sttDownloadProgress = pct;
+                    Q_EMIT sttDownloadChanged();
+                }
+            });
+    connect(m_sttReply, &QNetworkReply::finished, this, [this, cleanName]() {
+        if (m_sttReply == nullptr) {
+            return;
+        }
+        const bool ok = m_sttReply->error() == QNetworkReply::NoError;
+        const QString errString = m_sttReply->errorString();
+
+        // Flush any trailing buffered bytes before we evaluate success.
+        if (m_sttTempFile != nullptr) {
+            if (m_sttReply->bytesAvailable() > 0) {
+                m_sttTempFile->write(m_sttReply->readAll());
+            }
+            m_sttTempFile->flush();
+            m_sttTempFile->close();
+        }
+
+        m_sttReply->deleteLater();
+        m_sttReply = nullptr;
+
+        if (!ok) {
+            // Failure: drop the temp file, surface the error, clear in-flight.
+            if (m_sttTempFile != nullptr) {
+                delete m_sttTempFile;
+                m_sttTempFile = nullptr;
+            }
+            QFile::remove(m_sttDownloadTempPath);
+            m_sttDownloadError = errString.isEmpty()
+                ? QStringLiteral("Download failed")
+                : errString;
+            m_statusText = QStringLiteral("Download of %1 failed: %2")
+                               .arg(cleanName, m_sttDownloadError);
+            Q_EMIT statusTextChanged();
+            // keepError so the QML warning row can show what went wrong.
+            cleanupSttDownload(/*keepError=*/true);
+            return;
+        }
+
+        delete m_sttTempFile;
+        m_sttTempFile = nullptr;
+
+        // Atomic publish: replace any stale dest, then rename temp -> dest.
+        QFile::remove(m_sttDownloadDestPath);
+        const bool renamed = QFile::rename(m_sttDownloadTempPath, m_sttDownloadDestPath);
+        if (!renamed) {
+            QFile::remove(m_sttDownloadTempPath);
+            m_sttDownloadError = QStringLiteral("Could not move the downloaded model into place");
+            m_statusText = m_sttDownloadError;
+            Q_EMIT statusTextChanged();
+            cleanupSttDownload(/*keepError=*/true);
+            return;
+        }
+
+        m_statusText = QStringLiteral("Downloaded %1").arg(cleanName);
+        Q_EMIT statusTextChanged();
+        // Clear in-flight state (no error), then nudge the page to re-evaluate
+        // presence so the "(not downloaded)" annotation/warning clears.
+        cleanupSttDownload(/*keepError=*/false);
+        Q_EMIT voiceConfigChanged();
+    });
 }
 
 QString DesktopAssistantKcm::ttsBackend() const

@@ -23,6 +23,7 @@ import org.kde.kirigami as Kirigami
 
 import "VoiceBackends.js" as VoiceBackends
 import "AudioDevices.js" as AudioDevices
+import "WhisperModels.js" as WhisperModels
 
 ColumnLayout {
     id: root
@@ -81,6 +82,105 @@ ColumnLayout {
     // binding-friendly call site.
     function deviceIndexByValue(options, value) {
         return AudioDevices.deviceIndexByValue(options, value)
+    }
+
+    // --- Whisper STT model selector (adele-kde#44) --------------------------
+    // The catalog + file<->row + custom-path logic lives in WhisperModels.js so
+    // it can be unit-tested without the C++ `kcm` context (see
+    // tests/qml/tst_WhisperModels.qml). The page composes the ComboBox model
+    // from the catalog, plus (1) an optional leading "Custom: <path>" row when
+    // the configured path is hand-edited / not in the catalog, and (2) a trailing
+    // "Other / custom path…" row that reveals the free-form field.
+    //
+    // sttUseCustom drives that free-form mode: true when the user explicitly
+    // picks "Other / custom path…", OR when the configured path is a custom one
+    // (so a hand-edited config.toml round-trips losslessly — opening + closing
+    // the KCM leaves it untouched).
+    property bool sttUseCustom: WhisperModels.isCustomPath(kcm.sttModelPath)
+
+    // The configured path's basename is a hand-edited/custom one.
+    readonly property bool sttPathIsCustom: WhisperModels.isCustomPath(kcm.sttModelPath)
+
+    // ComboBox row objects. Each is { key, file, label, url, custom }.
+    //   * one row per catalog model (with a "(not downloaded)" suffix when
+    //     missing from disk),
+    //   * a leading "Custom: <path>" row iff the configured path is custom,
+    //   * a trailing "Other / custom path…" row (key "other").
+    function sttModelRows() {
+        const rows = []
+        if (root.sttPathIsCustom) {
+            rows.push({
+                key: "custom-current",
+                file: "",
+                label: "Custom: " + kcm.sttModelPath,
+                url: "",
+                custom: true,
+            })
+        }
+        const models = WhisperModels.MODELS
+        for (let i = 0; i < models.length; i++) {
+            const m = models[i]
+            const present = kcm.sttModelInstalled(m.file)
+            rows.push({
+                key: m.file,
+                file: m.file,
+                label: present ? m.label : (m.label + " (not downloaded)"),
+                url: m.url,
+                custom: false,
+            })
+        }
+        rows.push({
+            key: "other",
+            file: "",
+            label: "Other / custom path…",
+            url: "",
+            custom: true,
+        })
+        return rows
+    }
+
+    // Row index in sttModelRows() that matches the current state: the custom
+    // row when a custom path is configured, else the catalog row by basename.
+    function sttCurrentIndex() {
+        const rows = root.sttModelRows()
+        if (root.sttPathIsCustom) {
+            for (let i = 0; i < rows.length; i++) {
+                if (rows[i].key === "custom-current") {
+                    return i
+                }
+            }
+        }
+        const file = WhisperModels.basename(kcm.sttModelPath)
+        for (let j = 0; j < rows.length; j++) {
+            if (rows[j].key === file) {
+                return j
+            }
+        }
+        // No configured path (daemon default) -> first catalog row.
+        for (let k = 0; k < rows.length; k++) {
+            if (!rows[k].custom) {
+                return k
+            }
+        }
+        return 0
+    }
+
+    // The catalog entry currently selected, or null when on a custom row.
+    function sttSelectedCatalogModel() {
+        const file = WhisperModels.basename(kcm.sttModelPath)
+        const idx = WhisperModels.modelIndexByFile(file)
+        const m = WhisperModels.MODELS[idx]
+        return (m && m.file === file) ? m : null
+    }
+
+    // A catalog model is selected but its file is not on disk.
+    readonly property bool sttSelectedMissing: {
+        if (root.sttPathIsCustom || kcm.sttModelPath.length === 0) {
+            return false
+        }
+        const file = WhisperModels.basename(kcm.sttModelPath)
+        const m = root.sttSelectedCatalogModel()
+        return m !== null && !kcm.sttModelInstalled(file)
     }
 
     Component.onCompleted: {
@@ -604,20 +704,149 @@ ColumnLayout {
         }
     }
 
+    // Whisper STT model selector (adele-kde#44): a catalog dropdown with on-disk
+    // presence + in-KCM download, replacing the old free-form path field. The
+    // free-form field is still reachable via the "Other / custom path…" option
+    // (and is auto-selected when the configured path is hand-edited), so custom
+    // paths round-trip losslessly.
     RowLayout {
         Layout.fillWidth: true
         enabled: root.voicePresent
         QQC2.Label {
-            text: "Whisper model path"
+            text: "Whisper model"
+            Layout.preferredWidth: 150
+        }
+        QQC2.ComboBox {
+            id: sttModelCombo
+            Layout.fillWidth: true
+            textRole: "label"
+            // Disabled while a download is in flight so the selection can't move
+            // out from under the transfer.
+            enabled: root.voicePresent && !kcm.sttDownloadActive
+            // Re-evaluated when the config or download state changes (presence
+            // suffix + custom row depend on both).
+            model: {
+                // Touch the deps so the binding refreshes on change.
+                void kcm.sttModelPath
+                void kcm.sttDownloadActive
+                void kcm.sttDownloadProgress
+                return root.sttModelRows()
+            }
+            currentIndex: {
+                void kcm.sttModelPath
+                void kcm.sttDownloadActive
+                return root.sttCurrentIndex()
+            }
+            onActivated: {
+                const rows = root.sttModelRows()
+                if (currentIndex < 0 || currentIndex >= rows.length) {
+                    return
+                }
+                const row = rows[currentIndex]
+                if (row.key === "other") {
+                    // Reveal the free-form field without touching the stored
+                    // path, so the user can type/keep an arbitrary path.
+                    root.sttUseCustom = true
+                    return
+                }
+                if (row.key === "custom-current") {
+                    // Re-selecting the existing custom row: keep it, surface the
+                    // free-form editor.
+                    root.sttUseCustom = true
+                    return
+                }
+                // Catalog model: write the ABSOLUTE path (daemon does not expand
+                // ~), leave free-form mode. Restart-required; the apply/restart
+                // flow at the top of the page picks it up.
+                root.sttUseCustom = false
+                kcm.sttModelPath = kcm.sttModelsDir() + "/" + row.file
+            }
+        }
+        QQC2.Button {
+            id: sttDownloadButton
+            text: kcm.sttDownloadActive ? "Downloading…" : "Download"
+            icon.name: "download"
+            // Only meaningful for a catalog model that isn't on disk yet.
+            visible: root.sttSelectedMissing || kcm.sttDownloadActive
+            enabled: root.sttSelectedMissing && !kcm.sttDownloadActive
+            onClicked: {
+                const m = root.sttSelectedCatalogModel()
+                if (m !== null) {
+                    kcm.downloadSttModel(m.file, m.url)
+                }
+            }
+        }
+    }
+
+    // Free-form custom path field (revealed via "Other / custom path…" or when
+    // the configured path is hand-edited). Preserves arbitrary model paths.
+    RowLayout {
+        Layout.fillWidth: true
+        visible: root.sttUseCustom
+        enabled: root.voicePresent && !kcm.sttDownloadActive
+        QQC2.Label {
+            text: "Custom model path"
             Layout.preferredWidth: 150
         }
         QQC2.TextField {
             id: sttModelPathField
             Layout.fillWidth: true
-            placeholderText: "~/.local/share/adele-voice/models/ggml-distil-large-v3.bin"
+            placeholderText: kcm.sttModelsDir() + "/ggml-distil-large-v3.bin"
             text: kcm.sttModelPath
             onEditingFinished: kcm.sttModelPath = text
         }
+    }
+
+    // Download progress (busy/percentage) while a model is being fetched.
+    RowLayout {
+        Layout.fillWidth: true
+        visible: kcm.sttDownloadActive
+        QQC2.Label {
+            text: "Downloading " + kcm.sttDownloadingFile
+            Layout.preferredWidth: 150
+            elide: Text.ElideRight
+        }
+        QQC2.ProgressBar {
+            Layout.fillWidth: true
+            from: 0
+            to: 100
+            // -1 = indeterminate (no Content-Length); show a busy bar.
+            indeterminate: kcm.sttDownloadProgress < 0
+            value: kcm.sttDownloadProgress < 0 ? 0 : kcm.sttDownloadProgress
+        }
+        QQC2.Button {
+            text: "Cancel"
+            icon.name: "dialog-cancel"
+            onClicked: kcm.cancelSttModelDownload()
+        }
+    }
+
+    // Inline warning when a selected catalog model isn't downloaded yet.
+    Kirigami.InlineMessage {
+        Layout.fillWidth: true
+        visible: root.sttSelectedMissing && !kcm.sttDownloadActive
+        type: Kirigami.MessageType.Warning
+        text: "This model isn’t downloaded yet. Click “Download” to fetch it "
+              + "into " + kcm.sttModelsDir() + " before the voice service can "
+              + "use it."
+    }
+
+    // Surface a failed download.
+    Kirigami.InlineMessage {
+        Layout.fillWidth: true
+        visible: kcm.sttDownloadError.length > 0 && !kcm.sttDownloadActive
+        type: Kirigami.MessageType.Error
+        text: "Model download failed: " + kcm.sttDownloadError
+    }
+
+    QQC2.Label {
+        Layout.fillWidth: true
+        wrapMode: Text.Wrap
+        opacity: 0.7
+        text: "Chooses the Whisper speech-recognition model. Larger models are "
+              + "more accurate but slower and bigger to download. STT model "
+              + "changes take effect after the voice service restarts — use "
+              + "“Restart voice service” above."
     }
 
     // --- Audio devices (adele-kde#37) ---------------------------------------
@@ -801,6 +1030,12 @@ ColumnLayout {
             }
             if (sttModelPathField.text !== kcm.sttModelPath) {
                 sttModelPathField.text = kcm.sttModelPath
+            }
+            // If a reload (or external edit) lands a custom/hand-edited path,
+            // reveal the free-form field so it round-trips; a catalog path leaves
+            // it hidden unless the user explicitly chose "Other / custom path…".
+            if (WhisperModels.isCustomPath(kcm.sttModelPath)) {
+                root.sttUseCustom = true
             }
             if (kokoroLangField.text !== kcm.kokoroLang) {
                 kokoroLangField.text = kcm.kokoroLang
