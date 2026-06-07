@@ -7,6 +7,7 @@
 #include <QVector>
 
 class QDBusMessage;
+class QDBusServiceWatcher;
 class QFile;
 class QNetworkAccessManager;
 class QNetworkReply;
@@ -547,6 +548,11 @@ private:
     QString m_oidcScopes = QStringLiteral("openid profile email");
 
     // Voice (adele-kde#30) runtime + config state.
+    // Watches org.desktopAssistant.Voice on the session bus so the page
+    // re-probes when the daemon (re)appears — e.g. after "Restart voice
+    // service" / "Apply now", where systemctl returns before the daemon has
+    // re-acquired its bus name. Without this the voice picker latches disabled.
+    QDBusServiceWatcher *m_voiceWatcher = nullptr;
     bool m_voiceServiceAvailable = false;
     bool m_voiceEnabled = false;
     QVariantList m_voiceList;
@@ -593,6 +599,12 @@ private:
     QString m_piperModelPath;
     QString m_pollyEngine = QStringLiteral("neural");
     QString m_pollyRegion;
+    // Persisted TTS voice selection per backend. SetVoice over D-Bus only
+    // changes the running daemon; these are written to config.toml so the choice
+    // survives a restart (otherwise the daemon reloads its default — "af_heart"
+    // for Kokoro). Defaults mirror the daemon's TtsConfig::default().
+    QString m_kokoroVoice = QStringLiteral("af_heart");
+    QString m_pollyVoice = QStringLiteral("Joanna");
 
     // Personality traits (adele-kde#42), 0..4 each. Defaults match the daemon's
     // built-in disposition and are what we fall back to when GetConfig fails

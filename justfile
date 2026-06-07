@@ -104,12 +104,12 @@ kcm-build:
     cmake -S {{kcm_dir}} -B {{kcm_build_dir}} -G Ninja -DCMAKE_BUILD_TYPE=Release
     cmake --build {{kcm_build_dir}}
 
-# Install KDE System Settings KCM (user-local prefix)
-kcm-install:
-    cmake -S {{kcm_dir}} -B {{kcm_build_dir}} -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$HOME/.local" -DKDE_INSTALL_PLUGINDIR="$HOME/.local/lib64/qt6/plugins"
-    cmake --build {{kcm_build_dir}}
-    cmake --install {{kcm_build_dir}}
-    rm -f "$HOME/.local/share/kservices5/kcm_desktopassistant_service.desktop"
+# Install the KCM (system paths, requires sudo). User-local installs are
+# unsupported: ~/.local/lib64/qt6/plugins isn't on the default Qt plugin search
+# path, so a copy there is invisible to a normally launched System Settings and
+# only causes duplicate-install drift. Use kcm-cleanup / kcm-doctor for strays.
+# Install the KCM (system paths, requires sudo); alias for kcm-install-system.
+kcm-install: kcm-install-system
 
 # Install KDE System Settings KCM into system paths (requires sudo)
 kcm-install-system:
@@ -130,19 +130,7 @@ kcm-install-system:
 # Refresh KDE cache and list Desktop Assistant KCM in current shell
 kcm-refresh:
     kbuildsycoca6 || true
-    kcmshell6 --list | grep -i kcm_desktopassistant || (if [ -f {{kcm_build_dir}}/prefix.sh ]; then set +u; source {{kcm_build_dir}}/prefix.sh; set -u; export QT_PLUGIN_PATH="$HOME/.local/lib64/qt6/plugins:${QT_PLUGIN_PATH:-}"; kcmshell6 --list | grep -i kcm_desktopassistant || true; fi)
-
-# Open Desktop Assistant KCM with local plugin environment
-kcm-open:
-    if [ -f {{kcm_build_dir}}/prefix.sh ]; then set +u; source {{kcm_build_dir}}/prefix.sh; set -u; fi
-    export QT_PLUGIN_PATH="$HOME/.local/lib64/qt6/plugins:${QT_PLUGIN_PATH:-}"
-    unset DESKTOP_STARTUP_ID
-    unset GTK_USE_PORTAL
-    unset GIO_USE_PORTALS
-    kquitapp6 systemsettings || true
-    pkill -f '^systemsettings' || true
-    sleep 0.3
-    QT_LOGGING_RULES="qt.qpa.services.warning=false" systemsettings kcm_desktopassistant
+    kcmshell6 --list | grep -i kcm_desktopassistant || true
 
 # Open Desktop Assistant KCM from system install paths
 kcm-open-system:

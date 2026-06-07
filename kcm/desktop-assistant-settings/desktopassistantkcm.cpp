@@ -6,9 +6,11 @@
 #include <QDateTime>
 
 #include <QDBusArgument>
+#include <QDBusConnectionInterface>
 #include <QDBusInterface>
 #include <QDBusMessage>
 #include <QDBusReply>
+#include <QDBusServiceWatcher>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -987,6 +989,26 @@ void DesktopAssistantKcm::load()
     // on open. This emits voiceChanged/voiceConfigChanged itself.
     loadVoiceSettings();
 
+    // Re-probe whenever the voice daemon comes or goes on the session bus.
+    // "Restart voice service" / "Apply now" call systemctl restart, which
+    // returns as soon as the process is spawned — before the daemon has
+    // re-acquired org.desktopAssistant.Voice. The immediate loadVoiceSettings()
+    // in restartVoiceService() therefore sees the name unregistered, clears the
+    // voice list, and the picker latches disabled with no later re-check. This
+    // watcher fires when the name is (re)acquired ~1s later and reloads the
+    // live state, so the picker re-enables on its own (and also tracks external
+    // start/stop of the daemon while the KCM is open). WatchForOwnerChange
+    // covers both registration and unregistration.
+    m_voiceWatcher = new QDBusServiceWatcher(
+        QString::fromUtf8(VOICE_SERVICE),
+        QDBusConnection::sessionBus(),
+        QDBusServiceWatcher::WatchForOwnerChange,
+        this);
+    connect(m_voiceWatcher, &QDBusServiceWatcher::serviceOwnerChanged, this,
+            [this](const QString &, const QString &, const QString &) {
+                loadVoiceSettings();
+            });
+
     Q_EMIT connectorChanged();
     Q_EMIT modelChanged();
     Q_EMIT baseUrlChanged();
@@ -1540,19 +1562,19 @@ QString DesktopAssistantKcm::voiceConfigPath()
 
 bool DesktopAssistantKcm::probeVoiceAvailable() const
 {
-    // NameHasOwner on the session bus — cheap, and (unlike constructing a
-    // QDBusInterface) it does NOT D-Bus-activate the service, so a masked /
-    // uninstalled daemon reports false instead of being spawned.
-    QDBusInterface dbusDaemon(
-        QStringLiteral("org.freedesktop.DBus"),
-        QStringLiteral("/org/freedesktop/DBus"),
-        QStringLiteral("org.freedesktop.DBus"),
-        QDBusConnection::sessionBus()
-    );
-    if (!dbusDaemon.isValid()) {
+    // Ask the bus whether the name currently has an owner. We must go through
+    // QDBusConnectionInterface (isServiceRegistered) rather than constructing a
+    // raw QDBusInterface to org.freedesktop.DBus: the latter comes back
+    // isValid() == false (the bus daemon object isn't usable as a generic
+    // remote interface), which made this function ALWAYS return false and left
+    // the voice picker permanently disabled. isServiceRegistered checks current
+    // ownership only — it does NOT D-Bus-activate the service, so a masked /
+    // uninstalled daemon still reports false instead of being spawned.
+    QDBusConnectionInterface *bus = QDBusConnection::sessionBus().interface();
+    if (bus == nullptr) {
         return false;
     }
-    QDBusReply<bool> reply = dbusDaemon.call(QStringLiteral("NameHasOwner"), QString::fromUtf8(VOICE_SERVICE));
+    QDBusReply<bool> reply = bus->isServiceRegistered(QString::fromUtf8(VOICE_SERVICE));
     return reply.isValid() && reply.value();
 }
 
@@ -1623,6 +1645,8 @@ void DesktopAssistantKcm::readVoiceConfig()
     m_piperModelPath.clear();
     m_pollyEngine = QStringLiteral("neural");
     m_pollyRegion.clear();
+    m_kokoroVoice = QStringLiteral("af_heart");
+    m_pollyVoice = QStringLiteral("Joanna");
 
     QFile file(voiceConfigPath());
     if (!file.exists() || !file.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -1703,6 +1727,10 @@ void DesktopAssistantKcm::readVoiceConfig()
                 m_ttsBackend = value;
             } else if (key == QLatin1String("kokoro_lang")) {
                 m_kokoroLang = value;
+            } else if (key == QLatin1String("kokoro_voice")) {
+                m_kokoroVoice = value;
+            } else if (key == QLatin1String("polly_voice")) {
+                m_pollyVoice = value;
             } else if (key == QLatin1String("model_path")) {
                 // [tts].model_path is the Piper voice model (distinct from
                 // [stt].model_path, the Whisper model).
@@ -1772,6 +1800,11 @@ bool DesktopAssistantKcm::writeVoiceConfig()
         {QStringLiteral("stt"), QStringLiteral("model_path"), m_sttModelPath, true, true, false},
         {QStringLiteral("tts"), QStringLiteral("backend"), m_ttsBackend, true, false, false},
         {QStringLiteral("tts"), QStringLiteral("kokoro_lang"), m_kokoroLang, true, false, false},
+        // Persisted voice selection so a restart keeps the user's pick instead
+        // of falling back to the daemon default (see setVoice). omit-when-empty
+        // so clearing it restores the daemon default.
+        {QStringLiteral("tts"), QStringLiteral("kokoro_voice"), m_kokoroVoice, true, true, false},
+        {QStringLiteral("tts"), QStringLiteral("polly_voice"), m_pollyVoice, true, true, false},
         {QStringLiteral("tts"), QStringLiteral("model_path"), m_piperModelPath, true, true, false},
         {QStringLiteral("tts"), QStringLiteral("polly_engine"), m_pollyEngine, true, false, false},
         {QStringLiteral("tts"), QStringLiteral("polly_region"), m_pollyRegion, true, true, false},
@@ -2542,8 +2575,26 @@ void DesktopAssistantKcm::setVoice(const QString &voiceId, int speaker)
     }
     m_voiceCurrentId = id;
     m_voiceCurrentSpeaker = speaker;
+
+    // SetVoice above only changes the RUNNING daemon. Persist the choice to
+    // config.toml under the active backend's voice key as well, so a restart
+    // (or "Restart voice service") reloads it instead of falling back to the
+    // daemon default. The key is backend-specific (repo adelie-ai/voice,
+    // crates/module/src/config.rs): Kokoro -> kokoro_voice, Polly -> polly_voice,
+    // Piper -> model_path (the daemon resolves <models_dir>/<id>.onnx, and our
+    // sttModelsDir() matches that models dir).
+    if (m_ttsBackend == QLatin1String("polly")) {
+        m_pollyVoice = id;
+    } else if (m_ttsBackend == QLatin1String("piper")) {
+        m_piperModelPath = QDir(sttModelsDir()).filePath(id + QStringLiteral(".onnx"));
+    } else {
+        m_kokoroVoice = id;
+    }
+    writeVoiceConfig();
+
     m_statusText = QStringLiteral("Voice set to %1").arg(id);
     Q_EMIT voiceChanged();
+    Q_EMIT voiceConfigChanged();
     Q_EMIT statusTextChanged();
 }
 
