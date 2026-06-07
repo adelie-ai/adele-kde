@@ -12,6 +12,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QJSEngine>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -20,6 +21,7 @@
 #include <QPointer>
 #include <QProcess>
 #include <QRegularExpression>
+#include <QSet>
 #include <QStandardPaths>
 #include <QStringList>
 #include <QTextStream>
@@ -1333,6 +1335,33 @@ void DesktopAssistantKcm::emitConnectionSelectionChanged()
 
 // === Voice page (adele-kde#30) ==============================================
 
+namespace {
+// Documented recommended defaults the "Reset to defaults" buttons restore
+// (adele-kde#37). These are the values the issue documents as the good
+// starting point; they can differ from the daemon's absent-key fallbacks
+// (e.g. silence/follow-up) where the recommended UX value is more forgiving.
+constexpr double kVoiceDefaultSensitivity = 0.45;
+constexpr double kVoiceDefaultSpeechThreshold = 0.5;
+constexpr int kVoiceDefaultSilenceDurationMs = 3000;
+constexpr int kVoiceDefaultFollowupTimeoutMs = 10000;
+constexpr bool kVoiceDefaultWakeEager = false;
+
+// Format a double as a TOML float literal that ALWAYS carries a decimal point.
+// The daemon's f32 config fields (wake_word.sensitivity, vad.speech_threshold)
+// are parsed by the `toml` crate, which does NOT coerce a bare integer into a
+// float field — so emitting "1" or "0" for a slider at its extreme would make
+// the whole config fail to parse. Guarantee a fractional part (e.g. "1.0").
+QString formatTomlFloat(double value)
+{
+    QString s = QString::number(value, 'g', 4);
+    if (!s.contains(QLatin1Char('.')) && !s.contains(QLatin1Char('e'))
+        && !s.contains(QLatin1Char('E'))) {
+        s += QStringLiteral(".0");
+    }
+    return s;
+}
+}
+
 QString DesktopAssistantKcm::voiceConfigPath()
 {
     // The voice daemon reads ~/.config/adele-voice/config.toml (XDG config).
@@ -1412,6 +1441,14 @@ void DesktopAssistantKcm::readVoiceConfig()
     m_wakeSensitivity = 0.5;
     m_inputDevice = QStringLiteral("default");
     m_outputDevice = QStringLiteral("default");
+    // Tuning knobs (adele-kde#37): absent-key fallbacks mirror the daemon's
+    // VadConfig/AssistantConfig::default() so the page shows what the daemon
+    // would actually use, not the (more forgiving) Reset-button values.
+    m_vadSpeechThreshold = 0.5;
+    m_vadSilenceDurationMs = 800;
+    m_followupTimeoutMs = 8000;
+    m_wakeEager = false;
+    m_listeningCue.clear();
     m_ttsBackend = QStringLiteral("kokoro");
     m_kokoroLang = QStringLiteral("en-us");
     m_piperModelPath.clear();
@@ -1458,6 +1495,32 @@ void DesktopAssistantKcm::readVoiceConfig()
                 const double d = value.toDouble(&parsed);
                 if (parsed) {
                     m_wakeSensitivity = d;
+                }
+            } else if (key == QLatin1String("eager")) {
+                m_wakeEager = value.compare(QLatin1String("true"), Qt::CaseInsensitive) == 0;
+            } else if (key == QLatin1String("listening_cue")) {
+                m_listeningCue = value;
+            }
+        } else if (currentSection == QLatin1String("vad")) {
+            if (key == QLatin1String("speech_threshold")) {
+                bool parsed = false;
+                const double d = value.toDouble(&parsed);
+                if (parsed) {
+                    m_vadSpeechThreshold = d;
+                }
+            } else if (key == QLatin1String("silence_duration_ms")) {
+                bool parsed = false;
+                const int n = value.toInt(&parsed);
+                if (parsed) {
+                    m_vadSilenceDurationMs = n;
+                }
+            }
+        } else if (currentSection == QLatin1String("assistant")) {
+            if (key == QLatin1String("followup_timeout_ms")) {
+                bool parsed = false;
+                const int n = value.toInt(&parsed);
+                if (parsed) {
+                    m_followupTimeoutMs = n;
                 }
             }
         } else if (currentSection == QLatin1String("stt")) {
@@ -1523,7 +1586,19 @@ bool DesktopAssistantKcm::writeVoiceConfig()
         {QStringLiteral("audio"), QStringLiteral("input_device"), m_inputDevice, true, false, false},
         {QStringLiteral("audio"), QStringLiteral("output_device"), m_outputDevice, true, false, false},
         {QStringLiteral("wake_word"), QStringLiteral("sensitivity"),
-         QString::number(m_wakeSensitivity, 'g', 4), false, false, false},
+         formatTomlFloat(m_wakeSensitivity), false, false, false},
+        // Forward-compat wake-word keys (voice#50/#51). `eager` is a bare bool;
+        // `listening_cue` is omit-when-empty so an unset cue doesn't pin a value.
+        {QStringLiteral("wake_word"), QStringLiteral("eager"),
+         m_wakeEager ? QStringLiteral("true") : QStringLiteral("false"), false, false, false},
+        {QStringLiteral("wake_word"), QStringLiteral("listening_cue"), m_listeningCue, true, true, false},
+        // Endpointing (adele-kde#37): [vad] + [assistant].
+        {QStringLiteral("vad"), QStringLiteral("speech_threshold"),
+         formatTomlFloat(m_vadSpeechThreshold), false, false, false},
+        {QStringLiteral("vad"), QStringLiteral("silence_duration_ms"),
+         QString::number(m_vadSilenceDurationMs), false, false, false},
+        {QStringLiteral("assistant"), QStringLiteral("followup_timeout_ms"),
+         QString::number(m_followupTimeoutMs), false, false, false},
         {QStringLiteral("stt"), QStringLiteral("language"), m_sttLanguage, true, false, false},
         {QStringLiteral("stt"), QStringLiteral("model_path"), m_sttModelPath, true, true, false},
         {QStringLiteral("tts"), QStringLiteral("backend"), m_ttsBackend, true, false, false},
@@ -1882,6 +1957,96 @@ void DesktopAssistantKcm::setOutputDevice(const QString &value)
     writeVoiceConfig();
 }
 
+double DesktopAssistantKcm::vadSpeechThreshold() const
+{
+    return m_vadSpeechThreshold;
+}
+
+void DesktopAssistantKcm::setVadSpeechThreshold(double value)
+{
+    // Silero VAD speech probability threshold (0..1).
+    const double clamped = std::clamp(value, 0.0, 1.0);
+    if (qFuzzyCompare(m_vadSpeechThreshold + 1.0, clamped + 1.0)) {
+        return;
+    }
+    m_vadSpeechThreshold = clamped;
+    Q_EMIT voiceConfigChanged();
+    writeVoiceConfig();
+}
+
+int DesktopAssistantKcm::vadSilenceDurationMs() const
+{
+    return m_vadSilenceDurationMs;
+}
+
+void DesktopAssistantKcm::setVadSilenceDurationMs(int value)
+{
+    const int clamped = std::clamp(value, 0, 20000);
+    if (m_vadSilenceDurationMs == clamped) {
+        return;
+    }
+    m_vadSilenceDurationMs = clamped;
+    Q_EMIT voiceConfigChanged();
+    writeVoiceConfig();
+}
+
+int DesktopAssistantKcm::followupTimeoutMs() const
+{
+    return m_followupTimeoutMs;
+}
+
+void DesktopAssistantKcm::setFollowupTimeoutMs(int value)
+{
+    const int clamped = std::clamp(value, 0, 60000);
+    if (m_followupTimeoutMs == clamped) {
+        return;
+    }
+    m_followupTimeoutMs = clamped;
+    Q_EMIT voiceConfigChanged();
+    writeVoiceConfig();
+}
+
+bool DesktopAssistantKcm::wakeEager() const
+{
+    return m_wakeEager;
+}
+
+void DesktopAssistantKcm::setWakeEager(bool value)
+{
+    if (m_wakeEager == value) {
+        return;
+    }
+    m_wakeEager = value;
+    Q_EMIT voiceConfigChanged();
+    writeVoiceConfig();
+}
+
+QString DesktopAssistantKcm::listeningCue() const
+{
+    return m_listeningCue;
+}
+
+void DesktopAssistantKcm::setListeningCue(const QString &value)
+{
+    const QString normalized = value.trimmed();
+    if (m_listeningCue == normalized) {
+        return;
+    }
+    m_listeningCue = normalized;
+    Q_EMIT voiceConfigChanged();
+    writeVoiceConfig();
+}
+
+QVariantList DesktopAssistantKcm::inputDeviceOptions() const
+{
+    return m_inputDeviceOptions;
+}
+
+QVariantList DesktopAssistantKcm::outputDeviceOptions() const
+{
+    return m_outputDeviceOptions;
+}
+
 void DesktopAssistantKcm::loadVoiceSettings()
 {
     m_voiceServiceAvailable = probeVoiceAvailable();
@@ -1943,6 +2108,11 @@ void DesktopAssistantKcm::loadVoiceSettings()
 
     m_voiceAutostart = probeVoiceAutostart();
     readVoiceConfig();
+    // NB: device enumeration (pactl + arecord/aplay subprocesses) is NOT done
+    // here — loadVoiceSettings() runs from the KCM constructor's load(), which
+    // fires for every tab of this settings module, so spawning audio tools then
+    // would add startup latency even for users who never open the Voice tab. The
+    // Voice page calls loadAudioDevices() itself from Component.onCompleted.
 
     Q_EMIT voiceChanged();
     Q_EMIT voiceConfigChanged();
@@ -2018,6 +2188,321 @@ void DesktopAssistantKcm::restartVoiceService()
     // The restart re-spawns the daemon and re-reads config; reconcile the page
     // (availability, enabled, voice list, autostart) against the new process.
     loadVoiceSettings();
+}
+
+bool DesktopAssistantKcm::tryDaemonReload() const
+{
+    // Forward-compatible hot-reload (adele-kde#37). The daemon will expose a
+    // `Reload` method on org.desktopAssistant.Voice (voice#52) that re-reads
+    // config.toml without a restart. Until that lands the call comes back as
+    // UnknownMethod, which we treat as "not supported" -> false so the caller
+    // falls back to a service restart. We only attempt this when the service is
+    // actually on the bus (constructing the interface would otherwise D-Bus
+    // *activate* the daemon, which we don't want from a probe).
+    if (!m_voiceServiceAvailable) {
+        return false;
+    }
+    QDBusInterface iface(VOICE_SERVICE, VOICE_PATH, VOICE_IFACE, QDBusConnection::sessionBus());
+    if (!iface.isValid()) {
+        return false;
+    }
+    QDBusMessage reply = iface.call(QStringLiteral("Reload"));
+    return reply.type() != QDBusMessage::ErrorMessage;
+}
+
+void DesktopAssistantKcm::applyVoiceChanges()
+{
+    // Persist anything still pending, then apply live. Each setter already
+    // writes config.toml, but call it once more so an Apply press after a
+    // programmatic change (e.g. a Reset) is always durable before we reload.
+    writeVoiceConfig();
+
+    if (tryDaemonReload()) {
+        m_statusText = QStringLiteral("Voice settings reloaded");
+        Q_EMIT statusTextChanged();
+        // A reload doesn't change availability/voice list, but re-read config so
+        // the page reflects exactly what's now on disk.
+        loadVoiceSettings();
+        return;
+    }
+
+    // Fall back to a restart. restartVoiceService() sets its own status and
+    // re-reads live state. If the unit isn't installed there's nothing to do
+    // beyond the on-disk write we already performed; say so honestly.
+    if (m_voiceAutostart < 0 && !m_voiceServiceAvailable) {
+        m_statusText = QStringLiteral(
+            "Saved. The voice service isn't running; changes apply when it next starts.");
+        Q_EMIT statusTextChanged();
+        return;
+    }
+    restartVoiceService();
+}
+
+QVariantList DesktopAssistantKcm::enumerateAudioDevices(const QString &direction) const
+{
+    // The voice daemon resolves a configured device by SUBSTRING-matching the
+    // cpal (ALSA host) device name (repo adelie-ai/voice,
+    // crates/audio-cpal/src/{source,sink}.rs: `desc.name().contains(name)`).
+    // So the stored value must be a substring of a cpal device name. The most
+    // reliable such substring is the ALSA card id (the `CARD=<id>` token), which
+    // appears in cpal names like `sysdefault:CARD=<id>` / `front:CARD=<id>`.
+    //
+    // We enumerate card ids from `arecord -L` / `aplay -L` (the same ALSA PCM
+    // list cpal-alsa walks) and, when available, dress each with a friendly
+    // description from `pactl` matched on the card id. This keeps the stored
+    // value cpal-matchable while the label stays human-readable.
+    const bool isInput = direction == QLatin1String("input");
+
+    // Friendly labels keyed by ALSA card id, harvested from pactl descriptions.
+    QHash<QString, QString> cardLabels;
+    {
+        QProcess pactl;
+        pactl.start(QStringLiteral("pactl"),
+                    QStringList{QStringLiteral("list"), isInput ? QStringLiteral("sources") : QStringLiteral("sinks")});
+        if (pactl.waitForStarted(2000) && pactl.waitForFinished(3000)
+            && pactl.exitStatus() == QProcess::NormalExit) {
+            const QString out = QString::fromUtf8(pactl.readAllStandardOutput());
+            QString pendingDesc;
+            const QStringList plines = out.split(QLatin1Char('\n'));
+            // pactl groups properties per device, each block starting with a
+            // "Source #N" / "Sink #N" header. Reset the pending Description on
+            // each header so a device with no alsa.card_name can't leak its
+            // Description onto the next device's card (the value we store is
+            // always the correct CARD token; only this label could mismatch).
+            static const QRegularExpression deviceHeader(
+                QStringLiteral("^(Source|Sink) #\\d+"));
+            static const QRegularExpression cardProp(
+                QStringLiteral("alsa\\.card_name\\s*=\\s*\"([^\"]+)\""));
+            static const QRegularExpression descProp(QStringLiteral("^\\s*Description:\\s*(.+)$"));
+            for (const QString &pl : plines) {
+                if (deviceHeader.match(pl).hasMatch()) {
+                    pendingDesc.clear();
+                    continue;
+                }
+                const auto descMatch = descProp.match(pl);
+                if (descMatch.hasMatch()) {
+                    pendingDesc = descMatch.captured(1).trimmed();
+                    continue;
+                }
+                const auto cardMatch = cardProp.match(pl);
+                if (cardMatch.hasMatch()) {
+                    const QString card = cardMatch.captured(1).trimmed();
+                    if (!card.isEmpty() && !pendingDesc.isEmpty()) {
+                        cardLabels.insert(card, pendingDesc);
+                    }
+                }
+            }
+        }
+    }
+
+    QVariantList out;
+    QSet<QString> seen;
+    QProcess alsa;
+    alsa.start(isInput ? QStringLiteral("arecord") : QStringLiteral("aplay"),
+               QStringList{QStringLiteral("-L")});
+    if (alsa.waitForStarted(2000) && alsa.waitForFinished(3000)
+        && alsa.exitStatus() == QProcess::NormalExit) {
+        const QString text = QString::fromUtf8(alsa.readAllStandardOutput());
+        const QStringList lines = text.split(QLatin1Char('\n'));
+
+        // Well-known virtual PCMs that route through the sound server. These are
+        // valid cpal device names and, on a PipeWire/Pulse box, usually the
+        // *right* choice (they follow the server's default and resample) — the
+        // CARD=<id> entries below bypass the server and pin a raw card. We offer
+        // them as their own rows so the picker isn't card-only (the previous
+        // free-text field let users type these; ALSA card names like "PCH"
+        // can't reach the server-managed default device). Order matters: list
+        // these first so the recommended server routes are near the top.
+        static const QStringList kVirtualPcms = {
+            QStringLiteral("pipewire"), QStringLiteral("pulse"), QStringLiteral("jack")};
+        static const QHash<QString, QString> kVirtualLabels = {
+            {QStringLiteral("pipewire"), QStringLiteral("PipeWire (follows the sound server)")},
+            {QStringLiteral("pulse"), QStringLiteral("PulseAudio (follows the sound server)")},
+            {QStringLiteral("jack"), QStringLiteral("JACK")},
+        };
+        for (const QString &pcm : kVirtualPcms) {
+            // Match the bare top-level PCM line exactly (e.g. "pipewire"), not a
+            // CARD= entry that happens to contain the word.
+            if (lines.contains(pcm) && !seen.contains(pcm)) {
+                seen.insert(pcm);
+                QVariantMap entry;
+                entry.insert(QStringLiteral("value"), pcm);
+                entry.insert(QStringLiteral("label"), kVirtualLabels.value(pcm, pcm));
+                out.push_back(entry);
+            }
+        }
+
+        // Raw ALSA cards (cpal substring-matches the CARD=<id> token).
+        static const QRegularExpression cardToken(QStringLiteral("CARD=([A-Za-z0-9_]+)"));
+        for (const QString &line : lines) {
+            const auto m = cardToken.match(line);
+            if (!m.hasMatch()) {
+                continue;
+            }
+            const QString card = m.captured(1);
+            if (card.isEmpty() || seen.contains(card)) {
+                continue;
+            }
+            seen.insert(card);
+            // Prefer a pactl-sourced friendly name keyed by card *name* (which
+            // often differs from the short card id); fall back to the card id.
+            QString label = card;
+            for (auto it = cardLabels.constBegin(); it != cardLabels.constEnd(); ++it) {
+                if (it.key().contains(card, Qt::CaseInsensitive)
+                    || card.contains(it.key(), Qt::CaseInsensitive)) {
+                    label = it.value();
+                    break;
+                }
+            }
+            QVariantMap entry;
+            entry.insert(QStringLiteral("value"), card);
+            entry.insert(QStringLiteral("label"),
+                         label == card ? QStringLiteral("Card: %1").arg(card) : label);
+            out.push_back(entry);
+        }
+    }
+    return out;
+}
+
+void DesktopAssistantKcm::loadAudioDevices()
+{
+    auto withDefault = [](const QVariantList &devices) -> QVariantList {
+        QVariantList list;
+        QVariantMap def;
+        def.insert(QStringLiteral("value"), QStringLiteral("default"));
+        def.insert(QStringLiteral("label"), QStringLiteral("Follow system default (recommended)"));
+        list.push_back(def);
+        list.append(devices);
+        return list;
+    };
+
+    m_inputDeviceOptions = withDefault(enumerateAudioDevices(QStringLiteral("input")));
+    m_outputDeviceOptions = withDefault(enumerateAudioDevices(QStringLiteral("output")));
+
+    // A hand-edited config can point at a device that didn't enumerate (a
+    // headset that's currently unplugged, say). Keep the selection visible
+    // instead of silently snapping it to "default": append it as its own row.
+    auto ensurePresent = [](QVariantList &list, const QString &value) {
+        if (value.isEmpty() || value == QLatin1String("default")) {
+            return;
+        }
+        for (const QVariant &v : list) {
+            if (v.toMap().value(QStringLiteral("value")).toString() == value) {
+                return;
+            }
+        }
+        QVariantMap entry;
+        entry.insert(QStringLiteral("value"), value);
+        entry.insert(QStringLiteral("label"), QStringLiteral("%1 (configured)").arg(value));
+        list.push_back(entry);
+    };
+    ensurePresent(m_inputDeviceOptions, m_inputDevice);
+    ensurePresent(m_outputDeviceOptions, m_outputDevice);
+
+    Q_EMIT audioDevicesChanged();
+}
+
+double DesktopAssistantKcm::measureInputLevel()
+{
+    // Briefly sample the input device and report a 0..1 peak so the page can
+    // nudge a too-quiet mic (ties into voice#47). We use `pactl` to find the
+    // running source's monitor isn't reliable for input, so instead we read the
+    // source volume peak via a short `parecord` capture and compute the peak
+    // sample magnitude. Returns -1 when no level could be taken.
+    if (QStandardPaths::findExecutable(QStringLiteral("parecord")).isEmpty()) {
+        return -1.0;
+    }
+
+    // Raw 16-bit mono so we can scan samples directly; a short capture is enough
+    // to catch speech without making the button feel laggy. We let
+    // PulseAudio/PipeWire pick the default source rather than trying to resolve
+    // the cpal-style stored value to a pactl source name (the mapping is
+    // substring-only and unreliable) — the default source is still a useful
+    // gauge of whether the mic is producing audible signal.
+    const QStringList args = {
+        QStringLiteral("--raw"),
+        QStringLiteral("--format=s16le"),
+        QStringLiteral("--rate=16000"),
+        QStringLiteral("--channels=1"),
+    };
+
+    QProcess rec;
+    rec.start(QStringLiteral("parecord"), args);
+    if (!rec.waitForStarted(2000)) {
+        return -1.0;
+    }
+    // Let it capture briefly, then stop and read what we got.
+    rec.waitForReadyRead(400);
+    QByteArray data = rec.readAllStandardOutput();
+    rec.terminate();
+    if (!rec.waitForFinished(1000)) {
+        rec.kill();
+        rec.waitForFinished(500);
+    }
+    data += rec.readAllStandardOutput();
+    if (data.size() < 2) {
+        return -1.0;
+    }
+
+    qint16 peak = 0;
+    const auto *samples = reinterpret_cast<const qint16 *>(data.constData());
+    const int count = data.size() / static_cast<int>(sizeof(qint16));
+    for (int i = 0; i < count; ++i) {
+        const qint16 s = samples[i];
+        const int mag = s < 0 ? -static_cast<int>(s) : static_cast<int>(s);
+        if (mag > peak) {
+            peak = static_cast<qint16>(qMin(mag, 32767));
+        }
+    }
+    return static_cast<double>(peak) / 32767.0;
+}
+
+void DesktopAssistantKcm::resetWakeDefaults()
+{
+    m_wakeSensitivity = kVoiceDefaultSensitivity;
+    m_wakeEager = kVoiceDefaultWakeEager;
+    m_listeningCue.clear();
+    writeVoiceConfig();
+    Q_EMIT voiceConfigChanged();
+    m_statusText = QStringLiteral("Wake-word settings reset to defaults");
+    Q_EMIT statusTextChanged();
+}
+
+void DesktopAssistantKcm::resetEndpointingDefaults()
+{
+    m_vadSpeechThreshold = kVoiceDefaultSpeechThreshold;
+    m_vadSilenceDurationMs = kVoiceDefaultSilenceDurationMs;
+    m_followupTimeoutMs = kVoiceDefaultFollowupTimeoutMs;
+    writeVoiceConfig();
+    Q_EMIT voiceConfigChanged();
+    m_statusText = QStringLiteral("Endpointing settings reset to defaults");
+    Q_EMIT statusTextChanged();
+}
+
+void DesktopAssistantKcm::resetDeviceDefaults()
+{
+    m_inputDevice = QStringLiteral("default");
+    m_outputDevice = QStringLiteral("default");
+    writeVoiceConfig();
+    Q_EMIT voiceConfigChanged();
+    m_statusText = QStringLiteral("Audio devices set to follow the system default");
+    Q_EMIT statusTextChanged();
+}
+
+void DesktopAssistantKcm::resetVoiceTuningDefaults()
+{
+    m_wakeSensitivity = kVoiceDefaultSensitivity;
+    m_wakeEager = kVoiceDefaultWakeEager;
+    m_listeningCue.clear();
+    m_vadSpeechThreshold = kVoiceDefaultSpeechThreshold;
+    m_vadSilenceDurationMs = kVoiceDefaultSilenceDurationMs;
+    m_followupTimeoutMs = kVoiceDefaultFollowupTimeoutMs;
+    m_inputDevice = QStringLiteral("default");
+    m_outputDevice = QStringLiteral("default");
+    writeVoiceConfig();
+    Q_EMIT voiceConfigChanged();
+    m_statusText = QStringLiteral("Voice tuning reset to defaults");
+    Q_EMIT statusTextChanged();
 }
 
 void DesktopAssistantKcm::daemonCall(const QString &command, const QJSValue &payload, const QJSValue &callback)
