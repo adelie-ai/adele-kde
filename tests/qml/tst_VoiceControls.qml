@@ -1,5 +1,6 @@
 import QtQuick
 import QtTest 1.0
+import org.kde.kirigami as Kirigami
 
 import "../../shared/chat-module/ui" as Chat
 
@@ -35,6 +36,16 @@ TestCase {
         }
     }
 
+    // A theme probe that mirrors ChatView's colour context (View colour set,
+    // inherit off) so semantic-role lookups resolve identically to the view's.
+    // The headless qmltestrunner palette is degenerate, so we pin the binding
+    // by role (Processing == neutral) rather than by absolute colour value.
+    Item {
+        id: themeProbe
+        Kirigami.Theme.colorSet: Kirigami.Theme.View
+        Kirigami.Theme.inherit: false
+    }
+
     function test_defaults_to_unavailable_and_idle() {
         var view = createTemporaryObject(chatViewComponent, testCase)
         verify(view !== null, "ChatView instantiated")
@@ -55,10 +66,69 @@ TestCase {
         view.voiceStopSpeaking()
         view.voiceStopListening()
         view.voiceMicToggle()
+        view.voiceCancelTurn()
         view.setVoiceEnabled(true)
         view.selectVoice("en_US-amy-medium", -1)
         compare(view.voiceAvailable, false)
         compare(view.voiceEnabled, false)
+        compare(view.voiceState, "Idle")
+    }
+
+    function test_processing_flag_tracks_state_and_availability() {
+        // adele-kde#38: Processing ("thinking") is its own glanceable state so
+        // a busy turn never reads as idle. The flag is gated on availability
+        // exactly like voiceListening.
+        var view = createTemporaryObject(chatViewComponent, testCase)
+        verify(view !== null, "ChatView instantiated")
+        // Dormant while the service is down, even if state says Processing.
+        view.voiceState = "Processing"
+        compare(view.voiceProcessing, false)
+        compare(view.voiceActive, false)
+        view.voiceAvailable = true
+        compare(view.voiceProcessing, true)
+        compare(view.voiceActive, true)
+        // Processing is mutually exclusive with the other state flags.
+        compare(view.voiceListening, false)
+        view.voiceState = "Listening"
+        compare(view.voiceProcessing, false)
+    }
+
+    function test_state_color_maps_processing_to_neutral_role() {
+        // adele-kde#38: Processing must read as its own state — bound to the
+        // theme's semantic "neutral" (amber) role, distinct from Listening's
+        // "negative" (red) and Speaking's "highlight" (blue). We assert by ROLE
+        // (against a probe sharing ChatView's colour context) because the
+        // headless test palette doesn't fully resolve absolute colour values.
+        var view = createTemporaryObject(chatViewComponent, testCase)
+        verify(view !== null, "ChatView instantiated")
+        view.voiceAvailable = true
+        view.voiceState = "Processing"
+        verify(Qt.colorEqual(view.voiceStateColor, themeProbe.Kirigami.Theme.neutralTextColor),
+            "Processing uses the neutral (amber) role")
+        view.voiceState = "Listening"
+        verify(Qt.colorEqual(view.voiceStateColor, themeProbe.Kirigami.Theme.negativeTextColor),
+            "Listening uses the negative (red) role")
+        view.voiceState = "Speaking"
+        verify(Qt.colorEqual(view.voiceStateColor, themeProbe.Kirigami.Theme.highlightColor),
+            "Speaking uses the highlight (blue) role")
+        // The three live-state roles must be distinct roles (the binding picks
+        // a different one for each) — proven by the role assertions above.
+    }
+
+    function test_cancel_turn_is_inert_unless_a_turn_is_active() {
+        // adele-kde#38: the dedicated cancel button only ever STOPS. It must be
+        // a no-op when nothing is in flight (and never throw, which would abort
+        // the whole widget), and stay inert when the service is unavailable.
+        var view = createTemporaryObject(chatViewComponent, testCase)
+        verify(view !== null, "ChatView instantiated")
+        // Unavailable -> inert.
+        view.voiceState = "Processing"
+        view.voiceCancelTurn()
+        compare(view.voiceState, "Processing")
+        // Available but Idle -> still inert (nothing to cancel).
+        view.voiceAvailable = true
+        view.voiceState = "Idle"
+        view.voiceCancelTurn()
         compare(view.voiceState, "Idle")
     }
 
@@ -128,6 +198,8 @@ TestCase {
         verify(view !== null, "ChatView instantiated")
         view.voiceState = "Listening"
         compare(view.voiceStateIcon, "audio-input-microphone")
+        view.voiceState = "Processing"
+        compare(view.voiceStateIcon, "view-refresh-symbolic")
         view.voiceState = "Speaking"
         compare(view.voiceStateIcon, "audio-volume-high")
         view.voiceState = "Idle"

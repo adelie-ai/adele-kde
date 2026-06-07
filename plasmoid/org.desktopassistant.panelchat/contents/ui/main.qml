@@ -43,8 +43,40 @@ PlasmoidItem {
     readonly property string voiceState: chatView ? chatView.voiceState : rootVoiceState
     readonly property bool voiceListening: voiceAvailable && voiceState === "Listening"
     readonly property bool voiceSpeaking: voiceAvailable && voiceState === "Speaking"
+    // The daemon is thinking (STT/LLM working). Its own badge state so the
+    // taskbar icon never looks idle while a turn is actually in flight
+    // (adele-kde#38).
+    readonly property bool voiceProcessing: voiceAvailable && voiceState === "Processing"
     // Any in-flight turn (mic open, thinking, or talking back).
     readonly property bool voiceActive: voiceAvailable && voiceState !== "Idle"
+
+    // Badge accent per state, mirroring the chat view's voiceStateColor so the
+    // collapsed panel dot and the expanded in-widget chip always agree:
+    //   Listening → negative/red, Processing → neutral/amber, Speaking → blue.
+    readonly property color voiceBadgeColor: {
+        if (voiceListening) return Kirigami.Theme.negativeTextColor
+        if (voiceProcessing) return Kirigami.Theme.neutralTextColor
+        return Kirigami.Theme.highlightColor
+    }
+
+    // Abort the current turn back to Idle/wake-listening. When the popup is open
+    // the chat view owns the voice plumbing, so defer to it; while collapsed
+    // (chatView is null) shell out to the same one-shot helper directly so the
+    // panel's cancel action works without expanding the widget.
+    function cancelVoiceTurn() {
+        if (!voiceActive) {
+            return
+        }
+        if (chatView) {
+            chatView.voiceCancelTurn()
+            return
+        }
+        const helperCmd = voiceState === "Speaking" ? "voice-stop-speaking" : "voice-stop-listening"
+        voiceStopSource.connectSource("python3 '" + voiceHelperPath + "' " + helperCmd)
+        // Optimistically flip the root state so the badge clears immediately;
+        // the next status poll reconciles the real pipeline state.
+        rootVoiceState = "Idle"
+    }
 
     // "Enable 'Hey Adele'" lives in the plasmoid's right-click menu
     // (adele-kde#29). Visible only once the popup has been opened and the voice
@@ -62,6 +94,15 @@ PlasmoidItem {
                     root.chatView.setVoiceEnabled(checked)
                 }
             }
+        },
+        // Abort the active turn straight from the panel's right-click menu
+        // (adele-kde#38) without expanding the widget. Shown only while a turn
+        // is in flight so it never dangles as a dead control.
+        PlasmaCore.Action {
+            text: "Stop — cancel current turn"
+            icon.name: "dialog-cancel"
+            visible: root.voiceActive
+            onTriggered: root.cancelVoiceTurn()
         }
     ]
 
@@ -95,6 +136,20 @@ PlasmoidItem {
         }
     }
 
+    // Fire-and-forget runner for the root-level cancel action (adele-kde#38).
+    // Like voiceStatusSource, each call is a short-lived subprocess; we don't
+    // care about its stdout (the next status poll reconciles state), we just
+    // disconnect when it returns so the source doesn't leak connections.
+    Plasma5Support.DataSource {
+        id: voiceStopSource
+        engine: "executable"
+        connectedSources: []
+        onNewData: function(sourceName, data) {
+            disconnectSource(sourceName)
+            root.refreshRootVoiceStatus()
+        }
+    }
+
     function refreshRootVoiceStatus() {
         // Skip the extra subprocess while the popup is open — the chat view is
         // already polling and we read its state directly.
@@ -116,19 +171,27 @@ PlasmoidItem {
     compactRepresentation: PlasmaComponents.ToolButton {
         id: compactRoot
         text: "Adele AI"
-        icon.source: Qt.resolvedUrl("../images/adele.png")
+        // Swap to the "thinking" Adele avatar while the daemon is Processing so
+        // the panel icon itself reflects the state (adele-kde#38), not just the
+        // corner badge. Idle/Listening/Speaking keep the default avatar.
+        icon.source: root.voiceProcessing
+            ? Qt.resolvedUrl("../images/adele_thinking.png")
+            : Qt.resolvedUrl("../images/adele.png")
         icon.width: Kirigami.Units.iconSizes.smallMedium
         icon.height: Kirigami.Units.iconSizes.smallMedium
         onClicked: root.expanded = !root.expanded
 
         // Voice-state badge overlaid on the taskbar icon (adele-kde voice-state).
-        // A small coloured dot in the corner makes it obvious the mic is live
-        // even while the chat popup is collapsed: red + breathing while
-        // Listening (recording), blue while Speaking. Hidden at Idle / when the
-        // voice service isn't running so the icon stays clean.
+        // A small coloured dot in the corner makes the pipeline state obvious
+        // even while the chat popup is collapsed:
+        //   Listening → red + brisk breathing (recording — the one to notice),
+        //   Processing→ amber + slow breathing (thinking — never looks idle),
+        //   Speaking  → blue, solid (the assistant is talking back).
+        // Hidden at Idle / when the voice service isn't running so the icon
+        // stays clean.
         Rectangle {
             id: voiceBadge
-            visible: root.voiceListening || root.voiceSpeaking
+            visible: root.voiceListening || root.voiceProcessing || root.voiceSpeaking
             // Anchor to the icon's bottom-right corner. The ToolButton centres
             // its icon, so derive the corner from the icon box rather than the
             // (often wider) button so the badge hugs the glyph.
@@ -136,9 +199,7 @@ PlasmoidItem {
             width: Math.max(7, Math.round(iconBox * 0.34))
             height: width
             radius: width / 2
-            color: root.voiceListening
-                ? Kirigami.Theme.negativeTextColor
-                : Kirigami.Theme.highlightColor
+            color: root.voiceBadgeColor
             // A thin contrasting outline so the dot reads on any icon/panel hue.
             border.width: Math.max(1, Math.round(width * 0.16))
             border.color: Kirigami.Theme.backgroundColor
@@ -153,6 +214,15 @@ PlasmoidItem {
                 alwaysRunToEnd: true
                 NumberAnimation { from: 1.0; to: 0.35; duration: 750; easing.type: Easing.InOutSine }
                 NumberAnimation { from: 0.35; to: 1.0; duration: 750; easing.type: Easing.InOutSine }
+            }
+            // Slower pulse while thinking so a busy turn reads as alive but
+            // calmer than an open mic.
+            SequentialAnimation on opacity {
+                running: voiceBadge.visible && root.voiceProcessing
+                loops: Animation.Infinite
+                alwaysRunToEnd: true
+                NumberAnimation { from: 1.0; to: 0.45; duration: 1100; easing.type: Easing.InOutSine }
+                NumberAnimation { from: 0.45; to: 1.0; duration: 1100; easing.type: Easing.InOutSine }
             }
         }
     }

@@ -359,17 +359,22 @@ Item {
     // most needs to notice ("am I being recorded?"), so it gets the strongest
     // accent + the breathing animation + the panel badge.
     readonly property bool voiceListening: voiceAvailable && voiceState === "Listening"
+    // The daemon is thinking (STT/LLM working). Deliberately distinct from
+    // Listening/Speaking so a busy turn never reads as idle: it gets an amber
+    // accent and its own (gentler) pulse on the chip/ring/panel badge.
+    readonly property bool voiceProcessing: voiceAvailable && voiceState === "Processing"
 
     // Accent colour per pipeline state, used for the mic ring and the state
     // chip so the widget's conversational state reads at a glance:
-    //   Listening → negative/red  ("recording" — the one to really notice)
-    //   Speaking  → highlight/blue (the assistant is talking back)
-    //   Processing→ neutral text   (thinking; deliberately calm)
+    //   Listening → negative/red    ("recording" — the one to really notice)
+    //   Processing→ neutral/amber    (thinking — distinct from idle and the
+    //                                 other two; KDE's semantic "neutral" hue)
+    //   Speaking  → highlight/blue   (the assistant is talking back)
     readonly property color voiceStateColor: {
         switch (voiceState) {
             case "Listening": return Kirigami.Theme.negativeTextColor
             case "Speaking": return themeHighlightColor
-            case "Processing": return themeTextColor
+            case "Processing": return Kirigami.Theme.neutralTextColor
             default: return themeDisabledTextColor
         }
     }
@@ -602,6 +607,22 @@ Item {
             voiceStopListening()
         } else {
             voicePushToTalk()
+        }
+    }
+
+    // Abort whatever the assistant is doing this turn and return to
+    // Idle/wake-listening (adele-kde#38). A dedicated "cancel this turn"
+    // affordance, distinct from the mic toggle: it always stops, never starts.
+    // Speaking cuts playback (StopSpeaking); Listening/Processing abort the
+    // capture/pending turn (StopListening). Both land the pipeline back at Idle.
+    function voiceCancelTurn() {
+        if (!voiceAvailable || !voiceActive) {
+            return
+        }
+        if (voiceState === "Speaking") {
+            voiceStopSpeaking()
+        } else {
+            voiceStopListening()
         }
     }
 
@@ -1996,7 +2017,10 @@ Item {
             spacing: 6
 
             Image {
-                source: root.busy
+                // Show the "thinking" avatar whenever Adele is working — a text
+                // turn is in flight (busy) OR the voice pipeline is Processing
+                // (adele-kde#38) — so the header reflects state for both paths.
+                source: (root.busy || root.voiceProcessing)
                     ? Qt.resolvedUrl("../images/adele_thinking.png")
                     : Qt.resolvedUrl("../images/adele.png")
                 sourceSize.width: root.scaledTopIconSize
@@ -2461,10 +2485,11 @@ Item {
                     visible: root.voiceActive
                     border.width: Math.max(2, Math.round(2 * root.uiScale))
                     border.color: root.voiceStateColor
-                    // The "breathing" pulse: a smooth opacity cycle while the mic
-                    // is open. Frozen fully-opaque for the calmer non-listening
-                    // active states so only "recording" actively pulses.
-                    opacity: root.voiceListening ? 1.0 : 0.9
+                    // The "breathing" pulse: a smooth opacity cycle. Listening
+                    // breathes briskly (an open mic is the thing to notice);
+                    // Processing breathes slower (a calm "still thinking" hint
+                    // so a busy turn never looks frozen). Speaking holds steady.
+                    opacity: (root.voiceListening || root.voiceProcessing) ? 1.0 : 0.9
                     SequentialAnimation on opacity {
                         running: micStateRing.visible && root.voiceListening
                         loops: Animation.Infinite
@@ -2472,7 +2497,31 @@ Item {
                         NumberAnimation { from: 1.0; to: 0.35; duration: 750; easing.type: Easing.InOutSine }
                         NumberAnimation { from: 0.35; to: 1.0; duration: 750; easing.type: Easing.InOutSine }
                     }
+                    SequentialAnimation on opacity {
+                        running: micStateRing.visible && root.voiceProcessing
+                        loops: Animation.Infinite
+                        alwaysRunToEnd: true
+                        NumberAnimation { from: 1.0; to: 0.5; duration: 1100; easing.type: Easing.InOutSine }
+                        NumberAnimation { from: 0.5; to: 1.0; duration: 1100; easing.type: Easing.InOutSine }
+                    }
                 }
+            }
+
+            // Dedicated "cancel this turn" button (adele-kde#38). Distinct from
+            // the mic toggle: it only ever STOPS — aborting whatever the
+            // assistant is doing (Listening/Processing/Speaking) and returning
+            // the pipeline to Idle/wake-listening. Visible only while a turn is
+            // in flight so it never dangles as a dead control at Idle.
+            QQC2.ToolButton {
+                id: voiceCancelButton
+                visible: root.voiceActive
+                enabled: root.voiceActive && !root.busy
+                Layout.alignment: Qt.AlignTop
+                icon.name: "dialog-cancel"
+                display: QQC2.AbstractButton.IconOnly
+                QQC2.ToolTip.text: "Stop — cancel the current turn"
+                QQC2.ToolTip.visible: hovered
+                onClicked: root.voiceCancelTurn()
             }
 
             // Prominent conversational-state chip (adele-kde voice-state). Sits
@@ -2505,14 +2554,22 @@ Item {
                         radius: implicitWidth / 2
                         color: root.voiceStateColor
                         Layout.alignment: Qt.AlignVCenter
-                        // Pulse the dot in sympathy with the mic ring while
-                        // Listening so the chip and the button read as one.
+                        // Pulse the dot in sympathy with the mic ring: brisk
+                        // while Listening, slower while Processing, so the chip
+                        // and the button always read as one.
                         SequentialAnimation on opacity {
                             running: voiceStateChip.visible && root.voiceListening
                             loops: Animation.Infinite
                             alwaysRunToEnd: true
                             NumberAnimation { from: 1.0; to: 0.3; duration: 750; easing.type: Easing.InOutSine }
                             NumberAnimation { from: 0.3; to: 1.0; duration: 750; easing.type: Easing.InOutSine }
+                        }
+                        SequentialAnimation on opacity {
+                            running: voiceStateChip.visible && root.voiceProcessing
+                            loops: Animation.Infinite
+                            alwaysRunToEnd: true
+                            NumberAnimation { from: 1.0; to: 0.4; duration: 1100; easing.type: Easing.InOutSine }
+                            NumberAnimation { from: 0.4; to: 1.0; duration: 1100; easing.type: Easing.InOutSine }
                         }
                     }
 
