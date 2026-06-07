@@ -69,6 +69,23 @@ class DesktopAssistantKcm : public KQuickConfigModule {
     Q_PROPERTY(double wakeSensitivity READ wakeSensitivity WRITE setWakeSensitivity NOTIFY voiceConfigChanged)
     Q_PROPERTY(QString inputDevice READ inputDevice WRITE setInputDevice NOTIFY voiceConfigChanged)
     Q_PROPERTY(QString outputDevice READ outputDevice WRITE setOutputDevice NOTIFY voiceConfigChanged)
+    // Voice tuning knobs (adele-kde#37): endpointing + wake-word forward-compat.
+    // All TOML-backed (config.toml), applied via applyVoiceChanges() (D-Bus
+    // Reload when the daemon supports it, else a service restart).
+    //   [vad] speech_threshold / silence_duration_ms, [assistant] followup_timeout_ms.
+    Q_PROPERTY(double vadSpeechThreshold READ vadSpeechThreshold WRITE setVadSpeechThreshold NOTIFY voiceConfigChanged)
+    Q_PROPERTY(int vadSilenceDurationMs READ vadSilenceDurationMs WRITE setVadSilenceDurationMs NOTIFY voiceConfigChanged)
+    Q_PROPERTY(int followupTimeoutMs READ followupTimeoutMs WRITE setFollowupTimeoutMs NOTIFY voiceConfigChanged)
+    // Forward-compat keys for voice#50/#51 (wake_word.eager + listening_cue).
+    // They map to real config keys today, so writing them is safe even before
+    // the daemon consumes them.
+    Q_PROPERTY(bool wakeEager READ wakeEager WRITE setWakeEager NOTIFY voiceConfigChanged)
+    Q_PROPERTY(QString listeningCue READ listeningCue WRITE setListeningCue NOTIFY voiceConfigChanged)
+    // Enumerated audio devices for the input/output selectors (adele-kde#37).
+    // Each entry is a {value, label} map; the first is always "Follow system
+    // default" (value "default"). Refreshed by loadAudioDevices().
+    Q_PROPERTY(QVariantList inputDeviceOptions READ inputDeviceOptions NOTIFY audioDevicesChanged)
+    Q_PROPERTY(QVariantList outputDeviceOptions READ outputDeviceOptions NOTIFY audioDevicesChanged)
     // Pluggable TTS backend (adele-kde#33): tts.backend in config.toml, plus the
     // per-backend keys the GUI exposes. Applied on the next service (re)start,
     // not hot over D-Bus — hence the Restart button (restartVoiceService()).
@@ -207,6 +224,18 @@ public:
     void setInputDevice(const QString &value);
     QString outputDevice() const;
     void setOutputDevice(const QString &value);
+    double vadSpeechThreshold() const;
+    void setVadSpeechThreshold(double value);
+    int vadSilenceDurationMs() const;
+    void setVadSilenceDurationMs(int value);
+    int followupTimeoutMs() const;
+    void setFollowupTimeoutMs(int value);
+    bool wakeEager() const;
+    void setWakeEager(bool value);
+    QString listeningCue() const;
+    void setListeningCue(const QString &value);
+    QVariantList inputDeviceOptions() const;
+    QVariantList outputDeviceOptions() const;
     QString ttsBackend() const;
     void setTtsBackend(const QString &value);
     QString kokoroLang() const;
@@ -232,6 +261,35 @@ public:
     /// backend, per-backend keys, STT, devices, sensitivity) take effect
     /// without leaving the page. Re-reads live state afterwards.
     Q_INVOKABLE void restartVoiceService();
+
+    /// Apply config-file changes live without a manual restart (adele-kde#37):
+    /// try the daemon's `Reload` D-Bus method (voice#52) first, and on
+    /// UnknownMethod / any failure fall back to restarting the systemd user
+    /// unit. Forward-compatible — works whether or not voice#52 has landed.
+    Q_INVOKABLE void applyVoiceChanges();
+
+    /// Re-enumerate input/output audio devices (PipeWire/Pulse via pactl,
+    /// falling back to ALSA card names) into inputDeviceOptions/
+    /// outputDeviceOptions. Always includes "Follow system default" first.
+    Q_INVOKABLE void loadAudioDevices();
+
+    /// Sample the configured (or system-default) input device briefly and return
+    /// a 0..1 peak level, so the page can nudge the user when the mic is too
+    /// quiet for reliable wake-word detection (ties into voice#47). Returns -1
+    /// when no level could be measured (no tool / no device).
+    Q_INVOKABLE double measureInputLevel();
+
+    /// Reset the wake-word knobs (sensitivity, eager, listening cue) to the
+    /// documented defaults and persist them.
+    Q_INVOKABLE void resetWakeDefaults();
+    /// Reset the endpointing knobs (VAD threshold + silence, follow-up timeout)
+    /// to the documented defaults and persist them.
+    Q_INVOKABLE void resetEndpointingDefaults();
+    /// Reset the input/output device selectors to "Follow system default".
+    Q_INVOKABLE void resetDeviceDefaults();
+    /// Reset every tuning knob this page owns (wake + endpointing + devices) to
+    /// the documented defaults in one shot.
+    Q_INVOKABLE void resetVoiceTuningDefaults();
 
     Q_INVOKABLE void load() override;
     Q_INVOKABLE void save() override;
@@ -301,6 +359,8 @@ Q_SIGNALS:
     // only the daemon's reported state (enabled / voice list) refreshes.
     void voiceChanged();
     void voiceConfigChanged();
+    // Enumerated audio device lists changed (loadAudioDevices()).
+    void audioDevicesChanged();
 
 private:
     struct ConnectionProfile {
@@ -343,6 +403,15 @@ private:
     // Run `systemctl --user <args>` synchronously; returns trimmed stdout and
     // sets *ok to the exit==0 result. Empty/!ok on any failure.
     QString runSystemctlUser(const QStringList &args, bool *ok) const;
+    // Apply config-file changes live. Tries the daemon's `Reload` D-Bus method
+    // (voice#52); returns true on success. On UnknownMethod / unavailable /
+    // error it returns false so the caller can fall back to a service restart.
+    bool tryDaemonReload() const;
+    // Enumerate audio devices for `direction` ("input"/"output"). Each entry is
+    // a {value,label} map. Prefers `pactl`; falls back to ALSA card tokens from
+    // `arecord -L` / `aplay -L`. Never includes the "default" sentinel — the
+    // caller prepends "Follow system default".
+    QVariantList enumerateAudioDevices(const QString &direction) const;
 
     static QString voiceConfigPath();
 
@@ -395,6 +464,20 @@ private:
     double m_wakeSensitivity = 0.5;
     QString m_inputDevice = QStringLiteral("default");
     QString m_outputDevice = QStringLiteral("default");
+    // Tuning knobs (adele-kde#37). Initial values mirror the daemon's
+    // VadConfig / AssistantConfig defaults (repo adelie-ai/voice) — what the
+    // daemon uses when the key is absent from config.toml. The Reset buttons
+    // restore the *documented recommended* values (see the kVoiceDefault*
+    // constants in the .cpp), which can differ from these absent-key fallbacks.
+    double m_vadSpeechThreshold = 0.5;
+    int m_vadSilenceDurationMs = 800;
+    int m_followupTimeoutMs = 8000;
+    bool m_wakeEager = false;
+    QString m_listeningCue;
+    // Enumerated device option lists ({value,label} maps), incl. the leading
+    // "Follow system default" entry. Populated by loadAudioDevices().
+    QVariantList m_inputDeviceOptions;
+    QVariantList m_outputDeviceOptions;
     // TTS backend selection (adele-kde#33). Defaults mirror the daemon's
     // TtsConfig::default() (repo adelie-ai/voice, crates/daemon/src/config.rs):
     // Kokoro is the local default backend; polly_region is optional (omitted

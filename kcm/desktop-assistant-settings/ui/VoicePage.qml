@@ -22,6 +22,7 @@ import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 
 import "VoiceBackends.js" as VoiceBackends
+import "AudioDevices.js" as AudioDevices
 
 ColumnLayout {
     id: root
@@ -31,6 +32,10 @@ ColumnLayout {
     // OR its config/unit exists locally (so you can pre-configure before first
     // launch). When neither is true the page shows an explainer and disables.
     readonly property bool voicePresent: kcm.voiceServiceAvailable || kcm.voiceAutostart >= 0
+
+    // Last-measured input peak (0..1) from the "Test" button; -1 = not measured
+    // yet (or no level could be taken). Drives the mic-level meter + nudge.
+    property real micLevel: -1
 
     function voiceIndexById(id) {
         const list = kcm.voiceList || []
@@ -69,7 +74,23 @@ ColumnLayout {
         return lang.length > 0 ? (name + " — " + lang) : name
     }
 
-    Component.onCompleted: kcm.loadVoiceSettings()
+    // Map a stored device value (e.g. "default" or an ALSA card token) to its
+    // row in one of the kcm device-option lists. Pure logic lives in
+    // AudioDevices.js so it can be unit-tested without the C++ `kcm` context
+    // (see tests/qml/tst_AudioDevices.qml); this thin wrapper keeps the
+    // binding-friendly call site.
+    function deviceIndexByValue(options, value) {
+        return AudioDevices.deviceIndexByValue(options, value)
+    }
+
+    Component.onCompleted: {
+        kcm.loadVoiceSettings()
+        // Enumerate audio devices only when the Voice tab is actually shown —
+        // it spawns pactl/arecord/aplay, which we don't want on every tab of the
+        // settings module. loadVoiceSettings() above has already read the
+        // configured device names so the "(configured)" fallback row is correct.
+        kcm.loadAudioDevices()
+    }
 
     Kirigami.InlineMessage {
         Layout.fillWidth: true
@@ -137,8 +158,193 @@ ColumnLayout {
         Layout.fillWidth: true
         wrapMode: Text.Wrap
         opacity: 0.7
-        text: "Higher is more sensitive (more triggers, more false positives). "
-              + "Applied on the next service restart."
+        // IMPORTANT (adele-kde#37): the detector runs with eager = false, so
+        // this is a confidence THRESHOLD, not a plain "more/less sensitive"
+        // dial — lower is NOT simply more sensitive. Setting it too low can mean
+        // the wake word never finalises (the detector keeps waiting for a
+        // higher-scoring frame that doesn't come). Around 0.45 is a good start;
+        // raise it if you get false triggers, nudge it down only a little if
+        // "Hey Adele" is being missed.
+        text: "Confidence threshold for “Hey Adele”. This is NOT a simple "
+              + "more-sensitive dial: too low and the wake word may never "
+              + "trigger (it waits for a better match). Start near 0.45 — raise "
+              + "it for fewer false triggers, lower it only slightly if it’s "
+              + "being missed."
+    }
+
+    // Wake-word forward-compat (voice#50/#51): eager mode + a listening cue.
+    // These map to real config keys (wake_word.eager / wake_word.listening_cue)
+    // so it's safe to write them now even though the daemon may not consume them
+    // until those issues land.
+    QQC2.CheckBox {
+        id: wakeEagerCheck
+        text: "Eager wake (trigger as soon as the threshold is crossed)"
+        enabled: root.voicePresent
+        checked: kcm.wakeEager
+        onToggled: kcm.wakeEager = checked
+    }
+
+    QQC2.Label {
+        Layout.fillWidth: true
+        wrapMode: Text.Wrap
+        opacity: 0.7
+        text: "Eager mode fires the moment confidence passes the threshold "
+              + "above, instead of waiting for the score to peak. It feels "
+              + "snappier but can be twitchier. (Takes effect once the daemon "
+              + "supports it — voice#50.)"
+    }
+
+    RowLayout {
+        Layout.fillWidth: true
+        enabled: root.voicePresent
+        QQC2.Label {
+            text: "Listening cue"
+            Layout.preferredWidth: 150
+        }
+        QQC2.TextField {
+            id: listeningCueField
+            Layout.fillWidth: true
+            placeholderText: "(none)"
+            text: kcm.listeningCue
+            onEditingFinished: kcm.listeningCue = text
+        }
+    }
+
+    QQC2.Label {
+        Layout.fillWidth: true
+        wrapMode: Text.Wrap
+        opacity: 0.7
+        text: "Optional sound or phrase played when the wake word is heard, so "
+              + "you know it’s listening. Leave blank for no cue. (Takes effect "
+              + "once the daemon supports it — voice#51.)"
+    }
+
+    RowLayout {
+        Layout.fillWidth: true
+        QQC2.Button {
+            text: "Reset wake-word defaults"
+            icon.name: "edit-undo"
+            enabled: root.voicePresent
+            onClicked: kcm.resetWakeDefaults()
+        }
+        Item { Layout.fillWidth: true }
+    }
+
+    Kirigami.Separator { Layout.fillWidth: true }
+
+    // --- Endpointing (config file: [vad] + [assistant]) ---------------------
+    // How the daemon decides you've started and stopped talking. All three are
+    // TOML-backed and applied via "Apply now" at the bottom of the page.
+    QQC2.Label {
+        font.bold: true
+        text: "Endpointing"
+    }
+
+    QQC2.Label {
+        Layout.fillWidth: true
+        wrapMode: Text.Wrap
+        opacity: 0.7
+        text: "Controls how the assistant detects the start and end of speech."
+    }
+
+    RowLayout {
+        Layout.fillWidth: true
+        enabled: root.voicePresent
+        QQC2.Label {
+            text: "Speech threshold"
+            Layout.preferredWidth: 150
+        }
+        QQC2.Slider {
+            id: speechThresholdSlider
+            Layout.fillWidth: true
+            from: 0.0
+            to: 1.0
+            stepSize: 0.05
+            value: kcm.vadSpeechThreshold
+            onMoved: kcm.vadSpeechThreshold = value
+        }
+        QQC2.Label {
+            Layout.preferredWidth: 44
+            horizontalAlignment: Text.AlignRight
+            text: Number(speechThresholdSlider.value).toFixed(2)
+        }
+    }
+
+    QQC2.Label {
+        Layout.fillWidth: true
+        wrapMode: Text.Wrap
+        opacity: 0.7
+        text: "How confident the voice-activity detector must be that you’re "
+              + "speaking. Higher ignores more background noise but may clip "
+              + "quiet speech; lower picks up softer speech but also more noise. "
+              + "Default 0.50."
+    }
+
+    RowLayout {
+        Layout.fillWidth: true
+        enabled: root.voicePresent
+        QQC2.Label {
+            text: "Silence to end (ms)"
+            Layout.preferredWidth: 150
+        }
+        QQC2.SpinBox {
+            id: silenceDurationSpin
+            Layout.fillWidth: true
+            from: 0
+            to: 20000
+            stepSize: 250
+            editable: true
+            value: kcm.vadSilenceDurationMs
+            onValueModified: kcm.vadSilenceDurationMs = value
+        }
+    }
+
+    QQC2.Label {
+        Layout.fillWidth: true
+        wrapMode: Text.Wrap
+        opacity: 0.7
+        text: "How long the assistant keeps listening (lingers) after you stop "
+              + "talking before it treats your turn as finished. Longer is more "
+              + "forgiving of pauses; shorter feels snappier. Default 3000 ms."
+    }
+
+    RowLayout {
+        Layout.fillWidth: true
+        enabled: root.voicePresent
+        QQC2.Label {
+            text: "Follow-up wait (ms)"
+            Layout.preferredWidth: 150
+        }
+        QQC2.SpinBox {
+            id: followupTimeoutSpin
+            Layout.fillWidth: true
+            from: 0
+            to: 60000
+            stepSize: 500
+            editable: true
+            value: kcm.followupTimeoutMs
+            onValueModified: kcm.followupTimeoutMs = value
+        }
+    }
+
+    QQC2.Label {
+        Layout.fillWidth: true
+        wrapMode: Text.Wrap
+        opacity: 0.7
+        text: "In conversation mode, how long the assistant waits for you to "
+              + "start a follow-up before ending the conversation and returning "
+              + "to the wake word. Default 10000 ms."
+    }
+
+    RowLayout {
+        Layout.fillWidth: true
+        QQC2.Button {
+            text: "Reset endpointing defaults"
+            icon.name: "edit-undo"
+            enabled: root.voicePresent
+            onClicked: kcm.resetEndpointingDefaults()
+        }
+        Item { Layout.fillWidth: true }
     }
 
     Kirigami.Separator { Layout.fillWidth: true }
@@ -340,11 +546,20 @@ ColumnLayout {
     RowLayout {
         Layout.fillWidth: true
         QQC2.Button {
+            text: "Apply now"
+            icon.name: "dialog-ok-apply"
+            // Apply config-file changes live (adele-kde#37): tries the daemon's
+            // Reload D-Bus method (voice#52) and falls back to a service
+            // restart. Enabled whenever the daemon is on the bus OR its unit is
+            // installed (so a restart is possible).
+            enabled: kcm.voiceServiceAvailable || kcm.voiceAutostart >= 0
+            onClicked: kcm.applyVoiceChanges()
+        }
+        QQC2.Button {
             text: "Restart voice service"
             icon.name: "system-reboot"
-            // Restart applies config-file changes (backend, per-backend keys,
-            // STT, devices, sensitivity). Disabled when the unit isn't
-            // installed (autostart unknown) — there's nothing to restart.
+            // Explicit full restart, for when a plain reload isn't enough.
+            // Disabled when the unit isn't installed (nothing to restart).
             enabled: kcm.voiceAutostart >= 0
             onClicked: kcm.restartVoiceService()
         }
@@ -352,8 +567,8 @@ ColumnLayout {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             opacity: 0.7
-            text: "Applies text-to-speech and speech-recognition changes below "
-                  + "without logging out."
+            text: "“Apply now” reloads the settings on this page (wake word, "
+                  + "endpointing, devices, text-to-speech) without logging out."
         }
     }
 
@@ -369,8 +584,8 @@ ColumnLayout {
         Layout.fillWidth: true
         wrapMode: Text.Wrap
         opacity: 0.7
-        text: "These are written to the voice config and take effect the next "
-              + "time the voice service starts."
+        text: "These are written to the voice config. Use “Apply now” above to "
+              + "apply them without logging out."
     }
 
     RowLayout {
@@ -405,6 +620,10 @@ ColumnLayout {
         }
     }
 
+    // --- Audio devices (adele-kde#37) ---------------------------------------
+    // Enumerated input/output selectors. The first row is always "Follow system
+    // default" (recommended). A low-volume mic can silently sink wake-word
+    // detection (voice#47), so we offer a level check + nudge below.
     RowLayout {
         Layout.fillWidth: true
         enabled: root.voicePresent
@@ -412,13 +631,78 @@ ColumnLayout {
             text: "Input device"
             Layout.preferredWidth: 150
         }
-        QQC2.TextField {
-            id: inputDeviceField
+        QQC2.ComboBox {
+            id: inputDeviceCombo
             Layout.fillWidth: true
-            placeholderText: "default"
-            text: kcm.inputDevice
-            onEditingFinished: kcm.inputDevice = text
+            textRole: "label"
+            model: kcm.inputDeviceOptions
+            currentIndex: root.deviceIndexByValue(kcm.inputDeviceOptions, kcm.inputDevice)
+            onActivated: {
+                const opts = kcm.inputDeviceOptions || []
+                if (currentIndex >= 0 && currentIndex < opts.length) {
+                    kcm.inputDevice = opts[currentIndex].value
+                }
+            }
         }
+        QQC2.Button {
+            icon.name: "view-refresh"
+            text: "Refresh"
+            display: QQC2.AbstractButton.IconOnly
+            QQC2.ToolTip.visible: hovered
+            QQC2.ToolTip.text: "Re-scan audio devices"
+            onClicked: kcm.loadAudioDevices()
+        }
+    }
+
+    // Mic level check + nudge (ties into voice#47): a too-quiet input can let
+    // detection silently fail, so let the user verify there's signal.
+    RowLayout {
+        Layout.fillWidth: true
+        enabled: root.voicePresent
+        QQC2.Label {
+            text: "Microphone level"
+            Layout.preferredWidth: 150
+        }
+        QQC2.ProgressBar {
+            id: micLevelBar
+            Layout.fillWidth: true
+            from: 0.0
+            to: 1.0
+            value: root.micLevel >= 0 ? root.micLevel : 0.0
+        }
+        QQC2.Button {
+            text: "Test"
+            icon.name: "audio-input-microphone"
+            onClicked: root.micLevel = kcm.measureInputLevel()
+        }
+    }
+
+    QQC2.Label {
+        Layout.fillWidth: true
+        wrapMode: Text.Wrap
+        visible: root.micLevel >= 0
+        // A peak under ~10% is almost always too quiet for reliable detection;
+        // nudge the user to raise input gain rather than letting it fail
+        // silently (voice#47).
+        color: root.micLevel >= 0 && root.micLevel < 0.1
+            ? Kirigami.Theme.negativeTextColor
+            : Kirigami.Theme.textColor
+        text: root.micLevel < 0
+            ? ""
+            : (root.micLevel < 0.1
+                ? "That’s very quiet — say “Hey Adele” while testing. If the bar "
+                  + "barely moves, raise your microphone’s input volume (e.g. in "
+                  + "Audio settings) or the wake word may be missed."
+                : "Good — the microphone is picking up audio.")
+    }
+
+    QQC2.Label {
+        Layout.fillWidth: true
+        wrapMode: Text.Wrap
+        visible: root.micLevel < 0
+        opacity: 0.7
+        text: "Press “Test”, then speak, to check your microphone level. "
+              + "(Needs PulseAudio/PipeWire tools.)"
     }
 
     RowLayout {
@@ -428,12 +712,50 @@ ColumnLayout {
             text: "Output device"
             Layout.preferredWidth: 150
         }
-        QQC2.TextField {
-            id: outputDeviceField
+        QQC2.ComboBox {
+            id: outputDeviceCombo
             Layout.fillWidth: true
-            placeholderText: "default"
-            text: kcm.outputDevice
-            onEditingFinished: kcm.outputDevice = text
+            textRole: "label"
+            model: kcm.outputDeviceOptions
+            currentIndex: root.deviceIndexByValue(kcm.outputDeviceOptions, kcm.outputDevice)
+            onActivated: {
+                const opts = kcm.outputDeviceOptions || []
+                if (currentIndex >= 0 && currentIndex < opts.length) {
+                    kcm.outputDevice = opts[currentIndex].value
+                }
+            }
+        }
+    }
+
+    RowLayout {
+        Layout.fillWidth: true
+        QQC2.Button {
+            text: "Reset devices to system default"
+            icon.name: "edit-undo"
+            enabled: root.voicePresent
+            onClicked: kcm.resetDeviceDefaults()
+        }
+        Item { Layout.fillWidth: true }
+    }
+
+    Kirigami.Separator { Layout.fillWidth: true }
+
+    // --- Reset everything (adele-kde#37) ------------------------------------
+    RowLayout {
+        Layout.fillWidth: true
+        QQC2.Button {
+            text: "Reset all voice tuning to defaults"
+            icon.name: "edit-undo"
+            enabled: root.voicePresent
+            onClicked: kcm.resetVoiceTuningDefaults()
+        }
+        QQC2.Label {
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+            opacity: 0.7
+            text: "Restores wake-word sensitivity, endpointing, and audio "
+                  + "devices to their recommended defaults. Use “Apply now” "
+                  + "above to apply."
         }
     }
 
@@ -466,9 +788,11 @@ ColumnLayout {
 
     Item { Layout.fillHeight: true }
 
-    // Keep editable text fields in sync when the KCM reloads config from disk.
-    // (The backend/engine ComboBoxes re-derive their index from kcm.* via their
-    // currentIndex bindings, so only the free-text fields need explicit sync.)
+    // Keep editable text fields + sliders/spin boxes in sync when the KCM
+    // reloads config from disk (including after a Reset). The ComboBoxes
+    // (TTS backend/engine, audio devices) re-derive their index from kcm.* via
+    // their currentIndex bindings, so only the free-form controls need explicit
+    // sync; we guard live drag/edit with `.pressed`/focus where it matters.
     Connections {
         target: kcm
         function onVoiceConfigChanged() {
@@ -487,15 +811,22 @@ ColumnLayout {
             if (pollyRegionField.text !== kcm.pollyRegion) {
                 pollyRegionField.text = kcm.pollyRegion
             }
-            if (inputDeviceField.text !== kcm.inputDevice) {
-                inputDeviceField.text = kcm.inputDevice
-            }
-            if (outputDeviceField.text !== kcm.outputDevice) {
-                outputDeviceField.text = kcm.outputDevice
+            if (listeningCueField.text !== kcm.listeningCue) {
+                listeningCueField.text = kcm.listeningCue
             }
             if (!sensitivitySlider.pressed && sensitivitySlider.value !== kcm.wakeSensitivity) {
                 sensitivitySlider.value = kcm.wakeSensitivity
             }
+            if (!speechThresholdSlider.pressed && speechThresholdSlider.value !== kcm.vadSpeechThreshold) {
+                speechThresholdSlider.value = kcm.vadSpeechThreshold
+            }
+            if (silenceDurationSpin.value !== kcm.vadSilenceDurationMs) {
+                silenceDurationSpin.value = kcm.vadSilenceDurationMs
+            }
+            if (followupTimeoutSpin.value !== kcm.followupTimeoutMs) {
+                followupTimeoutSpin.value = kcm.followupTimeoutMs
+            }
+            wakeEagerCheck.checked = kcm.wakeEager
         }
     }
 }
