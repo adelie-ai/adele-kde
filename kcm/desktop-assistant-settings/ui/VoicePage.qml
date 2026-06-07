@@ -590,7 +590,9 @@ ColumnLayout {
 
     RowLayout {
         Layout.fillWidth: true
-        enabled: kcm.voiceServiceAvailable && (kcm.voiceList || []).length > 0
+        // NB: the disable gate lives on the ComboBox, not this row, so the
+        // Refresh button stays usable when no voices are loaded yet (that's
+        // exactly when the user needs to force a re-probe).
         QQC2.Label {
             text: "Voice"
             Layout.preferredWidth: 150
@@ -598,6 +600,7 @@ ColumnLayout {
         QQC2.ComboBox {
             id: voiceCombo
             Layout.fillWidth: true
+            enabled: kcm.voiceServiceAvailable && (kcm.voiceList || []).length > 0
             textRole: "label"
             model: {
                 const list = kcm.voiceList || []
@@ -616,6 +619,17 @@ ColumnLayout {
                     kcm.setVoice(list[currentIndex].voice_id, -1)
                 }
             }
+        }
+        // Manual fallback: re-probe the daemon (availability + voice list). The
+        // C++ side also re-probes automatically when the daemon (re)appears on
+        // the bus, but this lets the user force a refresh if the picker is empty.
+        QQC2.Button {
+            icon.name: "view-refresh"
+            text: "Refresh"
+            display: QQC2.AbstractButton.IconOnly
+            QQC2.ToolTip.visible: hovered
+            QQC2.ToolTip.text: "Re-check the voice service and reload its voices"
+            onClicked: kcm.loadVoiceSettings()
         }
     }
 

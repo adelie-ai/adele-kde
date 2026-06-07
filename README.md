@@ -47,17 +47,15 @@ to `python3` + `gdbus` for D-Bus, or use a raw WebSocket client for WS.
 
 ## KCM
 
-User-local (for development):
+Install system-wide and open (needs sudo). This is the only supported install:
+a user-local (`~/.local`) copy is invisible to a normally launched System
+Settings (that prefix isn't on the default Qt plugin search path) and only
+causes duplicate-install drift, so `just kcm-install` is an alias for
+`kcm-install-system`. Use `just kcm-cleanup` to remove any stray local copy and
+`just kcm-doctor` to see which plugin copies exist.
 
 ```sh
-just kcm-install
-just kcm-open
-```
-
-System-wide (recommended for daily use, needs sudo):
-
-```sh
-just kcm-install-system
+just kcm-install        # == kcm-install-system (sudo)
 just kcm-open-system
 ```
 
