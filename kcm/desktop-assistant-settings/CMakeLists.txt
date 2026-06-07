@@ -15,7 +15,7 @@ include(KDECompilerSettings NO_POLICY_SCOPE)
 set(BUILD_SHARED_LIBS ON CACHE BOOL "Build shared libraries" FORCE)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}" CACHE PATH "Library output directory" FORCE)
 
-find_package(Qt6 REQUIRED COMPONENTS Core DBus Qml)
+find_package(Qt6 REQUIRED COMPONENTS Core DBus Network Qml)
 find_package(KF6 REQUIRED COMPONENTS CoreAddons KCMUtils)
 
 add_definitions(-DTRANSLATION_DOMAIN="kcm_desktopassistant")
@@ -33,6 +33,7 @@ target_link_libraries(kcm_desktopassistant
     PRIVATE
         Qt6::Core
         Qt6::DBus
+        Qt6::Network
         Qt6::Qml
         KF6::CoreAddons
         KF6::KCMUtils
