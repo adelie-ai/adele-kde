@@ -701,6 +701,148 @@ void DesktopAssistantKcm::setOidcScopes(const QString &value)
     pushWsAuthSettings();
 }
 
+// --- Personality (adele-kde#42) ---------------------------------------------
+// Trait values persist on the daemon's aggregate config (GetConfig/SetConfig on
+// org.desktopAssistant.Settings) as per-trait u32 fields appended to ConfigData
+// / ConfigPatchArgs (desktop-assistant#226). There are no granular
+// get/set_personality D-Bus methods. load() reads the trailing personality u32s
+// from the GetConfig reply by index (QtDBus flattens the returned struct into
+// positional args), or keeps the built-in defaults when the daemon predates
+// #226; each setter pushes one trait via a SetConfig ConfigPatchArgs struct.
+namespace {
+// Order of ConfigPatchArgs.set_personality_* / personality_* pairs, matching
+// the seven u32 trait fields appended to ConfigData (desktop-assistant#226):
+// professionalism, warmth, directness, enthusiasm, humor, sarcasm,
+// pretentiousness — the issue #42 display order.
+constexpr int PERSONALITY_TRAIT_COUNT = 7;
+const char *const PERSONALITY_SET_FIELDS[PERSONALITY_TRAIT_COUNT] = {
+    "set_personality_professionalism",
+    "set_personality_warmth",
+    "set_personality_directness",
+    "set_personality_enthusiasm",
+    "set_personality_humor",
+    "set_personality_sarcasm",
+    "set_personality_pretentiousness",
+};
+
+// Number of ConfigData fields that precede the personality block (the pre-#226
+// struct arity). If GetConfig returns exactly this many the daemon has no
+// personality surface yet and we keep the built-in defaults.
+constexpr int CONFIG_DATA_BASE_FIELDS = 18;
+
+int clampTrait(int value)
+{
+    return std::clamp(value, 0, 4);
+}
+} // namespace
+
+int DesktopAssistantKcm::personalityProfessionalism() const { return m_personalityProfessionalism; }
+int DesktopAssistantKcm::personalityWarmth() const { return m_personalityWarmth; }
+int DesktopAssistantKcm::personalityDirectness() const { return m_personalityDirectness; }
+int DesktopAssistantKcm::personalityEnthusiasm() const { return m_personalityEnthusiasm; }
+int DesktopAssistantKcm::personalityHumor() const { return m_personalityHumor; }
+int DesktopAssistantKcm::personalitySarcasm() const { return m_personalitySarcasm; }
+int DesktopAssistantKcm::personalityPretentiousness() const { return m_personalityPretentiousness; }
+
+void DesktopAssistantKcm::setPersonalityProfessionalism(int value)
+{
+    setPersonalityTrait(&m_personalityProfessionalism, value, "set_personality_professionalism");
+}
+void DesktopAssistantKcm::setPersonalityWarmth(int value)
+{
+    setPersonalityTrait(&m_personalityWarmth, value, "set_personality_warmth");
+}
+void DesktopAssistantKcm::setPersonalityDirectness(int value)
+{
+    setPersonalityTrait(&m_personalityDirectness, value, "set_personality_directness");
+}
+void DesktopAssistantKcm::setPersonalityEnthusiasm(int value)
+{
+    setPersonalityTrait(&m_personalityEnthusiasm, value, "set_personality_enthusiasm");
+}
+void DesktopAssistantKcm::setPersonalityHumor(int value)
+{
+    setPersonalityTrait(&m_personalityHumor, value, "set_personality_humor");
+}
+void DesktopAssistantKcm::setPersonalitySarcasm(int value)
+{
+    setPersonalityTrait(&m_personalitySarcasm, value, "set_personality_sarcasm");
+}
+void DesktopAssistantKcm::setPersonalityPretentiousness(int value)
+{
+    setPersonalityTrait(&m_personalityPretentiousness, value, "set_personality_pretentiousness");
+}
+
+void DesktopAssistantKcm::setPersonalityTrait(int *slot, int value, const char *setField)
+{
+    const int clamped = clampTrait(value);
+    if (*slot == clamped) {
+        return;
+    }
+    *slot = clamped;
+    Q_EMIT personalityChanged();
+    pushPersonalityTrait(setField, clamped);
+}
+
+void DesktopAssistantKcm::pushPersonalityTrait(const char *setField, int value)
+{
+    // Build a ConfigPatchArgs struct (desktop-assistant#226) with every set_*
+    // false except this trait, and SetConfig it. The struct's field order/types
+    // are fixed by the daemon's zvariant::Type derive; we marshal positionally.
+    // The leading (pre-personality) patch fields mirror the current daemon's
+    // input signature (bsbsbsbsbsbsbsbbbsbsbbbdbdbubi); the 7 trailing
+    // bool+u32 pairs are the personality block #226 appends.
+    const QString setName = QString::fromLatin1(setField);
+
+    QDBusArgument patch;
+    patch.beginStructure();
+    // --- LLM string/key fields: set_* = false, value = "" ---
+    patch << false << QString();   // set_llm_connector, llm_connector
+    patch << false << QString();   // set_llm_model, llm_model
+    patch << false << QString();   // set_llm_base_url, llm_base_url
+    patch << false << QString();   // set_llm_api_key, llm_api_key
+    patch << false << QString();   // set_embeddings_connector, embeddings_connector
+    patch << false << QString();   // set_embeddings_model, embeddings_model
+    patch << false << QString();   // set_embeddings_base_url, embeddings_base_url
+    // --- Persistence ---
+    patch << false << false;       // set_persistence_enabled, persistence_enabled
+    patch << false << QString();   // set_persistence_remote_url, persistence_remote_url
+    patch << false << QString();   // set_persistence_remote_name, persistence_remote_name
+    patch << false << false;       // set_persistence_push_on_update, persistence_push_on_update
+    // --- LLM numeric sampling ---
+    patch << false << 0.0;         // set_llm_temperature, llm_temperature
+    patch << false << 0.0;         // set_llm_top_p, llm_top_p
+    patch << false << static_cast<uint>(0);  // set_llm_max_tokens, llm_max_tokens
+    patch << false << static_cast<int>(0);   // set_llm_hosted_tool_search, llm_hosted_tool_search
+    // --- Personality block (#226): 7 x (bool set, u32 value), issue #42 order ---
+    for (int i = 0; i < PERSONALITY_TRAIT_COUNT; ++i) {
+        const QString field = QString::fromLatin1(PERSONALITY_SET_FIELDS[i]);
+        const bool isThis = (field == setName);
+        patch << isThis << static_cast<uint>(isThis ? value : 0);
+    }
+    patch.endStructure();
+
+    // SetConfig takes a single ConfigPatchArgs struct argument, so we build the
+    // message by hand (QDBusInterface::call would pass each `patch` element as a
+    // separate argument). The reply is the flattened ConfigData; we only care
+    // whether it errored.
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        QString::fromLatin1(SERVICE),
+        QString::fromLatin1(PATH),
+        QString::fromLatin1(IFACE),
+        QStringLiteral("SetConfig")
+    );
+    msg.setArguments({QVariant::fromValue(patch)});
+    QDBusMessage reply = QDBusConnection::sessionBus().call(msg);
+    if (setStatusFromDbusError(reply)) {
+        // Most likely the daemon predates the personality fields
+        // (desktop-assistant#226): SetConfig rejects the longer ConfigPatchArgs
+        // signature. setStatusFromDbusError has already surfaced the message;
+        // the in-memory value stays so the slider reflects the user's choice.
+        return;
+    }
+}
+
 void DesktopAssistantKcm::load()
 {
     QDBusInterface iface(SERVICE, PATH, IFACE, QDBusConnection::sessionBus());
@@ -813,6 +955,29 @@ void DesktopAssistantKcm::load()
         }
     }
 
+    // Personality (adele-kde#42): read the seven traits from the aggregate
+    // GetConfig. They have no granular getter, so this is the only read path.
+    // QtDBus flattens the returned ConfigData struct into one positional
+    // argument per field (same shape as the other Get* methods here), so we read
+    // by index: the personality u32s are the seven fields appended after the
+    // pre-#226 block (desktop-assistant#226). If GetConfig errors (daemon down)
+    // or predates the personality fields (only CONFIG_DATA_BASE_FIELDS args), we
+    // keep the built-in defaults set in the header.
+    QDBusMessage configReply = iface.call("GetConfig");
+    if (configReply.type() != QDBusMessage::ErrorMessage) {
+        const auto configArgs = configReply.arguments();
+        if (configArgs.size() >= CONFIG_DATA_BASE_FIELDS + PERSONALITY_TRAIT_COUNT) {
+            const int base = CONFIG_DATA_BASE_FIELDS;
+            m_personalityProfessionalism = clampTrait(configArgs[base + 0].toInt());
+            m_personalityWarmth = clampTrait(configArgs[base + 1].toInt());
+            m_personalityDirectness = clampTrait(configArgs[base + 2].toInt());
+            m_personalityEnthusiasm = clampTrait(configArgs[base + 3].toInt());
+            m_personalityHumor = clampTrait(configArgs[base + 4].toInt());
+            m_personalitySarcasm = clampTrait(configArgs[base + 5].toInt());
+            m_personalityPretentiousness = clampTrait(configArgs[base + 6].toInt());
+        }
+    }
+
     loadWidgetConnectionSettings();
 
     // Probe the voice service + read its config so the Voice tab is populated
@@ -854,6 +1019,7 @@ void DesktopAssistantKcm::load()
     Q_EMIT oidcTokenEndpointChanged();
     Q_EMIT oidcClientIdChanged();
     Q_EMIT oidcScopesChanged();
+    Q_EMIT personalityChanged();
 
     m_statusText = QStringLiteral("Loaded settings from desktop-assistant daemon");
     Q_EMIT statusTextChanged();
