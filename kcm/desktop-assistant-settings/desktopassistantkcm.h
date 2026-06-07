@@ -94,6 +94,21 @@ class DesktopAssistantKcm : public KQuickConfigModule {
     Q_PROPERTY(QString piperModelPath READ piperModelPath WRITE setPiperModelPath NOTIFY voiceConfigChanged)
     Q_PROPERTY(QString pollyEngine READ pollyEngine WRITE setPollyEngine NOTIFY voiceConfigChanged)
     Q_PROPERTY(QString pollyRegion READ pollyRegion WRITE setPollyRegion NOTIFY voiceConfigChanged)
+    // Personality (adele-kde#42). Seven discrete 0..4 traits that set the
+    // assistant's global disposition. They live ONLY on the daemon's aggregate
+    // config (org.desktopAssistant.Settings GetConfig/SetConfig) as per-trait
+    // u32 fields — there are no granular get/set_personality D-Bus methods — so
+    // load() reads them from GetConfig and each setter writes them back via a
+    // SetConfig patch (set_personality_<trait>=true). Hot-applied, no Apply
+    // button. All share one NOTIFY (personalityChanged) so the page can resync
+    // every slider from one handler after a reload.
+    Q_PROPERTY(int personalityProfessionalism READ personalityProfessionalism WRITE setPersonalityProfessionalism NOTIFY personalityChanged)
+    Q_PROPERTY(int personalityWarmth READ personalityWarmth WRITE setPersonalityWarmth NOTIFY personalityChanged)
+    Q_PROPERTY(int personalityDirectness READ personalityDirectness WRITE setPersonalityDirectness NOTIFY personalityChanged)
+    Q_PROPERTY(int personalityEnthusiasm READ personalityEnthusiasm WRITE setPersonalityEnthusiasm NOTIFY personalityChanged)
+    Q_PROPERTY(int personalityHumor READ personalityHumor WRITE setPersonalityHumor NOTIFY personalityChanged)
+    Q_PROPERTY(int personalitySarcasm READ personalitySarcasm WRITE setPersonalitySarcasm NOTIFY personalityChanged)
+    Q_PROPERTY(int personalityPretentiousness READ personalityPretentiousness WRITE setPersonalityPretentiousness NOTIFY personalityChanged)
 
 public:
     DesktopAssistantKcm(QObject *parent, const KPluginMetaData &metaData, const QVariantList &args);
@@ -247,6 +262,21 @@ public:
     QString pollyRegion() const;
     void setPollyRegion(const QString &value);
 
+    int personalityProfessionalism() const;
+    void setPersonalityProfessionalism(int value);
+    int personalityWarmth() const;
+    void setPersonalityWarmth(int value);
+    int personalityDirectness() const;
+    void setPersonalityDirectness(int value);
+    int personalityEnthusiasm() const;
+    void setPersonalityEnthusiasm(int value);
+    int personalityHumor() const;
+    void setPersonalityHumor(int value);
+    int personalitySarcasm() const;
+    void setPersonalitySarcasm(int value);
+    int personalityPretentiousness() const;
+    void setPersonalityPretentiousness(int value);
+
     /// Re-probe the voice service (D-Bus) and re-read its TOML config + the
     /// autostart unit state. Called when the Voice tab loads so the page
     /// reflects current reality without a full KCM reload.
@@ -361,6 +391,9 @@ Q_SIGNALS:
     void voiceConfigChanged();
     // Enumerated audio device lists changed (loadAudioDevices()).
     void audioDevicesChanged();
+    // Any of the seven personality traits changed (adele-kde#42). One shared
+    // signal so the page resyncs every slider from a single handler.
+    void personalityChanged();
 
 private:
     struct ConnectionProfile {
@@ -386,6 +419,17 @@ private:
     void pushDatabaseSettings();
     void pushBackendTasksSettings();
     void pushWsAuthSettings();
+    // --- Personality (adele-kde#42) ------------------------------------------
+    // Shared setter body for the seven traits: clamp to 0..4, store into `slot`,
+    // and on a real change emit personalityChanged + push just that trait via a
+    // SetConfig patch (set_personality_<trait>=true). `setField` is the
+    // ConfigPatchArgs `set_personality_*` boolean to flip true for this trait.
+    void setPersonalityTrait(int *slot, int value, const char *setField);
+    // Push a single personality trait to the daemon via SetConfig with a
+    // ConfigPatchArgs whose `set_personality_<setField after "set_">`=true and
+    // matching value, all other set_* false. Mirrors the GetConfig/SetConfig
+    // struct contract (desktop-assistant#226).
+    void pushPersonalityTrait(const char *setField, int value);
 
     // --- Voice (adele-kde#30) -------------------------------------------------
     // The voice daemon exposes Enable + voice selection over D-Bus only; the
@@ -487,4 +531,16 @@ private:
     QString m_piperModelPath;
     QString m_pollyEngine = QStringLiteral("neural");
     QString m_pollyRegion;
+
+    // Personality traits (adele-kde#42), 0..4 each. Defaults match the daemon's
+    // built-in disposition and are what we fall back to when GetConfig fails
+    // (daemon down): Professionalism=4, Warmth=3, Directness=3, Enthusiasm=2,
+    // Humor=2, Sarcasm=1, Pretentiousness=1.
+    int m_personalityProfessionalism = 4;
+    int m_personalityWarmth = 3;
+    int m_personalityDirectness = 3;
+    int m_personalityEnthusiasm = 2;
+    int m_personalityHumor = 2;
+    int m_personalitySarcasm = 1;
+    int m_personalityPretentiousness = 1;
 };

@@ -79,6 +79,11 @@ TestCase {
                 instantiate: false,
             },
             {
+                tag: "kcm/PersonalityPage",
+                path: "../../kcm/desktop-assistant-settings/ui/PersonalityPage.qml",
+                instantiate: false,
+            },
+            {
                 tag: "kcm/ConnectionEditor",
                 path: "../../kcm/desktop-assistant-settings/ui/ConnectionEditor.qml",
                 instantiate: false,
