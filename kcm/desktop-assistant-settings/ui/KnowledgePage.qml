@@ -327,10 +327,10 @@ ColumnLayout {
             }
 
             // Vertical split inside the editor: drag the divider to rebalance
-            // the Content box against Tags + Metadata. Defaults to ~60/40 so
-            // the lower fields aren't squished into a sliver. Each pane scrolls
-            // internally, so a long Content box stays scrollable rather than
-            // growing without bound.
+            // the Content box against Tags + Metadata. Defaults to 50/50 —
+            // content tends to be short, and Tags eats into the lower pane, so
+            // Metadata wants the room. Each pane scrolls internally, so a long
+            // Content box stays scrollable rather than growing without bound.
             QQC2.SplitView {
                 id: editorSplit
                 Layout.fillWidth: true
@@ -354,7 +354,7 @@ ColumnLayout {
                     }
                 }
 
-                // -- Content (top, ~60%) --
+                // -- Content (top, ~50%) --
                 ColumnLayout {
                     QQC2.SplitView.fillHeight: true
                     QQC2.SplitView.minimumHeight: 96
@@ -375,9 +375,9 @@ ColumnLayout {
                     }
                 }
 
-                // -- Tags + Metadata (bottom, ~40%) --
+                // -- Tags + Metadata (bottom, ~50%) --
                 ColumnLayout {
-                    QQC2.SplitView.preferredHeight: Math.round(editorSplit.height * 0.4)
+                    QQC2.SplitView.preferredHeight: Math.round(editorSplit.height * 0.5)
                     QQC2.SplitView.minimumHeight: 96
                     spacing: 6
 
