@@ -2819,6 +2819,81 @@ QVariantList DesktopAssistantKcm::enumerateAudioDevices(const QString &direction
     return out;
 }
 
+QVariantList DesktopAssistantKcm::enumerateVoiceInputDevices(bool *ok) const
+{
+    if (ok) {
+        *ok = false;
+    }
+    const QString bin = QStandardPaths::findExecutable(QStringLiteral("adele-voice"));
+    if (bin.isEmpty()) {
+        return {};
+    }
+
+    QProcess voice;
+    voice.start(bin, QStringList{QStringLiteral("list-devices")});
+    if (!voice.waitForStarted(2000) || !voice.waitForFinished(5000)
+        || voice.exitStatus() != QProcess::NormalExit || voice.exitCode() != 0) {
+        return {};
+    }
+
+    QJsonParseError perr;
+    const QJsonDocument doc = QJsonDocument::fromJson(voice.readAllStandardOutput(), &perr);
+    if (perr.error != QJsonParseError::NoError || !doc.isArray()) {
+        return {};
+    }
+
+    // Parsed cleanly — the daemon's list is now authoritative, even if empty.
+    if (ok) {
+        *ok = true;
+    }
+    QVariantList out;
+    const QJsonArray arr = doc.array();
+    for (const QJsonValue &v : arr) {
+        const QJsonObject obj = v.toObject();
+        const QString value = obj.value(QStringLiteral("value")).toString();
+        // The caller prepends the "default" sentinel itself; skip the daemon's.
+        if (value.isEmpty() || value == QLatin1String("default")) {
+            continue;
+        }
+        // Only offer devices capture can actually open. A device that's present
+        // but currently in use is still supported (it's the mic you're using).
+        if (!obj.value(QStringLiteral("supported")).toBool()) {
+            continue;
+        }
+        QString label = obj.value(QStringLiteral("label")).toString();
+        if (label.isEmpty()) {
+            label = value;
+        }
+        // The daemon tags each entry's nature and lists shared routes first.
+        // Shared sound-server routes are the recommended choice; raw cards take
+        // the mic exclusively and can block other apps (and another logged-in
+        // user's session), so flag them.
+        const QString kind = obj.value(QStringLiteral("kind")).toString();
+        const QString reason = obj.value(QStringLiteral("reason")).toString();
+        if (kind == QLatin1String("server")) {
+            // Friendlier "follows the sound server" labels for the routes.
+            if (label.contains(QLatin1String("PipeWire"), Qt::CaseInsensitive)) {
+                label = QStringLiteral("PipeWire (follows the sound server)");
+            } else if (label.contains(QLatin1String("Pulse"), Qt::CaseInsensitive)) {
+                label = QStringLiteral("PulseAudio (follows the sound server)");
+            } else if (label.contains(QLatin1String("JACK"), Qt::CaseInsensitive)) {
+                label = QStringLiteral("JACK (follows the sound server)");
+            } else {
+                label = QStringLiteral("%1 (follows the sound server)").arg(label);
+            }
+        } else if (kind == QLatin1String("card")) {
+            label = QStringLiteral("%1 (exclusive — may block other apps)").arg(label);
+        } else if (reason.contains(QLatin1String("in use"), Qt::CaseInsensitive)) {
+            label = QStringLiteral("%1 (in use)").arg(label);
+        }
+        QVariantMap entry;
+        entry.insert(QStringLiteral("value"), value);
+        entry.insert(QStringLiteral("label"), label);
+        out.push_back(entry);
+    }
+    return out;
+}
+
 void DesktopAssistantKcm::loadAudioDevices()
 {
     auto withDefault = [](const QVariantList &devices) -> QVariantList {
@@ -2831,7 +2906,15 @@ void DesktopAssistantKcm::loadAudioDevices()
         return list;
     };
 
-    m_inputDeviceOptions = withDefault(enumerateAudioDevices(QStringLiteral("input")));
+    // For input, prefer the voice daemon's probed list (only devices capture can
+    // open). Fall back to raw ALSA enumeration if the daemon isn't installed or
+    // can't be reached, so the picker still works.
+    bool voiceOk = false;
+    QVariantList inputDevices = enumerateVoiceInputDevices(&voiceOk);
+    if (!voiceOk) {
+        inputDevices = enumerateAudioDevices(QStringLiteral("input"));
+    }
+    m_inputDeviceOptions = withDefault(inputDevices);
     m_outputDeviceOptions = withDefault(enumerateAudioDevices(QStringLiteral("output")));
 
     // A hand-edited config can point at a device that didn't enumerate (a

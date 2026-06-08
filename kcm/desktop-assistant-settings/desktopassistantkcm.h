@@ -501,6 +501,15 @@ private:
     // caller prepends "Follow system default".
     QVariantList enumerateAudioDevices(const QString &direction) const;
 
+    // Ask the voice daemon (`adele-voice list-devices`) for the input devices it
+    // can actually open — a probed, curated JSON list (adelie-ai/voice#74). Each
+    // entry is a {value,label} map for devices reported `supported`; unsupported
+    // ones (e.g. a sound server that isn't running) are dropped so the picker
+    // never offers something capture would reject. Never includes the "default"
+    // sentinel. On `*ok == false` the daemon was unavailable and the caller
+    // should fall back to enumerateAudioDevices("input").
+    QVariantList enumerateVoiceInputDevices(bool *ok) const;
+
     // --- Whisper STT model download (adele-kde#44) ---------------------------
     // Reset the sttDownload* state to idle and emit sttDownloadChanged.
     void resetSttDownloadState();
