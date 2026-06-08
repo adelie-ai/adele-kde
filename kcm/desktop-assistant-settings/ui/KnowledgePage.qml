@@ -203,15 +203,38 @@ ColumnLayout {
         type: Kirigami.MessageType.Information
     }
 
-    RowLayout {
+    // Resizable split: drag the handle to widen the list or the editor. The
+    // SplitView gives both panes a definite height, so their inner ScrollViews
+    // actually scroll (instead of relying on a now-removed outer ScrollView).
+    QQC2.SplitView {
         Layout.fillWidth: true
         Layout.fillHeight: true
-        spacing: 12
+        orientation: Qt.Horizontal
 
-        // -- Left: search + list ------------------------------------------
+        // Wider, discoverable drag handle — the default is a ~1px line that's
+        // easy to miss. 8px hit area, an always-visible centre grip, and a
+        // highlight tint on hover/drag.
+        handle: Item {
+            implicitWidth: 8
+            implicitHeight: 8
+
+            Kirigami.Separator {
+                anchors.horizontalCenter: parent.horizontalCenter
+                height: parent.height
+            }
+
+            Rectangle {
+                anchors.fill: parent
+                color: Kirigami.Theme.highlightColor
+                opacity: QQC2.SplitHandle.pressed ? 0.4
+                       : (QQC2.SplitHandle.hovered ? 0.2 : 0)
+            }
+        }
+
+        // -- Left: search + list (resizable pane, scrollable list) --------
         ColumnLayout {
-            Layout.preferredWidth: 320
-            Layout.fillHeight: true
+            QQC2.SplitView.preferredWidth: 320
+            QQC2.SplitView.minimumWidth: 200
             spacing: 6
 
             Kirigami.SearchField {
@@ -227,7 +250,7 @@ ColumnLayout {
             QQC2.ScrollView {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                Layout.minimumHeight: 240
+                Layout.minimumHeight: 160
                 clip: true
 
                 ListView {
@@ -282,10 +305,10 @@ ColumnLayout {
             }
         }
 
-        // -- Right: editor -------------------------------------------------
+        // -- Right: editor (scrollable content) ---------------------------
         ColumnLayout {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
+            QQC2.SplitView.fillWidth: true
+            QQC2.SplitView.minimumWidth: 280
             spacing: 6
 
             QQC2.Label {
@@ -299,44 +322,87 @@ ColumnLayout {
                 Layout.fillWidth: true
                 visible: root.editorUpdatedAt.length > 0
                 opacity: 0.6
+                elide: Text.ElideRight
                 text: "Updated " + root.editorUpdatedAt + " · created " + root.editorCreatedAt
             }
 
-            QQC2.Label { text: "Content" }
-
-            QQC2.ScrollView {
+            // Vertical split inside the editor: drag the divider to rebalance
+            // the Content box against Tags + Metadata. Defaults to 50/50 —
+            // content tends to be short, and Tags eats into the lower pane, so
+            // Metadata wants the room. Each pane scrolls internally, so a long
+            // Content box stays scrollable rather than growing without bound.
+            QQC2.SplitView {
+                id: editorSplit
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                Layout.minimumHeight: 160
-                clip: true
+                orientation: Qt.Vertical
 
-                QQC2.TextArea {
-                    id: contentArea
-                    wrapMode: TextEdit.Wrap
-                    placeholderText: "Free-form prose. The daemon chunks + embeds this on save."
+                handle: Item {
+                    implicitWidth: 8
+                    implicitHeight: 8
+
+                    Kirigami.Separator {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width
+                    }
+
+                    Rectangle {
+                        anchors.fill: parent
+                        color: Kirigami.Theme.highlightColor
+                        opacity: QQC2.SplitHandle.pressed ? 0.4
+                               : (QQC2.SplitHandle.hovered ? 0.2 : 0)
+                    }
                 }
-            }
 
-            QQC2.Label { text: "Tags (comma-separated)" }
+                // -- Content (top, ~50%) --
+                ColumnLayout {
+                    QQC2.SplitView.fillHeight: true
+                    QQC2.SplitView.minimumHeight: 96
+                    spacing: 6
 
-            QQC2.TextField {
-                id: tagsField
-                Layout.fillWidth: true
-                placeholderText: "preference, project:foo, instruction"
-            }
+                    QQC2.Label { text: "Content" }
 
-            QQC2.Label { text: "Metadata (JSON)" }
+                    QQC2.ScrollView {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip: true
 
-            QQC2.ScrollView {
-                Layout.fillWidth: true
-                Layout.preferredHeight: 80
-                clip: true
+                        QQC2.TextArea {
+                            id: contentArea
+                            wrapMode: TextEdit.Wrap
+                            placeholderText: "Free-form prose. The daemon chunks + embeds this on save."
+                        }
+                    }
+                }
 
-                QQC2.TextArea {
-                    id: metadataArea
-                    wrapMode: TextEdit.Wrap
-                    font.family: "monospace"
-                    text: "{}"
+                // -- Tags + Metadata (bottom, ~50%) --
+                ColumnLayout {
+                    QQC2.SplitView.preferredHeight: Math.round(editorSplit.height * 0.5)
+                    QQC2.SplitView.minimumHeight: 96
+                    spacing: 6
+
+                    QQC2.Label { text: "Tags (comma-separated)" }
+
+                    QQC2.TextField {
+                        id: tagsField
+                        Layout.fillWidth: true
+                        placeholderText: "preference, project:foo, instruction"
+                    }
+
+                    QQC2.Label { text: "Metadata (JSON)" }
+
+                    QQC2.ScrollView {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip: true
+
+                        QQC2.TextArea {
+                            id: metadataArea
+                            wrapMode: TextEdit.Wrap
+                            font.family: "monospace"
+                            text: "{}"
+                        }
+                    }
                 }
             }
 
