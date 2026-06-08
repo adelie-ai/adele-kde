@@ -47,16 +47,16 @@ to `python3` + `gdbus` for D-Bus, or use a raw WebSocket client for WS.
 
 ## KCM
 
-Install system-wide and open (needs sudo). This is the only supported install:
-a user-local (`~/.local`) copy is invisible to a normally launched System
-Settings (that prefix isn't on the default Qt plugin search path) and only
-causes duplicate-install drift, so `just kcm-install` is an alias for
-`kcm-install-system`. Use `just kcm-cleanup` to remove any stray local copy and
-`just kcm-doctor` to see which plugin copies exist.
+Install system-wide and open (needs sudo). System is the only supported
+install: a user-local (`~/.local`) copy is invisible to a normally launched
+System Settings (that prefix isn't on the default Qt plugin search path) yet
+still shadows the system one, which makes settings appear to randomly revert.
+There is no user-local install recipe, and `just kcm-install` purges any stray
+local copy before it installs, so the system copy stays authoritative.
 
 ```sh
-just kcm-install        # == kcm-install-system (sudo)
-just kcm-open-system
+just kcm-install        # build + install to system paths (sudo)
+just kcm-open
 ```
 
 Refresh cache and verify:
@@ -65,9 +65,9 @@ Refresh cache and verify:
 just kcm-refresh
 ```
 
-**Pick one install mode and stick to it.** Having both system and user-local
-copies installed makes settings appear to randomly revert. Use
-`just kcm-cleanup` or `just kcm-cleanup-system` to remove the wrong one.
+Inspect which plugin copies exist with `just kcm-doctor`. To remove the KCM,
+use `just kcm-uninstall` (system install, sudo); `just kcm-cleanup` clears a
+stray local copy on its own.
 
 ## All recipes
 
