@@ -34,8 +34,8 @@ This is a mixed-language repo (QML / Python / C++) — the per-piece conventions
 
 ## KCM (C++/Qt/KF6) conventions
 
-- **CMake build only.** No `cargo`, no `just`. `cmake -B build -G Ninja` + `ninja -C build`. Install variants are in the repo `justfile` (`just kcm-install`, `just kcm-install-system`).
-- **System install only.** A user-local (`~/.local`) KCM copy is invisible to a normally launched System Settings (that prefix isn't on the default Qt plugin search path) and only shadows/drifts against the system copy, causing settings to silently revert. `just kcm-install` is therefore an alias for `kcm-install-system`; there is no user-local install recipe. Use `just kcm-cleanup` to remove strays and `just kcm-doctor` to inspect. Preserve this single-mode invariant if you change install layout.
+- **CMake build only.** No `cargo`, no `just`. `cmake -B build -G Ninja` + `ninja -C build`. Install is via the repo `justfile` (`just kcm-install`).
+- **System install only.** A user-local (`~/.local`) KCM copy is invisible to a normally launched System Settings (that prefix isn't on the default Qt plugin search path) and only shadows/drifts against the system copy, causing settings to silently revert. There is no user-local install recipe: `just kcm-install` installs to system paths (sudo) and purges any user-local stray first so the system copy stays authoritative. Use `just kcm-cleanup` to remove strays and `just kcm-doctor` to inspect. Preserve this single-mode invariant if you change install layout.
 - **QML pages stay declarative.** `kcm/.../ui/*.qml` should bind to KCM properties, not call into C++ business logic. Logic belongs in `desktopassistantkcm.cpp`.
 - **Daemon talks happen via D-Bus from the KCM C++ side**, not from QML. QML should not be opening D-Bus connections.
 
@@ -44,7 +44,7 @@ This is a mixed-language repo (QML / Python / C++) — the per-piece conventions
 The `justfile` is the source of truth for widget and KCM install/upgrade/remove flows:
 
 - `just widget-install` / `just widget-upgrade` / `just widget-hard-refresh` / `just widget-remove`
-- `just kcm-install` (== `kcm-install-system`, sudo) / `just kcm-open-system` / `just kcm-refresh` / `just kcm-cleanup` / `just kcm-doctor`
+- `just kcm-install` (sudo) / `just kcm-open` / `just kcm-refresh` / `just kcm-cleanup` / `just kcm-uninstall` (sudo) / `just kcm-doctor`
 
 When adding a new install behavior, extend these recipes rather than adding a new entry point.
 

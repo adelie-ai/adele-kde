@@ -104,15 +104,13 @@ kcm-build:
     cmake -S {{kcm_dir}} -B {{kcm_build_dir}} -G Ninja -DCMAKE_BUILD_TYPE=Release
     cmake --build {{kcm_build_dir}}
 
-# Install the KCM (system paths, requires sudo). User-local installs are
-# unsupported: ~/.local/lib64/qt6/plugins isn't on the default Qt plugin search
-# path, so a copy there is invisible to a normally launched System Settings and
-# only causes duplicate-install drift. Use kcm-cleanup / kcm-doctor for strays.
-# Install the KCM (system paths, requires sudo); alias for kcm-install-system.
-kcm-install: kcm-install-system
-
-# Install KDE System Settings KCM into system paths (requires sudo)
-kcm-install-system:
+# System is the only supported install — there is no user-local mode: a ~/.local
+# copy is invisible to a normally launched System Settings yet still shadows the
+# system one, which is what makes settings appear to silently revert. kcm-cleanup
+# runs first to purge any such stray and keep the system copy authoritative.
+# Build + install the KCM into system paths (sudo); purges user-local strays first.
+kcm-install:
+    just kcm-cleanup
     plugin_dir="/usr/lib64/qt6/plugins"; \
     if [ -f /etc/os-release ]; then \
         . /etc/os-release; \
@@ -132,8 +130,8 @@ kcm-refresh:
     kbuildsycoca6 || true
     kcmshell6 --list | grep -i kcm_desktopassistant || true
 
-# Open Desktop Assistant KCM from system install paths
-kcm-open-system:
+# Open Desktop Assistant KCM in System Settings
+kcm-open:
     unset QT_PLUGIN_PATH
     unset DESKTOP_STARTUP_ID
     unset GTK_USE_PORTAL
@@ -177,18 +175,19 @@ kcm-cleanup:
     rm -f "$HOME/.local/share/applications/kcm_desktopassistant.desktop"
     rm -f "$HOME/.local/share/systemsettings/categories/settings-applications-desktopassistant.desktop"
 
-# Remove system KCM install copies (requires sudo)
-kcm-cleanup-system:
+# Uninstall the system KCM (requires sudo)
+kcm-uninstall:
     sudo rm -f /usr/lib64/plugins/plasma/kcms/systemsettings/kcm_desktopassistant.so
     sudo rm -f /usr/lib64/qt6/plugins/plasma/kcms/systemsettings/kcm_desktopassistant.so
     sudo rm -f /usr/share/applications/kcm_desktopassistant.desktop
     sudo rm -f /usr/share/systemsettings/categories/settings-applications-desktopassistant.desktop
     kbuildsycoca6 || true
 
-# Uninstall everything (widgets + KCM)
+# Uninstall everything (widgets + KCM: system install and any local stray)
 uninstall:
     just widget-remove
     just kcm-cleanup
+    just kcm-uninstall
 
 # Run Python unit tests
 test-python:
