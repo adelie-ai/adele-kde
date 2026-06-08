@@ -60,6 +60,10 @@ ColumnLayout {
         return VoiceBackends.pollyEngineIndexById(id)
     }
 
+    function listeningCueIndexById(id) {
+        return VoiceBackends.listeningCueIndexById(id)
+    }
+
     function speakerCountFor(id) {
         const list = kcm.voiceList || []
         const idx = voiceIndexById(id)
@@ -301,12 +305,18 @@ ColumnLayout {
             text: "Listening cue"
             Layout.preferredWidth: 150
         }
-        QQC2.TextField {
-            id: listeningCueField
+        QQC2.ComboBox {
+            id: listeningCueCombo
             Layout.fillWidth: true
-            placeholderText: "(none)"
-            text: kcm.listeningCue
-            onEditingFinished: kcm.listeningCue = text
+            textRole: "label"
+            // Order MUST match VoiceBackends.LISTENING_CUES (ding/phrase/off).
+            model: [
+                { label: "Ding (earcon)", value: "ding" },
+                { label: "Spoken phrase", value: "phrase" },
+                { label: "Off (no cue)", value: "off" }
+            ]
+            currentIndex: Math.max(0, root.listeningCueIndexById(kcm.listeningCue))
+            onActivated: kcm.listeningCue = model[currentIndex].value
         }
     }
 
@@ -314,9 +324,9 @@ ColumnLayout {
         Layout.fillWidth: true
         wrapMode: Text.Wrap
         opacity: 0.7
-        text: "Optional sound or phrase played when the wake word is heard, so "
-              + "you know it’s listening. Leave blank for no cue. (Takes effect "
-              + "once the daemon supports it — voice#51.)"
+        text: "Audible cue the instant the wake word is heard: a short ding "
+              + "(instant), a spoken phrase like “Yes?” (friendlier, adds ~1 s), "
+              + "or off."
     }
 
     RowLayout {
@@ -1059,9 +1069,6 @@ ColumnLayout {
             }
             if (pollyRegionField.text !== kcm.pollyRegion) {
                 pollyRegionField.text = kcm.pollyRegion
-            }
-            if (listeningCueField.text !== kcm.listeningCue) {
-                listeningCueField.text = kcm.listeningCue
             }
             if (!sensitivitySlider.pressed && sensitivitySlider.value !== kcm.wakeSensitivity) {
                 sensitivitySlider.value = kcm.wakeSensitivity

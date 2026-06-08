@@ -1551,6 +1551,21 @@ QString formatTomlFloat(double value)
     }
     return s;
 }
+
+// Normalize a `wake_word.listening_cue` value to the daemon's enum tokens. The
+// KCM now offers a fixed picker (ding/phrase/off), but a hand-edited or legacy
+// config may hold anything; map a stray value to the default (empty -> omitted
+// on write -> ding) rather than writing it back verbatim and breaking the
+// daemon's config parse.
+QString normalizeListeningCue(const QString &value)
+{
+    const QString v = value.trimmed().toLower();
+    if (v == QLatin1String("ding") || v == QLatin1String("phrase")
+        || v == QLatin1String("off")) {
+        return v;
+    }
+    return QString();
+}
 }
 
 QString DesktopAssistantKcm::voiceConfigPath()
@@ -1692,7 +1707,7 @@ void DesktopAssistantKcm::readVoiceConfig()
             } else if (key == QLatin1String("eager")) {
                 m_wakeEager = value.compare(QLatin1String("true"), Qt::CaseInsensitive) == 0;
             } else if (key == QLatin1String("listening_cue")) {
-                m_listeningCue = value;
+                m_listeningCue = normalizeListeningCue(value);
             }
         } else if (currentSection == QLatin1String("vad")) {
             if (key == QLatin1String("speech_threshold")) {
@@ -2465,7 +2480,7 @@ QString DesktopAssistantKcm::listeningCue() const
 
 void DesktopAssistantKcm::setListeningCue(const QString &value)
 {
-    const QString normalized = value.trimmed();
+    const QString normalized = normalizeListeningCue(value);
     if (m_listeningCue == normalized) {
         return;
     }
