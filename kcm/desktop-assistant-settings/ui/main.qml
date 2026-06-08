@@ -75,15 +75,11 @@ KCM.SimpleKCM {
                 }
             }
 
-            QQC2.ScrollView {
-                id: knowledgeScroll
-                clip: true
-                contentWidth: availableWidth
-                KnowledgePage {
-                    width: knowledgeScroll.availableWidth
-                    height: knowledgeScroll.availableHeight
-                }
-            }
+            // No outer ScrollView here: the Knowledge page owns its own
+            // scrolling — a resizable, scrollable list pane on the left and a
+            // scrollable editor on the right. Wrapping it in a ScrollView gave
+            // nested/competing scrollbars and squashed the inner panes.
+            KnowledgePage {}
 
             QQC2.ScrollView {
                 id: voiceScroll

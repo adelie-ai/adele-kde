@@ -203,15 +203,18 @@ ColumnLayout {
         type: Kirigami.MessageType.Information
     }
 
-    RowLayout {
+    // Resizable split: drag the handle to widen the list or the editor. The
+    // SplitView gives both panes a definite height, so their inner ScrollViews
+    // actually scroll (instead of relying on a now-removed outer ScrollView).
+    QQC2.SplitView {
         Layout.fillWidth: true
         Layout.fillHeight: true
-        spacing: 12
+        orientation: Qt.Horizontal
 
-        // -- Left: search + list ------------------------------------------
+        // -- Left: search + list (resizable pane, scrollable list) --------
         ColumnLayout {
-            Layout.preferredWidth: 320
-            Layout.fillHeight: true
+            QQC2.SplitView.preferredWidth: 320
+            QQC2.SplitView.minimumWidth: 200
             spacing: 6
 
             Kirigami.SearchField {
@@ -227,7 +230,7 @@ ColumnLayout {
             QQC2.ScrollView {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                Layout.minimumHeight: 240
+                Layout.minimumHeight: 160
                 clip: true
 
                 ListView {
@@ -282,10 +285,10 @@ ColumnLayout {
             }
         }
 
-        // -- Right: editor -------------------------------------------------
+        // -- Right: editor (scrollable content) ---------------------------
         ColumnLayout {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
+            QQC2.SplitView.fillWidth: true
+            QQC2.SplitView.minimumWidth: 280
             spacing: 6
 
             QQC2.Label {
@@ -299,6 +302,7 @@ ColumnLayout {
                 Layout.fillWidth: true
                 visible: root.editorUpdatedAt.length > 0
                 opacity: 0.6
+                elide: Text.ElideRight
                 text: "Updated " + root.editorUpdatedAt + " · created " + root.editorCreatedAt
             }
 
@@ -307,7 +311,7 @@ ColumnLayout {
             QQC2.ScrollView {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                Layout.minimumHeight: 160
+                Layout.minimumHeight: 120
                 clip: true
 
                 QQC2.TextArea {
