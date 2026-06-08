@@ -211,6 +211,26 @@ ColumnLayout {
         Layout.fillHeight: true
         orientation: Qt.Horizontal
 
+        // Wider, discoverable drag handle — the default is a ~1px line that's
+        // easy to miss. 8px hit area, an always-visible centre grip, and a
+        // highlight tint on hover/drag.
+        handle: Item {
+            implicitWidth: 8
+            implicitHeight: 8
+
+            Kirigami.Separator {
+                anchors.horizontalCenter: parent.horizontalCenter
+                height: parent.height
+            }
+
+            Rectangle {
+                anchors.fill: parent
+                color: Kirigami.Theme.highlightColor
+                opacity: QQC2.SplitHandle.pressed ? 0.4
+                       : (QQC2.SplitHandle.hovered ? 0.2 : 0)
+            }
+        }
+
         // -- Left: search + list (resizable pane, scrollable list) --------
         ColumnLayout {
             QQC2.SplitView.preferredWidth: 320

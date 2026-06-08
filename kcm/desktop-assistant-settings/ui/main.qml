@@ -4,7 +4,11 @@ import QtQuick.Layouts
 import org.kde.kcmutils as KCM
 import org.kde.kirigami as Kirigami
 
-KCM.SimpleKCM {
+// AbstractKCM, not SimpleKCM: SimpleKCM wraps the whole module in its own
+// ScrollView, which double-scrolled against the per-tab scrolls (the tab bar
+// and content scrolled as one ~2-screen-tall pane). AbstractKCM is a fixed
+// viewport — the StackLayout fills it and each tab scrolls internally.
+KCM.AbstractKCM {
     implicitWidth: 560
     implicitHeight: 460
 
