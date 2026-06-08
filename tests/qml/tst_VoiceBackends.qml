@@ -87,4 +87,41 @@ TestCase {
     function test_polly_engine_order_matches_tokens() {
         compare(VoiceBackends.POLLY_ENGINES, ["neural", "generative"])
     }
+
+    // --- Listening-cue mapping ----------------------------------------------
+
+    function test_cue_index_ding_is_zero() {
+        // Ding is the daemon default and must be the first row.
+        compare(VoiceBackends.listeningCueIndexById("ding"), 0)
+    }
+
+    function test_cue_index_phrase_is_one() {
+        compare(VoiceBackends.listeningCueIndexById("phrase"), 1)
+    }
+
+    function test_cue_index_off_is_two() {
+        compare(VoiceBackends.listeningCueIndexById("off"), 2)
+    }
+
+    function test_cue_index_is_case_insensitive() {
+        // The daemon enum is lowercase, but a hand-edited config may not be.
+        compare(VoiceBackends.listeningCueIndexById("OFF"), 2)
+        compare(VoiceBackends.listeningCueIndexById("Phrase"), 1)
+    }
+
+    function test_cue_index_unknown_falls_back_to_ding() {
+        // A stray value (e.g. the free text a legacy build allowed) must land on
+        // the default cue (row 0), never -1 (a blank combo).
+        compare(VoiceBackends.listeningCueIndexById("Hi Dave"), 0)
+        compare(VoiceBackends.listeningCueIndexById(""), 0)
+    }
+
+    function test_cue_index_null_safe() {
+        compare(VoiceBackends.listeningCueIndexById(null), 0)
+        compare(VoiceBackends.listeningCueIndexById(undefined), 0)
+    }
+
+    function test_cue_order_matches_tokens() {
+        compare(VoiceBackends.LISTENING_CUES, ["ding", "phrase", "off"])
+    }
 }

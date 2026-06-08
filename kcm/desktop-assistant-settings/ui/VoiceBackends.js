@@ -29,3 +29,15 @@ function pollyEngineIndexById(id) {
     var idx = POLLY_ENGINES.indexOf(String(id))
     return idx < 0 ? 0 : idx
 }
+
+// wake_word.listening_cue tokens, in ComboBox order. "ding" (a short earcon) is
+// the daemon default; an absent/unknown value also means ding (index 0).
+var LISTENING_CUES = ["ding", "phrase", "off"]
+
+// Index of a listening-cue token in the picker; unknown/empty/null -> 0 (ding),
+// so the ComboBox always lands on a valid row. Matched case-insensitively,
+// since the daemon enum is lowercase but a hand-edited config may not be.
+function listeningCueIndexById(id) {
+    var idx = LISTENING_CUES.indexOf(String(id).toLowerCase())
+    return idx < 0 ? 0 : idx
+}
