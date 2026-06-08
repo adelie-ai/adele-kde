@@ -326,41 +326,83 @@ ColumnLayout {
                 text: "Updated " + root.editorUpdatedAt + " · created " + root.editorCreatedAt
             }
 
-            QQC2.Label { text: "Content" }
-
-            QQC2.ScrollView {
+            // Vertical split inside the editor: drag the divider to rebalance
+            // the Content box against Tags + Metadata. Defaults to ~60/40 so
+            // the lower fields aren't squished into a sliver. Each pane scrolls
+            // internally, so a long Content box stays scrollable rather than
+            // growing without bound.
+            QQC2.SplitView {
+                id: editorSplit
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                Layout.minimumHeight: 120
-                clip: true
+                orientation: Qt.Vertical
 
-                QQC2.TextArea {
-                    id: contentArea
-                    wrapMode: TextEdit.Wrap
-                    placeholderText: "Free-form prose. The daemon chunks + embeds this on save."
+                handle: Item {
+                    implicitWidth: 8
+                    implicitHeight: 8
+
+                    Kirigami.Separator {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width
+                    }
+
+                    Rectangle {
+                        anchors.fill: parent
+                        color: Kirigami.Theme.highlightColor
+                        opacity: QQC2.SplitHandle.pressed ? 0.4
+                               : (QQC2.SplitHandle.hovered ? 0.2 : 0)
+                    }
                 }
-            }
 
-            QQC2.Label { text: "Tags (comma-separated)" }
+                // -- Content (top, ~60%) --
+                ColumnLayout {
+                    QQC2.SplitView.fillHeight: true
+                    QQC2.SplitView.minimumHeight: 96
+                    spacing: 6
 
-            QQC2.TextField {
-                id: tagsField
-                Layout.fillWidth: true
-                placeholderText: "preference, project:foo, instruction"
-            }
+                    QQC2.Label { text: "Content" }
 
-            QQC2.Label { text: "Metadata (JSON)" }
+                    QQC2.ScrollView {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip: true
 
-            QQC2.ScrollView {
-                Layout.fillWidth: true
-                Layout.preferredHeight: 80
-                clip: true
+                        QQC2.TextArea {
+                            id: contentArea
+                            wrapMode: TextEdit.Wrap
+                            placeholderText: "Free-form prose. The daemon chunks + embeds this on save."
+                        }
+                    }
+                }
 
-                QQC2.TextArea {
-                    id: metadataArea
-                    wrapMode: TextEdit.Wrap
-                    font.family: "monospace"
-                    text: "{}"
+                // -- Tags + Metadata (bottom, ~40%) --
+                ColumnLayout {
+                    QQC2.SplitView.preferredHeight: Math.round(editorSplit.height * 0.4)
+                    QQC2.SplitView.minimumHeight: 96
+                    spacing: 6
+
+                    QQC2.Label { text: "Tags (comma-separated)" }
+
+                    QQC2.TextField {
+                        id: tagsField
+                        Layout.fillWidth: true
+                        placeholderText: "preference, project:foo, instruction"
+                    }
+
+                    QQC2.Label { text: "Metadata (JSON)" }
+
+                    QQC2.ScrollView {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip: true
+
+                        QQC2.TextArea {
+                            id: metadataArea
+                            wrapMode: TextEdit.Wrap
+                            font.family: "monospace"
+                            text: "{}"
+                        }
+                    }
                 }
             }
 
