@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import argparse
-import ast
 import base64
 import hashlib
 import json
@@ -154,17 +153,278 @@ def _load_widget_connection_name(payload: dict[str, Any]) -> str:
     return str(payload.get("connection", "")).strip()
 
 
+# --- GVariant text-format parser (KDE-1) -------------------------------------
+# `gdbus call` prints replies in GVariant text format. The old implementation
+# "normalized" that text with regexes (strip `@type`, unwrap `int32 N`, map
+# true/false) and fed it to ast.literal_eval — but the regexes ran over the
+# WHOLE output including quoted string literals, so message content like
+# "is this true or false?" or "value @s ok int32 5" was rewritten (reproduced
+# live). The only correct approach is a real parser that tokenizes string
+# literals first; everything outside strings is then unambiguous syntax.
+# Deliberately stdlib-only (no PyGObject dependency) to match the helper's
+# zero-extra-packages constraint.
+
+_GVARIANT_ESCAPES = {
+    "a": "\a",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
+    "'": "'",
+    '"': '"',
+    "\\": "\\",
+}
+
+# Integer-ish type keywords that prefix a number literal, e.g. `uint32 5`.
+_GVARIANT_NUMERIC_TYPES = {
+    "byte",
+    "int16",
+    "uint16",
+    "int32",
+    "uint32",
+    "int64",
+    "uint64",
+    "handle",
+    "double",
+}
+
+# Characters legal in a GVariant type string after `@`, e.g. `@a{sv}`, `@(ss)`.
+_GVARIANT_SIGNATURE_CHARS = frozenset("ybnqiuxthdsogvam(){}*?r")
+
+_GVARIANT_NUMBER_RE = re.compile(
+    r"""
+    [+-]?
+    (?:
+        0x[0-9A-Fa-f]+            # hex (bytes are printed 0xNN)
+      | (?:\d+\.\d*|\.\d+|\d+)    # decimal integer or float body
+        (?:[eE][+-]?\d+)?         # optional exponent
+    )
+    """,
+    re.VERBOSE,
+)
+
+
+class _GVariantParser:
+    """Recursive-descent parser for the GVariant text format gdbus emits.
+
+    Containers map to Python as: tuple -> tuple, array -> list, dict -> dict,
+    variant `<v>` -> unwrapped value, maybe -> value or None. Type
+    annotations (`@a{sv}`) and numeric type keywords (`uint32`) are consumed
+    as syntax, never applied to text inside string literals.
+    """
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.pos = 0
+
+    def fail(self, why: str) -> Exception:
+        return ValueError(f"{why} at offset {self.pos}")
+
+    def skip_ws(self) -> None:
+        while self.pos < len(self.text) and self.text[self.pos] in " \t\r\n":
+            self.pos += 1
+
+    def peek(self) -> str:
+        return self.text[self.pos] if self.pos < len(self.text) else ""
+
+    def expect(self, char: str) -> None:
+        if self.peek() != char:
+            raise self.fail(f"expected {char!r}")
+        self.pos += 1
+
+    def parse_document(self) -> Any:
+        self.skip_ws()
+        value = self.parse_value()
+        self.skip_ws()
+        if self.pos != len(self.text):
+            raise self.fail("trailing data after value")
+        return value
+
+    def parse_value(self) -> Any:
+        self.skip_ws()
+        ch = self.peek()
+        if ch == "":
+            raise self.fail("unexpected end of input")
+        if ch == "@":
+            self._consume_type_annotation()
+            return self.parse_value()
+        if ch in "'\"":
+            return self._parse_string()
+        if ch == "(":
+            return self._parse_tuple()
+        if ch == "[":
+            return self._parse_array()
+        if ch == "{":
+            return self._parse_dict()
+        if ch == "<":
+            self.pos += 1
+            inner = self.parse_value()
+            self.skip_ws()
+            self.expect(">")
+            return inner
+        if ch.isalpha():
+            return self._parse_keyword()
+        return self._parse_number()
+
+    def _consume_type_annotation(self) -> None:
+        self.expect("@")
+        start = self.pos
+        while self.pos < len(self.text) and self.text[self.pos] in _GVARIANT_SIGNATURE_CHARS:
+            self.pos += 1
+        if self.pos == start:
+            raise self.fail("empty type annotation")
+
+    def _parse_keyword(self) -> Any:
+        start = self.pos
+        while self.pos < len(self.text) and (self.text[self.pos].isalnum() or self.text[self.pos] == "_"):
+            self.pos += 1
+        word = self.text[start : self.pos]
+        if word == "true":
+            return True
+        if word == "false":
+            return False
+        if word == "nothing":
+            return None
+        if word == "just":
+            return self.parse_value()
+        if word in ("objectpath", "signature"):
+            self.skip_ws()
+            if self.peek() not in "'\"":
+                raise self.fail(f"expected string after {word}")
+            return self._parse_string()
+        if word == "b" and self.peek() in "'\"":
+            return self._parse_string().encode("latin-1")
+        if word in _GVARIANT_NUMERIC_TYPES:
+            self.skip_ws()
+            if self.peek() == "":
+                raise self.fail(f"expected number after {word}")
+            return self._parse_number()
+        if word in ("inf", "nan"):
+            return float(word)
+        raise self.fail(f"unexpected token {word!r}")
+
+    def _parse_number(self) -> Any:
+        match = _GVARIANT_NUMBER_RE.match(self.text, self.pos)
+        if match is None:
+            # Negative special floats: `-inf`.
+            if self.text.startswith("-inf", self.pos):
+                self.pos += 4
+                return float("-inf")
+            raise self.fail("expected number")
+        self.pos = match.end()
+        token = match.group()
+        if token.lower().lstrip("+-").startswith("0x"):
+            return int(token, 16)
+        if any(c in token for c in ".eE"):
+            return float(token)
+        return int(token)
+
+    def _parse_string(self) -> str:
+        quote = self.peek()
+        self.pos += 1
+        out: list[str] = []
+        while True:
+            if self.pos >= len(self.text):
+                raise self.fail("unterminated string")
+            ch = self.text[self.pos]
+            if ch == quote:
+                self.pos += 1
+                return "".join(out)
+            if ch == "\\":
+                self.pos += 1
+                if self.pos >= len(self.text):
+                    raise self.fail("unterminated escape")
+                esc = self.text[self.pos]
+                if esc == "u":
+                    out.append(self._parse_hex_escape(4))
+                elif esc == "U":
+                    out.append(self._parse_hex_escape(8))
+                elif esc == "x":
+                    out.append(self._parse_hex_escape(2))
+                elif esc in _GVARIANT_ESCAPES:
+                    out.append(_GVARIANT_ESCAPES[esc])
+                    self.pos += 1
+                else:
+                    raise self.fail(f"unknown escape \\{esc}")
+            else:
+                out.append(ch)
+                self.pos += 1
+
+    def _parse_hex_escape(self, digits: int) -> str:
+        # self.pos is on the escape letter (u/U/x); digits follow it.
+        start = self.pos + 1
+        token = self.text[start : start + digits]
+        if len(token) != digits or any(c not in "0123456789abcdefABCDEF" for c in token):
+            raise self.fail("invalid hex escape")
+        self.pos = start + digits
+        return chr(int(token, 16))
+
+    def _parse_tuple(self) -> tuple[Any, ...]:
+        self.expect("(")
+        items: list[Any] = []
+        self.skip_ws()
+        if self.peek() == ")":
+            self.pos += 1
+            return ()
+        while True:
+            items.append(self.parse_value())
+            self.skip_ws()
+            if self.peek() == ",":
+                self.pos += 1
+                self.skip_ws()
+                # Single-element tuples print as `(x,)`.
+                if self.peek() == ")":
+                    self.pos += 1
+                    return tuple(items)
+                continue
+            self.expect(")")
+            return tuple(items)
+
+    def _parse_array(self) -> list[Any]:
+        self.expect("[")
+        items: list[Any] = []
+        self.skip_ws()
+        if self.peek() == "]":
+            self.pos += 1
+            return items
+        while True:
+            items.append(self.parse_value())
+            self.skip_ws()
+            if self.peek() == ",":
+                self.pos += 1
+                continue
+            self.expect("]")
+            return items
+
+    def _parse_dict(self) -> dict[Any, Any]:
+        self.expect("{")
+        result: dict[Any, Any] = {}
+        self.skip_ws()
+        if self.peek() == "}":
+            self.pos += 1
+            return result
+        while True:
+            key = self.parse_value()
+            self.skip_ws()
+            self.expect(":")
+            value = self.parse_value()
+            result[key] = value
+            self.skip_ws()
+            if self.peek() == ",":
+                self.pos += 1
+                self.skip_ws()
+                continue
+            self.expect("}")
+            return result
+
+
 def _parse_gdbus_output(output: str) -> Any:
-    normalized = output
-    normalized = re.sub(r"@[A-Za-z0-9_(){}\[\],]+\s+", "", normalized)
-    normalized = re.sub(r"\b(?:u?int(?:16|32|64)|byte)\s+(-?\d+)", r"\1", normalized)
-    normalized = re.sub(r"\btrue\b", "True", normalized)
-    normalized = re.sub(r"\bfalse\b", "False", normalized)
     try:
-        parsed = ast.literal_eval(normalized)
+        return _GVariantParser(output).parse_document()
     except Exception as exc:
         raise DbusError(f"unexpected gdbus output: {output}") from exc
-    return parsed
 
 
 def _run_command(command: list[str], error_hint: str, timeout_sec: float = DEFAULT_GDBUS_TIMEOUT_SEC) -> Any:
