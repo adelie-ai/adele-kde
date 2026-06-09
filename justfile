@@ -18,6 +18,11 @@ desktop_tasks_view_fallback := "plasmoid/org.desktopassistant.desktopchat/conten
 desktop_tasks_window_fallback := "plasmoid/org.desktopassistant.desktopchat/contents/ui/TasksWindow.qml"
 desktop_tasks_badge_fallback := "plasmoid/org.desktopassistant.desktopchat/contents/ui/TasksBadge.qml"
 desktop_link_safety_fallback := "plasmoid/org.desktopassistant.desktopchat/contents/ui/LinkSafety.js"
+shared_helper_src := "shared/chat-module/code/dbus_client.py"
+desktop_helper_fallback := "plasmoid/org.desktopassistant.desktopchat/contents/code/dbus_client_impl.py"
+panel_helper_fallback := "plasmoid/org.desktopassistant.panelchat/contents/code/dbus_client_impl.py"
+desktop_helper_shim := "plasmoid/org.desktopassistant.desktopchat/contents/code/dbus_client.py"
+panel_helper_shim := "plasmoid/org.desktopassistant.panelchat/contents/code/dbus_client.py"
 
 # List available commands
 default: list
@@ -32,7 +37,7 @@ chat-module-sync:
     rm -rf "{{shared_chat_module_dst}}"
     cp -a "{{shared_chat_module_src}}" "{{shared_chat_module_dst}}"
 
-# Sync shared ChatView + Tasks*.qml + LinkSafety.js into desktop plasmoid fallback copies
+# Sync shared ChatView + Tasks*.qml + LinkSafety.js + the Python helper into plasmoid fallback copies
 chatview-sync:
     [ -f "{{shared_chatview_src}}" ] || (echo "Missing shared ChatView: {{shared_chatview_src}}" >&2; exit 1)
     mkdir -p "$(dirname '{{desktop_chatview_fallback}}')"
@@ -41,6 +46,8 @@ chatview-sync:
     cp -a "{{shared_tasks_window_src}}" "{{desktop_tasks_window_fallback}}"
     cp -a "{{shared_tasks_badge_src}}" "{{desktop_tasks_badge_fallback}}"
     cp -a "{{shared_link_safety_src}}" "{{desktop_link_safety_fallback}}"
+    cp -a "{{shared_helper_src}}" "{{desktop_helper_fallback}}"
+    cp -a "{{shared_helper_src}}" "{{panel_helper_fallback}}"
 
 # Verify desktop plasmoid fallback copies match shared sources
 chatview-verify:
@@ -51,6 +58,9 @@ chatview-verify:
     cmp -s "{{shared_tasks_window_src}}" "{{desktop_tasks_window_fallback}}" || (echo "TasksWindow drift detected: run 'just chatview-sync'" >&2; exit 1)
     cmp -s "{{shared_tasks_badge_src}}" "{{desktop_tasks_badge_fallback}}" || (echo "TasksBadge drift detected: run 'just chatview-sync'" >&2; exit 1)
     cmp -s "{{shared_link_safety_src}}" "{{desktop_link_safety_fallback}}" || (echo "LinkSafety.js drift detected: run 'just chatview-sync'" >&2; exit 1)
+    cmp -s "{{shared_helper_src}}" "{{desktop_helper_fallback}}" || (echo "desktopchat dbus_client_impl.py drift detected: run 'just chatview-sync'" >&2; exit 1)
+    cmp -s "{{shared_helper_src}}" "{{panel_helper_fallback}}" || (echo "panelchat dbus_client_impl.py drift detected: run 'just chatview-sync'" >&2; exit 1)
+    cmp -s "{{desktop_helper_shim}}" "{{panel_helper_shim}}" || (echo "dbus_client.py launcher shims diverged: keep them identical" >&2; exit 1)
 
 # Install all KDE Plasma widgets for the current user
 widget-install:

@@ -75,7 +75,7 @@ class HelperShimTests(unittest.TestCase):
 
     def _empty_xdg(self) -> Path:
         xdg = self.tmp / "xdg-empty"
-        xdg.mkdir()
+        xdg.mkdir(exist_ok=True)
         return xdg
 
     def _shim_copy(self, shim: Path, with_impl: bool) -> Path:
