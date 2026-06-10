@@ -40,9 +40,10 @@ KCM.AbstractKCM {
             id: tabs
             Layout.fillWidth: true
 
-            // The legacy single-LLM "Chat LLM" tab is gone (daemon's
-            // GetLlmSettings/SetLlmSettings were removed in
-            // desktop-assistant#17). Connections + Purposes replace it.
+            // The legacy single-LLM "Chat LLM" tab is gone (removed with
+            // desktop-assistant#17; the daemon still exposes Get/SetLlmSettings
+            // but this KCM no longer uses them). Connections + Purposes
+            // replace it.
             QQC2.TabButton { text: "Connections" }
             QQC2.TabButton { text: "Purposes" }
             QQC2.TabButton { text: "Knowledge" }
@@ -554,18 +555,6 @@ KCM.AbstractKCM {
             // (desktop-assistant#17); their model/baseUrl/apiKeyInput
             // sync handlers moved into the Connections + Purposes pages.
 
-            function onEmbModelChanged() {
-                if (embModelField.text !== kcm.embModel) {
-                    embModelField.text = kcm.embModel
-                }
-            }
-
-            function onEmbBaseUrlChanged() {
-                if (embBaseUrlField.text !== kcm.embBaseUrl) {
-                    embBaseUrlField.text = kcm.embBaseUrl
-                }
-            }
-
             function onDbUrlChanged() {
                 if (dbUrlField.text !== kcm.dbUrl) {
                     dbUrlField.text = kcm.dbUrl
@@ -617,18 +606,6 @@ KCM.AbstractKCM {
             function onBtArchiveAfterDaysChanged() {
                 if (btArchiveAfterDaysBox.value !== kcm.btArchiveAfterDays) {
                     btArchiveAfterDaysBox.value = kcm.btArchiveAfterDays
-                }
-            }
-
-            function onBtLlmModelChanged() {
-                if (btModelField.text !== kcm.btLlmModel) {
-                    btModelField.text = kcm.btLlmModel
-                }
-            }
-
-            function onBtLlmBaseUrlChanged() {
-                if (btBaseUrlField.text !== kcm.btLlmBaseUrl) {
-                    btBaseUrlField.text = kcm.btLlmBaseUrl
                 }
             }
 

@@ -1048,6 +1048,16 @@ ColumnLayout {
     // sync; we guard live drag/edit with `.pressed`/focus where it matters.
     Connections {
         target: kcm
+        // The "Enable Hey Adele" checkbox writes kcm.voiceEnabled on toggle,
+        // which breaks its `checked: kcm.voiceEnabled` binding. After that the
+        // box no longer tracks the live daemon state, so an external start/stop
+        // — or the m_voiceWatcher re-probe after "Restart voice service" — would
+        // leave it stale. Re-assert it here on every voiceChanged (KDE-10).
+        function onVoiceChanged() {
+            if (enableHeyAdeleCheck.checked !== kcm.voiceEnabled) {
+                enableHeyAdeleCheck.checked = kcm.voiceEnabled
+            }
+        }
         function onVoiceConfigChanged() {
             if (sttLanguageField.text !== kcm.sttLanguage) {
                 sttLanguageField.text = kcm.sttLanguage

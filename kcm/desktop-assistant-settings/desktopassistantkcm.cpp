@@ -49,12 +49,6 @@ constexpr auto VOICE_PATH = "/org/desktopAssistant/Voice";
 constexpr auto VOICE_IFACE = "org.desktopAssistant.Voice";
 constexpr auto VOICE_UNIT = "adele-voice.service";
 
-QString normalizeConnector(const QString &connector)
-{
-    const auto normalized = connector.trimmed().toLower();
-    return normalized.isEmpty() ? QStringLiteral("openai") : normalized;
-}
-
 QString widgetSettingsPath()
 {
     const auto configHome = QStandardPaths::writableLocation(QStandardPaths::ConfigLocation);
@@ -66,51 +60,6 @@ QString normalizeConnectionName(const QString &name)
     return name.trimmed();
 }
 
-struct ConnectorDefaults {
-    QString llmModel;
-    QString llmBaseUrl;
-    QString embeddingsModel;
-    QString embeddingsBaseUrl;
-    bool embeddingsAvailable = true;
-    bool hostedToolSearchAvailable = true;
-    QString backendLlmModel;
-};
-
-bool fetchConnectorDefaults(
-    QDBusInterface &iface,
-    const QString &connector,
-    ConnectorDefaults *out,
-    QString *errorText
-)
-{
-    QDBusMessage reply = iface.call("GetConnectorDefaults", connector);
-    if (reply.type() == QDBusMessage::ErrorMessage) {
-        if (errorText != nullptr) {
-            *errorText = reply.errorMessage().isEmpty() ? QStringLiteral("D-Bus call failed") : reply.errorMessage();
-        }
-        return false;
-    }
-
-    const auto args = reply.arguments();
-    if (args.size() < 5) {
-        if (errorText != nullptr) {
-            *errorText = QStringLiteral("Unexpected GetConnectorDefaults reply");
-        }
-        return false;
-    }
-
-    if (out != nullptr) {
-        out->llmModel = args[0].toString();
-        out->llmBaseUrl = args[1].toString();
-        out->embeddingsModel = args[2].toString();
-        out->embeddingsBaseUrl = args[3].toString();
-        out->embeddingsAvailable = args[4].toBool();
-        out->hostedToolSearchAvailable = args.size() > 5 ? args[5].toBool() : true;
-        out->backendLlmModel = args.size() > 6 ? args[6].toString() : out->llmModel;
-    }
-
-    return true;
-}
 }
 
 K_PLUGIN_CLASS_WITH_JSON(DesktopAssistantKcm, "kcm_desktopassistant.json")
@@ -142,138 +91,6 @@ QString DesktopAssistantKcm::buildStamp() const
         }
     }
     return QStringLiteral("built (unknown)");
-}
-
-QString DesktopAssistantKcm::connector() const
-{
-    return m_connector;
-}
-
-void DesktopAssistantKcm::setConnector(const QString &value)
-{
-    if (m_connector == value) {
-        return;
-    }
-
-    m_connector = value;
-    Q_EMIT connectorChanged();
-    // Vestigial setter; UI no longer binds this property. No-op save path.
-}
-
-QString DesktopAssistantKcm::model() const
-{
-    return m_model;
-}
-
-void DesktopAssistantKcm::setModel(const QString &value)
-{
-    if (m_model == value) {
-        return;
-    }
-
-    m_model = value;
-    Q_EMIT modelChanged();
-    // Vestigial setter; UI no longer binds this property. No-op save path.
-}
-
-QString DesktopAssistantKcm::baseUrl() const
-{
-    return m_baseUrl;
-}
-
-void DesktopAssistantKcm::setBaseUrl(const QString &value)
-{
-    if (m_baseUrl == value) {
-        return;
-    }
-
-    m_baseUrl = value;
-    Q_EMIT baseUrlChanged();
-    // Vestigial setter; UI no longer binds this property. No-op save path.
-}
-
-QString DesktopAssistantKcm::embConnector() const
-{
-    return m_embConnector;
-}
-
-void DesktopAssistantKcm::setEmbConnector(const QString &value)
-{
-    if (m_embConnector == value) {
-        return;
-    }
-
-    m_embConnector = value;
-    Q_EMIT embConnectorChanged();
-    // Vestigial setter; UI no longer binds this property. No-op save path.
-}
-
-QString DesktopAssistantKcm::embModel() const
-{
-    return m_embModel;
-}
-
-void DesktopAssistantKcm::setEmbModel(const QString &value)
-{
-    if (m_embModel == value) {
-        return;
-    }
-
-    m_embModel = value;
-    Q_EMIT embModelChanged();
-    // Vestigial setter; UI no longer binds this property. No-op save path.
-}
-
-QString DesktopAssistantKcm::embBaseUrl() const
-{
-    return m_embBaseUrl;
-}
-
-void DesktopAssistantKcm::setEmbBaseUrl(const QString &value)
-{
-    if (m_embBaseUrl == value) {
-        return;
-    }
-
-    m_embBaseUrl = value;
-    Q_EMIT embBaseUrlChanged();
-    // Vestigial setter; UI no longer binds this property. No-op save path.
-}
-
-bool DesktopAssistantKcm::embHasApiKey() const
-{
-    return m_embHasApiKey;
-}
-
-bool DesktopAssistantKcm::embAvailable() const
-{
-    return m_embAvailable;
-}
-
-bool DesktopAssistantKcm::embIsDefault() const
-{
-    return m_embIsDefault;
-}
-
-QString DesktopAssistantKcm::apiKeyInput() const
-{
-    return m_apiKeyInput;
-}
-
-void DesktopAssistantKcm::setApiKeyInput(const QString &value)
-{
-    if (m_apiKeyInput == value) {
-        return;
-    }
-
-    m_apiKeyInput = value;
-    Q_EMIT apiKeyInputChanged();
-    // Vestigial setter; UI no longer binds this property. No-op save path.
-}
-
-bool DesktopAssistantKcm::hasApiKey() const
-{
-    return m_hasApiKey;
 }
 
 QString DesktopAssistantKcm::statusText() const
@@ -553,76 +370,6 @@ void DesktopAssistantKcm::setBtArchiveAfterDays(int value)
     pushBackendTasksSettings();
 }
 
-bool DesktopAssistantKcm::btHasSeparateLlm() const
-{
-    return m_btHasSeparateLlm;
-}
-
-QString DesktopAssistantKcm::btLlmConnector() const
-{
-    return m_btLlmConnector;
-}
-
-void DesktopAssistantKcm::setBtLlmConnector(const QString &value)
-{
-    if (m_btLlmConnector == value) {
-        return;
-    }
-    m_btLlmConnector = value;
-    Q_EMIT btLlmConnectorChanged();
-    // Vestigial setter; UI no longer binds this property. No-op save path.
-}
-
-QString DesktopAssistantKcm::btLlmModel() const
-{
-    return m_btLlmModel;
-}
-
-void DesktopAssistantKcm::setBtLlmModel(const QString &value)
-{
-    if (m_btLlmModel == value) {
-        return;
-    }
-    m_btLlmModel = value;
-    Q_EMIT btLlmModelChanged();
-    // Vestigial setter; UI no longer binds this property. No-op save path.
-}
-
-QString DesktopAssistantKcm::btLlmBaseUrl() const
-{
-    return m_btLlmBaseUrl;
-}
-
-void DesktopAssistantKcm::setBtLlmBaseUrl(const QString &value)
-{
-    if (m_btLlmBaseUrl == value) {
-        return;
-    }
-    m_btLlmBaseUrl = value;
-    Q_EMIT btLlmBaseUrlChanged();
-    // Vestigial setter; UI no longer binds this property. No-op save path.
-}
-
-int DesktopAssistantKcm::hostedToolSearch() const
-{
-    return m_hostedToolSearch;
-}
-
-void DesktopAssistantKcm::setHostedToolSearch(int value)
-{
-    if (m_hostedToolSearch == value) {
-        return;
-    }
-    m_hostedToolSearch = value;
-    Q_EMIT hostedToolSearchChanged();
-    // Vestigial setter; UI no longer binds this property. No-op save path.
-}
-
-bool DesktopAssistantKcm::hostedToolSearchAvailable() const
-{
-    return m_hostedToolSearchAvailable;
-}
-
 bool DesktopAssistantKcm::wsAuthPasswordEnabled() const
 {
     return m_wsAuthMethods.contains(QStringLiteral("password"));
@@ -850,47 +597,12 @@ void DesktopAssistantKcm::pushPersonalityTrait(const char *setField, int value)
 
 void DesktopAssistantKcm::load()
 {
+    // The legacy single-LLM/embeddings settings (GetLlmSettings /
+    // GetEmbeddingsSettings) are no longer surfaced by this KCM: model
+    // selection moved to the Connections + Purposes pages (desktop-assistant#17).
+    // We therefore skip those reads entirely; the Connections page owns its own
+    // load path.
     QDBusInterface iface(SERVICE, PATH, IFACE, QDBusConnection::sessionBus());
-    QDBusMessage reply = iface.call("GetLlmSettings");
-
-    if (setStatusFromDbusError(reply)) {
-        return;
-    }
-
-    const auto args = reply.arguments();
-    if (args.size() < 4) {
-        m_statusText = QStringLiteral("Unexpected GetLlmSettings reply");
-        Q_EMIT statusTextChanged();
-        return;
-    }
-
-    m_connector = args[0].toString();
-    m_model = args[1].toString();
-    m_baseUrl = args[2].toString();
-    m_hasApiKey = args[3].toBool();
-    // hosted_tool_search: -1 = connector default, 0 = off, 1 = on (8th arg)
-    m_hostedToolSearch = args.size() > 7 ? args[7].toInt() : -1;
-
-    QDBusMessage embReply = iface.call("GetEmbeddingsSettings");
-    if (setStatusFromDbusError(embReply)) {
-        return;
-    }
-
-    const auto embArgs = embReply.arguments();
-    if (embArgs.size() < 6) {
-        m_statusText = QStringLiteral("Unexpected GetEmbeddingsSettings reply");
-        Q_EMIT statusTextChanged();
-        return;
-    }
-
-    m_embConnector = embArgs[5].toBool() ? QString() : embArgs[0].toString();
-    m_embModel = embArgs[1].toString();
-    m_embBaseUrl = embArgs[2].toString();
-    m_embHasApiKey = embArgs[3].toBool();
-    m_embAvailable = embArgs[4].toBool();
-    m_embIsDefault = embArgs[5].toBool();
-
-    m_apiKeyInput.clear();
 
     QDBusMessage gitReply = iface.call("GetPersistenceSettings");
     if (setStatusFromDbusError(gitReply)) {
@@ -936,7 +648,10 @@ void DesktopAssistantKcm::load()
         return;
     }
 
-    m_btHasSeparateLlm = btArgs[0].toBool();
+    // Backend-task LLM fields are pass-through only: loaded here and echoed
+    // back unchanged by pushBackendTasksSettings(); no UI binds them (the
+    // Purposes page owns model selection now). btArgs[0] (has_separate_llm) is
+    // intentionally ignored.
     m_btLlmConnector = btArgs[1].toString();
     m_btLlmModel = btArgs[2].toString();
     m_btLlmBaseUrl = btArgs[3].toString();
@@ -999,27 +714,23 @@ void DesktopAssistantKcm::load()
     // live state, so the picker re-enables on its own (and also tracks external
     // start/stop of the daemon while the KCM is open). WatchForOwnerChange
     // covers both registration and unregistration.
-    m_voiceWatcher = new QDBusServiceWatcher(
-        QString::fromUtf8(VOICE_SERVICE),
-        QDBusConnection::sessionBus(),
-        QDBusServiceWatcher::WatchForOwnerChange,
-        this);
-    connect(m_voiceWatcher, &QDBusServiceWatcher::serviceOwnerChanged, this,
-            [this](const QString &, const QString &, const QString &) {
-                loadVoiceSettings();
-            });
+    //
+    // load() can run more than once for the same KCM instance (System Settings
+    // re-entry, an explicit reload). Install the watcher only once; without this
+    // guard each load() leaked another watcher, so loadVoiceSettings() fired N
+    // times per owner change after N loads (KDE-9).
+    if (m_voiceWatcher == nullptr) {
+        m_voiceWatcher = new QDBusServiceWatcher(
+            QString::fromUtf8(VOICE_SERVICE),
+            QDBusConnection::sessionBus(),
+            QDBusServiceWatcher::WatchForOwnerChange,
+            this);
+        connect(m_voiceWatcher, &QDBusServiceWatcher::serviceOwnerChanged, this,
+                [this](const QString &, const QString &, const QString &) {
+                    loadVoiceSettings();
+                });
+    }
 
-    Q_EMIT connectorChanged();
-    Q_EMIT modelChanged();
-    Q_EMIT baseUrlChanged();
-    Q_EMIT embConnectorChanged();
-    Q_EMIT embModelChanged();
-    Q_EMIT embBaseUrlChanged();
-    Q_EMIT embHasApiKeyChanged();
-    Q_EMIT embAvailableChanged();
-    Q_EMIT embIsDefaultChanged();
-    Q_EMIT hasApiKeyChanged();
-    Q_EMIT apiKeyInputChanged();
     Q_EMIT gitEnabledChanged();
     Q_EMIT gitRemoteUrlChanged();
     Q_EMIT gitRemoteNameChanged();
@@ -1032,12 +743,6 @@ void DesktopAssistantKcm::load()
     Q_EMIT btDreamingEnabledChanged();
     Q_EMIT btDreamingIntervalSecsChanged();
     Q_EMIT btArchiveAfterDaysChanged();
-    Q_EMIT btHasSeparateLlmChanged();
-    Q_EMIT btLlmConnectorChanged();
-    Q_EMIT btLlmModelChanged();
-    Q_EMIT btLlmBaseUrlChanged();
-    Q_EMIT hostedToolSearchChanged();
-    Q_EMIT hostedToolSearchAvailableChanged();
     Q_EMIT wsAuthMethodsChanged();
     Q_EMIT oidcIssuerChanged();
     Q_EMIT oidcAuthEndpointChanged();
@@ -1114,83 +819,12 @@ void DesktopAssistantKcm::pushWsAuthSettings()
 
 void DesktopAssistantKcm::defaults()
 {
-    applyChatDefaults();
-    applySearchDefaults();
-    applyBackendDefaults();
-    setApiKeyInput(QString());
-    m_statusText = QStringLiteral("Applied connector defaults");
+    // The legacy "apply connector defaults" path drove the removed single-LLM /
+    // embeddings / backend-LLM fields (desktop-assistant#17). Model selection
+    // now lives on the Connections + Purposes pages, which own their own
+    // defaults; there is nothing for this KCM-level reset to do.
+    m_statusText = QStringLiteral("No default settings to apply");
     Q_EMIT statusTextChanged();
-}
-
-void DesktopAssistantKcm::applyChatDefaults()
-{
-    QDBusInterface iface(SERVICE, PATH, IFACE, QDBusConnection::sessionBus());
-    const auto llmConnector = normalizeConnector(m_connector);
-
-    ConnectorDefaults defaults;
-    QString errorText;
-    if (!fetchConnectorDefaults(iface, llmConnector, &defaults, &errorText)) {
-        m_statusText = errorText;
-        Q_EMIT statusTextChanged();
-        return;
-    }
-
-    setModel(defaults.llmModel);
-    setBaseUrl(defaults.llmBaseUrl);
-    if (m_hostedToolSearchAvailable != defaults.hostedToolSearchAvailable) {
-        m_hostedToolSearchAvailable = defaults.hostedToolSearchAvailable;
-        Q_EMIT hostedToolSearchAvailableChanged();
-    }
-}
-
-void DesktopAssistantKcm::applySearchDefaults()
-{
-    QDBusInterface iface(SERVICE, PATH, IFACE, QDBusConnection::sessionBus());
-    auto embeddingConnector = normalizeConnector(m_embConnector.isEmpty() ? m_connector : m_embConnector);
-
-    ConnectorDefaults defaults;
-    QString errorText;
-    if (!fetchConnectorDefaults(iface, embeddingConnector, &defaults, &errorText)) {
-        m_statusText = errorText;
-        Q_EMIT statusTextChanged();
-        return;
-    }
-
-    if (!defaults.embeddingsAvailable) {
-        embeddingConnector = QStringLiteral("openai");
-        if (m_embConnector == QLatin1String("anthropic")) {
-            setEmbConnector(embeddingConnector);
-        }
-
-        if (!fetchConnectorDefaults(iface, embeddingConnector, &defaults, &errorText)) {
-            m_statusText = errorText;
-            Q_EMIT statusTextChanged();
-            return;
-        }
-    }
-
-    setEmbModel(defaults.embeddingsModel);
-    setEmbBaseUrl(defaults.embeddingsBaseUrl);
-}
-
-void DesktopAssistantKcm::applyBackendDefaults()
-{
-    QDBusInterface iface(SERVICE, PATH, IFACE, QDBusConnection::sessionBus());
-    const auto btConnector = normalizeConnector(m_btLlmConnector.isEmpty() ? m_connector : m_btLlmConnector);
-
-    ConnectorDefaults defaults;
-    QString errorText;
-    if (!fetchConnectorDefaults(iface, btConnector, &defaults, &errorText)) {
-        m_statusText = errorText;
-        Q_EMIT statusTextChanged();
-        return;
-    }
-
-    if (m_btLlmConnector.isEmpty()) {
-        setBtLlmConnector(btConnector);
-    }
-    setBtLlmModel(defaults.backendLlmModel);
-    setBtLlmBaseUrl(defaults.llmBaseUrl);
 }
 
 void DesktopAssistantKcm::addRemoteConnection(const QString &name)
@@ -1965,8 +1599,10 @@ void DesktopAssistantKcm::setVoiceEnabled(bool value)
         return;
     }
     if (!m_voiceServiceAvailable) {
-        // No live daemon to toggle — reflect the request but don't pretend it
-        // took. The next loadVoiceSettings() reconciles.
+        // No live daemon to toggle: this is a pure no-op — m_voiceEnabled is
+        // left unchanged (we don't flip it speculatively), and the checkbox
+        // re-asserts itself from kcm.voiceEnabled on the next voiceChanged /
+        // loadVoiceSettings() once the daemon reappears (see KDE-10).
         return;
     }
     QDBusInterface iface(VOICE_SERVICE, VOICE_PATH, VOICE_IFACE, QDBusConnection::sessionBus());
