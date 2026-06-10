@@ -33,7 +33,18 @@ PlasmoidItem {
     // uses (`voice-status`, which folds availability + pipeline state into one
     // JSON line) on a calm 2s cadence. When the popup is open we defer to the
     // chat view's own (faster) state so the two never disagree.
-    readonly property string voiceHelperPath: Qt.resolvedUrl("../code/dbus_client.py").toString().replace("file://", "")
+    // Qt.resolvedUrl returns a percent-encoded file URL; decodeURIComponent
+    // turns "%20" etc. back into the real on-disk path so python3 can find the
+    // helper when the install dir contains spaces (KDE-11).
+    readonly property string voiceHelperPath: decodeURIComponent(Qt.resolvedUrl("../code/dbus_client.py").toString().replace("file://", ""))
+
+    // Single-quote a value for a POSIX shell. Mirrors ChatView.shellEscape; kept
+    // here because main.qml has no access to the chat view's helpers when the
+    // popup is collapsed. Every shelled-out command argument must go through this
+    // (KDE-11 — the path can contain spaces or quotes).
+    function shellEscape(value) {
+        return "'" + String(value).replace(/'/g, "'\\''") + "'"
+    }
     property bool rootVoiceAvailable: false
     property string rootVoiceState: "Idle"   // Idle | Listening | Processing | Speaking
 
@@ -72,7 +83,7 @@ PlasmoidItem {
             return
         }
         const helperCmd = voiceState === "Speaking" ? "voice-stop-speaking" : "voice-stop-listening"
-        voiceStopSource.connectSource("python3 '" + voiceHelperPath + "' " + helperCmd)
+        voiceStopSource.connectSource("python3 " + shellEscape(voiceHelperPath) + " " + helperCmd)
         // Optimistically flip the root state so the badge clears immediately;
         // the next status poll reconciles the real pipeline state.
         rootVoiceState = "Idle"
@@ -156,7 +167,7 @@ PlasmoidItem {
         if (root.chatView) {
             return
         }
-        voiceStatusSource.connectSource("python3 '" + voiceHelperPath + "' voice-status")
+        voiceStatusSource.connectSource("python3 " + shellEscape(voiceHelperPath) + " voice-status")
     }
 
     Timer {

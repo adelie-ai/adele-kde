@@ -14,10 +14,12 @@ shared_tasks_view_src := "shared/chat-module/ui/TasksView.qml"
 shared_tasks_window_src := "shared/chat-module/ui/TasksWindow.qml"
 shared_tasks_badge_src := "shared/chat-module/ui/TasksBadge.qml"
 shared_link_safety_src := "shared/chat-module/ui/LinkSafety.js"
+shared_helper_runner_src := "shared/chat-module/ui/HelperRunner.js"
 desktop_tasks_view_fallback := "plasmoid/org.desktopassistant.desktopchat/contents/ui/TasksView.qml"
 desktop_tasks_window_fallback := "plasmoid/org.desktopassistant.desktopchat/contents/ui/TasksWindow.qml"
 desktop_tasks_badge_fallback := "plasmoid/org.desktopassistant.desktopchat/contents/ui/TasksBadge.qml"
 desktop_link_safety_fallback := "plasmoid/org.desktopassistant.desktopchat/contents/ui/LinkSafety.js"
+desktop_helper_runner_fallback := "plasmoid/org.desktopassistant.desktopchat/contents/ui/HelperRunner.js"
 shared_helper_src := "shared/chat-module/code/dbus_client.py"
 desktop_helper_fallback := "plasmoid/org.desktopassistant.desktopchat/contents/code/dbus_client_impl.py"
 panel_helper_fallback := "plasmoid/org.desktopassistant.panelchat/contents/code/dbus_client_impl.py"
@@ -46,6 +48,7 @@ chatview-sync:
     cp -a "{{shared_tasks_window_src}}" "{{desktop_tasks_window_fallback}}"
     cp -a "{{shared_tasks_badge_src}}" "{{desktop_tasks_badge_fallback}}"
     cp -a "{{shared_link_safety_src}}" "{{desktop_link_safety_fallback}}"
+    cp -a "{{shared_helper_runner_src}}" "{{desktop_helper_runner_fallback}}"
     cp -a "{{shared_helper_src}}" "{{desktop_helper_fallback}}"
     cp -a "{{shared_helper_src}}" "{{panel_helper_fallback}}"
 
@@ -58,6 +61,7 @@ chatview-verify:
     cmp -s "{{shared_tasks_window_src}}" "{{desktop_tasks_window_fallback}}" || (echo "TasksWindow drift detected: run 'just chatview-sync'" >&2; exit 1)
     cmp -s "{{shared_tasks_badge_src}}" "{{desktop_tasks_badge_fallback}}" || (echo "TasksBadge drift detected: run 'just chatview-sync'" >&2; exit 1)
     cmp -s "{{shared_link_safety_src}}" "{{desktop_link_safety_fallback}}" || (echo "LinkSafety.js drift detected: run 'just chatview-sync'" >&2; exit 1)
+    cmp -s "{{shared_helper_runner_src}}" "{{desktop_helper_runner_fallback}}" || (echo "HelperRunner.js drift detected: run 'just chatview-sync'" >&2; exit 1)
     cmp -s "{{shared_helper_src}}" "{{desktop_helper_fallback}}" || (echo "desktopchat dbus_client_impl.py drift detected: run 'just chatview-sync'" >&2; exit 1)
     cmp -s "{{shared_helper_src}}" "{{panel_helper_fallback}}" || (echo "panelchat dbus_client_impl.py drift detected: run 'just chatview-sync'" >&2; exit 1)
     cmp -s "{{desktop_helper_shim}}" "{{panel_helper_shim}}" || (echo "dbus_client.py launcher shims diverged: keep them identical" >&2; exit 1)

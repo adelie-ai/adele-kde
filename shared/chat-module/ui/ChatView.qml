@@ -9,6 +9,7 @@ import org.kde.plasma.components as PlasmaComponents
 import org.kde.plasma.plasma5support as Plasma5Support
 
 import "LinkSafety.js" as LinkSafety
+import "HelperRunner.js" as HelperRunner
 
 Item {
     id: root
@@ -24,7 +25,12 @@ Item {
     readonly property color themeHighlightColor: Kirigami.Theme.highlightColor
     readonly property color themeHighlightedTextColor: Kirigami.Theme.highlightedTextColor
 
-    property string helperPath: Qt.resolvedUrl("../code/dbus_client.py").toString().replace("file://", "")
+    // Qt.resolvedUrl returns a percent-encoded file URL; HelperRunner.decodeHelperPath
+    // strips file:// and decodeURIComponent's it back to the real on-disk path
+    // (e.g. "%20" → space) so python3 can find the helper when the install path
+    // contains spaces. The result is always passed through shellEscape() in
+    // helperCommand() before reaching a shell (KDE-11).
+    property string helperPath: HelperRunner.decodeHelperPath(Qt.resolvedUrl("../code/dbus_client.py").toString())
     property string productionService: "org.desktopAssistant"
     property string developmentService: "org.desktopAssistant.Dev"
     readonly property string configuredConnectionName: String(Plasmoid.configuration.connectionName || "").trim()
@@ -688,7 +694,7 @@ Item {
     }
 
     function shellEscape(value) {
-        return "'" + value.replace(/'/g, "'\\''") + "'"
+        return HelperRunner.shellEscape(value)
     }
 
     function limitDebugPayload(text) {
@@ -1834,35 +1840,46 @@ Item {
         connectedSources: []
 
         onNewData: function(sourceName, data) {
-            const i = _pendingCmds.indexOf(sourceName)
-            if (i < 0) {
+            // Plasma5Support keys a DataSource connection by its source string,
+            // so two in-flight runCommand() calls with an IDENTICAL command
+            // collapse into ONE connection and fire onNewData only once. The
+            // first matching pending entry used to be spliced and served while
+            // every later duplicate was stranded forever (its callbacks never
+            // ran — a wedged refresh/poll). Drain ALL pending entries that share
+            // this source so every caller's callback resolves (KDE-12).
+            //
+            // Collect matching slot values first (the indices shift as we
+            // splice), staying on the GC-safe parallel-array / primitive-array
+            // pattern documented near the _pendingCmds declaration — no
+            // dynamic-keyed object literals. drainPending splices the four
+            // parallel arrays in place and returns the collected callbacks.
+            const drained = HelperRunner.drainPending(
+                _pendingCmds, _pendingSuccess, _pendingError, _pendingDebug, sourceName)
+            const successCbs = drained.successCbs
+            const errorCbs = drained.errorCbs
+            const debugFlags = drained.debugFlags
+
+            if (successCbs.length === 0) {
                 disconnectSource(sourceName)
                 return
             }
-            // Read all slot values before splicing so the indices stay valid.
-            const successCb = _pendingSuccess[i]
-            const errorCb = _pendingError[i]
-            const debugFlag = _pendingDebug[i]
-            _pendingCmds.splice(i, 1)
-            _pendingSuccess.splice(i, 1)
-            _pendingError.splice(i, 1)
-            _pendingDebug.splice(i, 1)
 
             const exitCode = data["exit code"]
             const stdout = (data.stdout || "").trim()
             const stderr = (data.stderr || "").trim()
+            const ok = exitCode === 0
+            const errorText = stderr.length > 0 ? stderr : stdout
 
             try {
-                if (exitCode === 0) {
-                    if (debugFlag) {
-                        appendToolExecutionDebug("ok", sourceName, stdout)
+                if (debugFlags.some(function(flag) { return flag })) {
+                    appendToolExecutionDebug(ok ? "ok" : "error", sourceName, ok ? stdout : errorText)
+                }
+                for (let j = 0; j < successCbs.length; j++) {
+                    if (ok) {
+                        successCbs[j](stdout)
+                    } else {
+                        errorCbs[j](errorText)
                     }
-                    successCb(stdout)
-                } else {
-                    if (debugFlag) {
-                        appendToolExecutionDebug("error", sourceName, stderr.length > 0 ? stderr : stdout)
-                    }
-                    errorCb(stderr.length > 0 ? stderr : stdout)
                 }
             } catch (callbackError) {
                 appendStatus("Widget callback error: " + callbackError)
@@ -1932,7 +1949,12 @@ Item {
         id: tasksPollTimer
         interval: 5000
         repeat: true
-        running: true
+        // Only the WS transport actually returns background tasks; on D-Bus the
+        // helper's list_background_tasks() is a hardcoded [] until the daemon
+        // D-Bus task interface (#116) lands. Polling there spawns a python3
+        // subprocess every 5s for a guaranteed-empty answer, so gate the timer
+        // on the transport (KDE-12).
+        running: root.usingWsTransport
         onTriggered: root.refreshBackgroundTasks()
     }
 
