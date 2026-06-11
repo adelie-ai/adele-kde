@@ -1,5 +1,7 @@
 #include "desktopassistantkcm.h"
 
+#include "daemonreply.h"
+
 #include <algorithm>
 #include <dlfcn.h>
 #include <sys/stat.h>
@@ -9,6 +11,8 @@
 #include <QDBusConnectionInterface>
 #include <QDBusInterface>
 #include <QDBusMessage>
+#include <QDBusPendingCall>
+#include <QDBusPendingCallWatcher>
 #include <QDBusReply>
 #include <QDBusServiceWatcher>
 #include <QDir>
@@ -48,6 +52,15 @@ constexpr auto VOICE_SERVICE = "org.desktopAssistant.Voice";
 constexpr auto VOICE_PATH = "/org/desktopAssistant/Voice";
 constexpr auto VOICE_IFACE = "org.desktopAssistant.Voice";
 constexpr auto VOICE_UNIT = "adele-voice.service";
+
+// Async D-Bus call timeouts (KDE-2 / #57). Every daemon round-trip is bounded
+// so a wedged daemon can never hang the System Settings UI thread. The default
+// is generous enough for ordinary local Set*/Get* round-trips; model
+// enumeration may hit a remote provider, and knowledge search may scan a large
+// store, so those get longer budgets.
+constexpr int DBUS_TIMEOUT_DEFAULT_MS = 5000;
+constexpr int DBUS_TIMEOUT_MODELS_MS = 30000;
+constexpr int DBUS_TIMEOUT_SEARCH_MS = 15000;
 
 QString widgetSettingsPath()
 {
@@ -597,6 +610,11 @@ void DesktopAssistantKcm::pushPersonalityTrait(const char *setField, int value)
 
 void DesktopAssistantKcm::load()
 {
+    // Bump the load generation (KDE-2 / #57) so any async daemon read that
+    // outlives this load() — once the sections move to asyncSettingsCall —
+    // can detect that a newer load() superseded it and drop its stale reply.
+    ++m_loadGeneration;
+
     // The legacy single-LLM/embeddings settings (GetLlmSettings /
     // GetEmbeddingsSettings) are no longer surfaced by this KCM: model
     // selection moved to the Connections + Purposes pages (desktop-assistant#17).
@@ -907,6 +925,36 @@ bool DesktopAssistantKcm::setStatusFromDbusError(const QDBusMessage &message)
     }
     Q_EMIT statusTextChanged();
     return true;
+}
+
+void DesktopAssistantKcm::asyncSettingsCall(const QString &method,
+                                            const QVariantList &args,
+                                            int timeoutMs,
+                                            std::function<void(const QDBusMessage &)> handler,
+                                            const char *service,
+                                            const char *path,
+                                            const char *iface)
+{
+    // Build the call by hand: QDBusInterface's constructor performs a blocking
+    // introspection round-trip (the very stall KDE-2 / #57 removes), so we use
+    // createMethodCall + asyncCall instead — no introspection, no UI-thread wait.
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        QString::fromUtf8(service ? service : SERVICE),
+        QString::fromUtf8(path ? path : PATH),
+        QString::fromUtf8(iface ? iface : IFACE),
+        method);
+    if (!args.isEmpty()) {
+        msg.setArguments(args);
+    }
+
+    QDBusPendingCall pending =
+        QDBusConnection::sessionBus().asyncCall(msg, timeoutMs);
+    auto *watcher = new QDBusPendingCallWatcher(pending, this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this,
+            [handler = std::move(handler)](QDBusPendingCallWatcher *w) {
+                handler(w->reply());
+                w->deleteLater();
+            });
 }
 
 int DesktopAssistantKcm::connectionIndexByName(const QString &name) const
@@ -2753,23 +2801,12 @@ void DesktopAssistantKcm::daemonCall(const QString &command, const QJSValue &pay
         || snake.startsWith(QLatin1String("update_knowledge_"))
         || snake.startsWith(QLatin1String("delete_knowledge_"));
 
-    const QString objectPath = isKnowledge
-        ? QStringLiteral("/org/desktopAssistant/Knowledge")
-        : QStringLiteral("/org/desktopAssistant/Connections");
-    const QString interfaceName = isKnowledge
-        ? QStringLiteral("org.desktopAssistant.Knowledge")
-        : QStringLiteral("org.desktopAssistant.Connections");
-
-    QDBusInterface iface(
-        QStringLiteral("org.desktopAssistant"),
-        objectPath,
-        interfaceName,
-        QDBusConnection::sessionBus()
-    );
-    if (!iface.isValid()) {
-        fail(QStringLiteral("Daemon is not running on the session bus"));
-        return;
-    }
+    const QByteArray objectPath = isKnowledge
+        ? QByteArrayLiteral("/org/desktopAssistant/Knowledge")
+        : QByteArrayLiteral("/org/desktopAssistant/Connections");
+    const QByteArray interfaceName = isKnowledge
+        ? QByteArrayLiteral("org.desktopAssistant.Knowledge")
+        : QByteArrayLiteral("org.desktopAssistant.Connections");
 
     auto serializeArrayField = [&payloadObj](const QString &key) -> QString {
         const QJsonValue value = payloadObj.value(key);
@@ -2787,111 +2824,146 @@ void DesktopAssistantKcm::daemonCall(const QString &command, const QJSValue &pay
             QJsonDocument::fromVariant(value.toVariant()).toJson(QJsonDocument::Compact));
     };
 
-    // Build the D-Bus call argument list per command. Methods that return a
-    // JSON-encoded `CommandResult` produce a string we re-parse below; the
-    // `Ack` commands return an empty signature.
-    QDBusMessage reply;
+    // Build the D-Bus method name + argument list per command. Methods that
+    // return a JSON-encoded `CommandResult` produce a string we re-parse in the
+    // async handler; the `Ack` commands return an empty signature. `timeoutMs`
+    // is bounded per command (KDE-2 / #57) so a wedged daemon can't stall the
+    // System Settings UI thread.
+    QString method;
+    QVariantList callArgs;
     bool returnsJson = false;
+    int timeoutMs = DBUS_TIMEOUT_DEFAULT_MS;
     if (snake == QLatin1String("list_connections")) {
-        reply = iface.call(QStringLiteral("ListConnections"));
+        method = QStringLiteral("ListConnections");
         returnsJson = true;
     } else if (snake == QLatin1String("get_purposes")) {
-        reply = iface.call(QStringLiteral("GetPurposes"));
+        method = QStringLiteral("GetPurposes");
         returnsJson = true;
     } else if (snake == QLatin1String("list_available_models")) {
         const QString cid = payloadObj.value(QStringLiteral("connection_id")).toString();
         const bool refresh = payloadObj.value(QStringLiteral("refresh")).toBool(false);
-        reply = iface.call(QStringLiteral("ListAvailableModels"), cid, refresh);
+        method = QStringLiteral("ListAvailableModels");
+        callArgs << cid << refresh;
         returnsJson = true;
+        // Model enumeration may reach out to a remote provider; give it room.
+        timeoutMs = DBUS_TIMEOUT_MODELS_MS;
     } else if (snake == QLatin1String("create_connection")) {
         const QString id = payloadObj.value(QStringLiteral("id")).toString();
         const QString configJson = serializePayloadField(QStringLiteral("config"));
-        reply = iface.call(QStringLiteral("CreateConnection"), id, configJson);
+        method = QStringLiteral("CreateConnection");
+        callArgs << id << configJson;
     } else if (snake == QLatin1String("update_connection")) {
         const QString id = payloadObj.value(QStringLiteral("id")).toString();
         const QString configJson = serializePayloadField(QStringLiteral("config"));
-        reply = iface.call(QStringLiteral("UpdateConnection"), id, configJson);
+        method = QStringLiteral("UpdateConnection");
+        callArgs << id << configJson;
     } else if (snake == QLatin1String("delete_connection")) {
         const QString id = payloadObj.value(QStringLiteral("id")).toString();
         const bool force = payloadObj.value(QStringLiteral("force")).toBool(false);
-        reply = iface.call(QStringLiteral("DeleteConnection"), id, force);
+        method = QStringLiteral("DeleteConnection");
+        callArgs << id << force;
     } else if (snake == QLatin1String("set_purpose")) {
         const QString purpose = payloadObj.value(QStringLiteral("purpose")).toString();
         const QString configJson = serializePayloadField(QStringLiteral("config"));
-        reply = iface.call(QStringLiteral("SetPurpose"), purpose, configJson);
+        method = QStringLiteral("SetPurpose");
+        callArgs << purpose << configJson;
     } else if (snake == QLatin1String("list_knowledge_entries")) {
         const uint limit = static_cast<uint>(
             payloadObj.value(QStringLiteral("limit")).toInt(50));
         const uint offset = static_cast<uint>(
             payloadObj.value(QStringLiteral("offset")).toInt(0));
         const QString tagFilterJson = serializeArrayField(QStringLiteral("tag_filter"));
-        reply = iface.call(QStringLiteral("ListEntries"), limit, offset, tagFilterJson);
+        method = QStringLiteral("ListEntries");
+        callArgs << limit << offset << tagFilterJson;
         returnsJson = true;
     } else if (snake == QLatin1String("get_knowledge_entry")) {
         const QString id = payloadObj.value(QStringLiteral("id")).toString();
-        reply = iface.call(QStringLiteral("GetEntry"), id);
+        method = QStringLiteral("GetEntry");
+        callArgs << id;
         returnsJson = true;
     } else if (snake == QLatin1String("search_knowledge_entries")) {
         const QString query = payloadObj.value(QStringLiteral("query")).toString();
         const QString tagFilterJson = serializeArrayField(QStringLiteral("tag_filter"));
         const uint limit = static_cast<uint>(
             payloadObj.value(QStringLiteral("limit")).toInt(50));
-        reply = iface.call(QStringLiteral("SearchEntries"), query, tagFilterJson, limit);
+        method = QStringLiteral("SearchEntries");
+        callArgs << query << tagFilterJson << limit;
         returnsJson = true;
+        // A search may scan a large knowledge store.
+        timeoutMs = DBUS_TIMEOUT_SEARCH_MS;
     } else if (snake == QLatin1String("create_knowledge_entry")) {
         const QString content = payloadObj.value(QStringLiteral("content")).toString();
         const QString tagsJson = serializeArrayField(QStringLiteral("tags"));
         const QString metadataJson = serializeValueField(QStringLiteral("metadata"));
-        reply = iface.call(QStringLiteral("CreateEntry"), content, tagsJson, metadataJson);
+        method = QStringLiteral("CreateEntry");
+        callArgs << content << tagsJson << metadataJson;
         returnsJson = true;
     } else if (snake == QLatin1String("update_knowledge_entry")) {
         const QString id = payloadObj.value(QStringLiteral("id")).toString();
         const QString content = payloadObj.value(QStringLiteral("content")).toString();
         const QString tagsJson = serializeArrayField(QStringLiteral("tags"));
         const QString metadataJson = serializeValueField(QStringLiteral("metadata"));
-        reply = iface.call(QStringLiteral("UpdateEntry"), id, content, tagsJson, metadataJson);
+        method = QStringLiteral("UpdateEntry");
+        callArgs << id << content << tagsJson << metadataJson;
         returnsJson = true;
     } else if (snake == QLatin1String("delete_knowledge_entry")) {
         const QString id = payloadObj.value(QStringLiteral("id")).toString();
-        reply = iface.call(QStringLiteral("DeleteEntry"), id);
+        method = QStringLiteral("DeleteEntry");
+        callArgs << id;
     } else {
         fail(QStringLiteral("daemonCall: unsupported command '%1'").arg(snake));
         return;
     }
 
-    if (reply.type() == QDBusMessage::ErrorMessage) {
-        fail(reply.errorMessage().isEmpty() ? QStringLiteral("D-Bus call failed") : reply.errorMessage());
-        return;
-    }
+    // Async dispatch: the watcher fires `handler` on the UI thread when the
+    // reply arrives (or times out). The QML callback is invoked exactly once
+    // from there — on error with (null, message), on success with (result,
+    // null) — preserving the historical callback contract. `callback` is a
+    // QJSValue copy captured by value; `this` is the watcher's parent so the
+    // handler never outlives the KCM.
+    asyncSettingsCall(
+        method, callArgs, timeoutMs,
+        [this, callback, returnsJson](const QDBusMessage &reply) {
+            auto invokeFail = [this, callback](const QString &message) {
+                if (!callback.isCallable()) {
+                    return;
+                }
+                QJSEngine *engine = qjsEngine(this);
+                QJSValueList argv;
+                argv << QJSValue(QJSValue::NullValue);
+                argv << (engine ? engine->toScriptValue(message) : QJSValue(message));
+                QJSValue cb = callback;
+                cb.call(argv);
+            };
 
-    QVariant resultVariant;
-    if (returnsJson) {
-        const auto args = reply.arguments();
-        if (args.isEmpty()) {
-            fail(QStringLiteral("D-Bus reply missing JSON payload"));
-            return;
-        }
-        const QString json = args.first().toString();
-        QJsonParseError parseError;
-        const auto doc = QJsonDocument::fromJson(json.toUtf8(), &parseError);
-        if (parseError.error != QJsonParseError::NoError) {
-            fail(QStringLiteral("Failed to parse daemon reply: %1").arg(parseError.errorString()));
-            return;
-        }
-        resultVariant = doc.toVariant();
-    }
+            if (reply.type() == QDBusMessage::ErrorMessage) {
+                invokeFail(daemonreply::dbusErrorMessage(reply.errorName(), reply.errorMessage()));
+                return;
+            }
 
-    if (callback.isCallable()) {
-        QJSEngine *engine = qjsEngine(this);
-        QJSValue resultValue = engine
-            ? engine->toScriptValue(resultVariant)
-            : QJSValue(QJSValue::NullValue);
-        QJSValueList argv;
-        argv << resultValue;
-        argv << QJSValue(QJSValue::NullValue);
-        QJSValue cb = callback;
-        cb.call(argv);
-    }
+            QVariant resultVariant;
+            if (returnsJson) {
+                const daemonreply::JsonReply parsed = daemonreply::parseJsonReply(reply.arguments());
+                if (!parsed.ok) {
+                    invokeFail(parsed.error);
+                    return;
+                }
+                resultVariant = parsed.value;
+            }
+
+            if (callback.isCallable()) {
+                QJSEngine *engine = qjsEngine(this);
+                QJSValue resultValue = engine
+                    ? engine->toScriptValue(resultVariant)
+                    : QJSValue(QJSValue::NullValue);
+                QJSValueList argv;
+                argv << resultValue;
+                argv << QJSValue(QJSValue::NullValue);
+                QJSValue cb = callback;
+                cb.call(argv);
+            }
+        },
+        SERVICE, objectPath.constData(), interfaceName.constData());
 }
 
 #include "desktopassistantkcm.moc"

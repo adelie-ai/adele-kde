@@ -113,10 +113,11 @@ widget-remove:
     kpackagetool6 --type Plasma/Applet --remove {{panel_widget_id}} || true
     kpackagetool6 --type Plasma/Applet --remove {{desktop_widget_id}} || true
 
-# Configure and build KDE System Settings KCM
+# Configure and build KDE System Settings KCM (also runs the C++ unit tests)
 kcm-build:
     cmake -S {{kcm_dir}} -B {{kcm_build_dir}} -G Ninja -DCMAKE_BUILD_TYPE=Release
     cmake --build {{kcm_build_dir}}
+    ctest --test-dir {{kcm_build_dir}} --output-on-failure
 
 # System is the only supported install — there is no user-local mode: a ~/.local
 # copy is invisible to a normally launched System Settings yet still shadows the
