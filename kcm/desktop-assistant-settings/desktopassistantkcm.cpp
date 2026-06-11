@@ -602,75 +602,98 @@ void DesktopAssistantKcm::load()
     // selection moved to the Connections + Purposes pages (desktop-assistant#17).
     // We therefore skip those reads entirely; the Connections page owns its own
     // load path.
+    // Fault isolation (KDE-5, #60): each daemon read below is independent. A
+    // failing call (daemon down/unreachable, malformed reply) records the first
+    // failure but must NOT abort the remaining sections. In particular the
+    // purely-local steps at the end — the widget-connection JSON read,
+    // loadVoiceSettings(), and installing m_voiceWatcher — have to run even when
+    // every daemon call fails, or the Voice tab goes dead with the orchestrator
+    // down but voice up, and we lose re-probe-on-bus-appearance entirely.
+    //
+    // We collect the first daemon failure message and surface it as the final
+    // status if no later step overwrites it; on full success the status is the
+    // "Loaded settings" line. This is fault-isolation only — the full async
+    // rewrite is KDE-2 (#57).
     QDBusInterface iface(SERVICE, PATH, IFACE, QDBusConnection::sessionBus());
 
-    QDBusMessage gitReply = iface.call("GetPersistenceSettings");
-    if (setStatusFromDbusError(gitReply)) {
-        return;
+    QString daemonError;
+    const auto recordDaemonError = [&daemonError](const QString &message) {
+        if (daemonError.isEmpty()) {
+            daemonError = message;
+        }
+    };
+
+    {
+        QDBusMessage gitReply = iface.call("GetPersistenceSettings");
+        if (gitReply.type() == QDBusMessage::ErrorMessage) {
+            recordDaemonError(dbusErrorMessage(gitReply));
+        } else {
+            const auto gitArgs = gitReply.arguments();
+            if (gitArgs.size() < 4) {
+                recordDaemonError(QStringLiteral("Unexpected GetPersistenceSettings reply"));
+            } else {
+                m_gitEnabled = gitArgs[0].toBool();
+                m_gitRemoteUrl = gitArgs[1].toString();
+                m_gitRemoteName = gitArgs[2].toString();
+                m_gitPushOnUpdate = gitArgs[3].toBool();
+            }
+        }
     }
 
-    const auto gitArgs = gitReply.arguments();
-    if (gitArgs.size() < 4) {
-        m_statusText = QStringLiteral("Unexpected GetPersistenceSettings reply");
-        Q_EMIT statusTextChanged();
-        return;
+    {
+        QDBusMessage dbReply = iface.call("GetDatabaseSettings");
+        if (dbReply.type() == QDBusMessage::ErrorMessage) {
+            recordDaemonError(dbusErrorMessage(dbReply));
+        } else {
+            const auto dbArgs = dbReply.arguments();
+            if (dbArgs.size() < 2) {
+                recordDaemonError(QStringLiteral("Unexpected GetDatabaseSettings reply"));
+            } else {
+                m_dbUrl = dbArgs[0].toString();
+                m_dbMaxConnections = dbArgs[1].toInt();
+            }
+        }
     }
 
-    m_gitEnabled = gitArgs[0].toBool();
-    m_gitRemoteUrl = gitArgs[1].toString();
-    m_gitRemoteName = gitArgs[2].toString();
-    m_gitPushOnUpdate = gitArgs[3].toBool();
-
-    QDBusMessage dbReply = iface.call("GetDatabaseSettings");
-    if (setStatusFromDbusError(dbReply)) {
-        return;
+    {
+        QDBusMessage btReply = iface.call("GetBackendTasksSettings");
+        if (btReply.type() == QDBusMessage::ErrorMessage) {
+            recordDaemonError(dbusErrorMessage(btReply));
+        } else {
+            const auto btArgs = btReply.arguments();
+            if (btArgs.size() < 6) {
+                recordDaemonError(QStringLiteral("Unexpected GetBackendTasksSettings reply"));
+            } else {
+                // Backend-task LLM fields are pass-through only: loaded here and
+                // echoed back unchanged by pushBackendTasksSettings(); no UI binds
+                // them (the Purposes page owns model selection now). btArgs[0]
+                // (has_separate_llm) is intentionally ignored.
+                m_btLlmConnector = btArgs[1].toString();
+                m_btLlmModel = btArgs[2].toString();
+                m_btLlmBaseUrl = btArgs[3].toString();
+                m_btDreamingEnabled = btArgs[4].toBool();
+                m_btDreamingIntervalSecs = static_cast<int>(btArgs[5].toULongLong());
+                m_btArchiveAfterDays = btArgs.size() > 6 ? static_cast<int>(btArgs[6].toUInt()) : 0;
+            }
+        }
     }
 
-    const auto dbArgs = dbReply.arguments();
-    if (dbArgs.size() < 2) {
-        m_statusText = QStringLiteral("Unexpected GetDatabaseSettings reply");
-        Q_EMIT statusTextChanged();
-        return;
-    }
-
-    m_dbUrl = dbArgs[0].toString();
-    m_dbMaxConnections = dbArgs[1].toInt();
-
-    QDBusMessage btReply = iface.call("GetBackendTasksSettings");
-    if (setStatusFromDbusError(btReply)) {
-        return;
-    }
-
-    const auto btArgs = btReply.arguments();
-    if (btArgs.size() < 6) {
-        m_statusText = QStringLiteral("Unexpected GetBackendTasksSettings reply");
-        Q_EMIT statusTextChanged();
-        return;
-    }
-
-    // Backend-task LLM fields are pass-through only: loaded here and echoed
-    // back unchanged by pushBackendTasksSettings(); no UI binds them (the
-    // Purposes page owns model selection now). btArgs[0] (has_separate_llm) is
-    // intentionally ignored.
-    m_btLlmConnector = btArgs[1].toString();
-    m_btLlmModel = btArgs[2].toString();
-    m_btLlmBaseUrl = btArgs[3].toString();
-    m_btDreamingEnabled = btArgs[4].toBool();
-    m_btDreamingIntervalSecs = static_cast<int>(btArgs[5].toULongLong());
-    m_btArchiveAfterDays = btArgs.size() > 6 ? static_cast<int>(btArgs[6].toUInt()) : 0;
-
-    QDBusMessage wsAuthReply = iface.call("GetWsAuthSettings");
-    if (!setStatusFromDbusError(wsAuthReply)) {
-        const auto wsAuthArgs = wsAuthReply.arguments();
-        if (wsAuthArgs.size() >= 6) {
-            m_wsAuthMethods = wsAuthArgs[0].toStringList();
-            m_oidcIssuer = wsAuthArgs[1].toString();
-            m_oidcAuthEndpoint = wsAuthArgs[2].toString();
-            m_oidcTokenEndpoint = wsAuthArgs[3].toString();
-            m_oidcClientId = wsAuthArgs[4].toString();
-            m_oidcScopes = wsAuthArgs[5].toString();
-            if (m_oidcScopes.isEmpty()) {
-                m_oidcScopes = QStringLiteral("openid profile email");
+    {
+        QDBusMessage wsAuthReply = iface.call("GetWsAuthSettings");
+        if (wsAuthReply.type() == QDBusMessage::ErrorMessage) {
+            recordDaemonError(dbusErrorMessage(wsAuthReply));
+        } else {
+            const auto wsAuthArgs = wsAuthReply.arguments();
+            if (wsAuthArgs.size() >= 6) {
+                m_wsAuthMethods = wsAuthArgs[0].toStringList();
+                m_oidcIssuer = wsAuthArgs[1].toString();
+                m_oidcAuthEndpoint = wsAuthArgs[2].toString();
+                m_oidcTokenEndpoint = wsAuthArgs[3].toString();
+                m_oidcClientId = wsAuthArgs[4].toString();
+                m_oidcScopes = wsAuthArgs[5].toString();
+                if (m_oidcScopes.isEmpty()) {
+                    m_oidcScopes = QStringLiteral("openid profile email");
+                }
             }
         }
     }
@@ -683,21 +706,27 @@ void DesktopAssistantKcm::load()
     // pre-#226 block (desktop-assistant#226). If GetConfig errors (daemon down)
     // or predates the personality fields (only CONFIG_DATA_BASE_FIELDS args), we
     // keep the built-in defaults set in the header.
-    QDBusMessage configReply = iface.call("GetConfig");
-    if (configReply.type() != QDBusMessage::ErrorMessage) {
-        const auto configArgs = configReply.arguments();
-        if (configArgs.size() >= CONFIG_DATA_BASE_FIELDS + PERSONALITY_TRAIT_COUNT) {
-            const int base = CONFIG_DATA_BASE_FIELDS;
-            m_personalityProfessionalism = clampTrait(configArgs[base + 0].toInt());
-            m_personalityWarmth = clampTrait(configArgs[base + 1].toInt());
-            m_personalityDirectness = clampTrait(configArgs[base + 2].toInt());
-            m_personalityEnthusiasm = clampTrait(configArgs[base + 3].toInt());
-            m_personalityHumor = clampTrait(configArgs[base + 4].toInt());
-            m_personalitySarcasm = clampTrait(configArgs[base + 5].toInt());
-            m_personalityPretentiousness = clampTrait(configArgs[base + 6].toInt());
+    {
+        QDBusMessage configReply = iface.call("GetConfig");
+        if (configReply.type() == QDBusMessage::ErrorMessage) {
+            recordDaemonError(dbusErrorMessage(configReply));
+        } else {
+            const auto configArgs = configReply.arguments();
+            if (configArgs.size() >= CONFIG_DATA_BASE_FIELDS + PERSONALITY_TRAIT_COUNT) {
+                const int base = CONFIG_DATA_BASE_FIELDS;
+                m_personalityProfessionalism = clampTrait(configArgs[base + 0].toInt());
+                m_personalityWarmth = clampTrait(configArgs[base + 1].toInt());
+                m_personalityDirectness = clampTrait(configArgs[base + 2].toInt());
+                m_personalityEnthusiasm = clampTrait(configArgs[base + 3].toInt());
+                m_personalityHumor = clampTrait(configArgs[base + 4].toInt());
+                m_personalitySarcasm = clampTrait(configArgs[base + 5].toInt());
+                m_personalityPretentiousness = clampTrait(configArgs[base + 6].toInt());
+            }
         }
     }
 
+    // Local-only steps below: these never touch the orchestrator bus name and so
+    // must always run regardless of any daemon failure above.
     loadWidgetConnectionSettings();
 
     // Probe the voice service + read its config so the Voice tab is populated
@@ -751,7 +780,14 @@ void DesktopAssistantKcm::load()
     Q_EMIT oidcScopesChanged();
     Q_EMIT personalityChanged();
 
-    m_statusText = QStringLiteral("Loaded settings from desktop-assistant daemon");
+    // Surface the first daemon failure (if any) so the user sees why some
+    // sections are empty; otherwise report the clean load. Either way the
+    // local-only steps above have already run.
+    if (daemonError.isEmpty()) {
+        m_statusText = QStringLiteral("Loaded settings from desktop-assistant daemon");
+    } else {
+        m_statusText = daemonError;
+    }
     Q_EMIT statusTextChanged();
     setNeedsSave(false);
 }
@@ -895,16 +931,22 @@ void DesktopAssistantKcm::removeSelectedConnection()
     saveWidgetConnectionSettings();
 }
 
+QString DesktopAssistantKcm::dbusErrorMessage(const QDBusMessage &message)
+{
+    QString text = message.errorMessage();
+    if (text.isEmpty()) {
+        text = QStringLiteral("D-Bus call failed");
+    }
+    return text;
+}
+
 bool DesktopAssistantKcm::setStatusFromDbusError(const QDBusMessage &message)
 {
     if (message.type() != QDBusMessage::ErrorMessage) {
         return false;
     }
 
-    m_statusText = message.errorMessage();
-    if (m_statusText.isEmpty()) {
-        m_statusText = QStringLiteral("D-Bus call failed");
-    }
+    m_statusText = dbusErrorMessage(message);
     Q_EMIT statusTextChanged();
     return true;
 }

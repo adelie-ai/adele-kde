@@ -370,6 +370,7 @@ private:
         QString wsSubject;
     };
 
+    static QString dbusErrorMessage(const QDBusMessage &message);
     bool setStatusFromDbusError(const QDBusMessage &message);
     int connectionIndexByName(const QString &name) const;
     int selectedConnectionIndex() const;
