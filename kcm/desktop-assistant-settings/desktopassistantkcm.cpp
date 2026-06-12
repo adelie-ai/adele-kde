@@ -1744,19 +1744,27 @@ void DesktopAssistantKcm::setVoiceEnabled(bool value)
         // loadVoiceSettings() once the daemon reappears (see KDE-10).
         return;
     }
-    QDBusInterface iface(VOICE_SERVICE, VOICE_PATH, VOICE_IFACE, QDBusConnection::sessionBus());
-    QDBusMessage reply = iface.call(QStringLiteral("SetEnabled"), value);
-    if (reply.type() == QDBusMessage::ErrorMessage) {
-        m_statusText = reply.errorMessage().isEmpty()
-            ? QStringLiteral("Failed to toggle voice")
-            : reply.errorMessage();
-        Q_EMIT statusTextChanged();
-        return;
-    }
-    m_voiceEnabled = value;
-    m_statusText = value ? QStringLiteral("“Hey Adele” enabled") : QStringLiteral("“Hey Adele” disabled");
-    Q_EMIT voiceChanged();
-    Q_EMIT statusTextChanged();
+    // Async SetEnabled (KDE-2 / #57, PR 4/5 — was a blocking
+    // QDBusInterface::call against the voice interface). We only flip
+    // m_voiceEnabled + status once the reply lands, so a wedged voice daemon
+    // can't stall the toggle on the UI thread. The watcher is parented to `this`.
+    asyncSettingsCall(
+        QStringLiteral("SetEnabled"), {value}, DBUS_TIMEOUT_DEFAULT_MS,
+        [this, value](const QDBusMessage &reply) {
+            if (reply.type() == QDBusMessage::ErrorMessage) {
+                m_statusText = reply.errorMessage().isEmpty()
+                    ? QStringLiteral("Failed to toggle voice")
+                    : reply.errorMessage();
+                Q_EMIT statusTextChanged();
+                return;
+            }
+            m_voiceEnabled = value;
+            m_statusText = value ? QStringLiteral("“Hey Adele” enabled")
+                                 : QStringLiteral("“Hey Adele” disabled");
+            Q_EMIT voiceChanged();
+            Q_EMIT statusTextChanged();
+        },
+        VOICE_SERVICE, VOICE_PATH, VOICE_IFACE);
 }
 
 QVariantList DesktopAssistantKcm::voiceList() const
@@ -2276,22 +2284,83 @@ QVariantList DesktopAssistantKcm::outputDeviceOptions() const
 
 void DesktopAssistantKcm::loadVoiceSettings()
 {
+    // Bump the voice-load generation (KDE-2 / #57, PR 4/5) so any async voice
+    // read issued by a PREVIOUS loadVoiceSettings() that finishes after THIS one
+    // started detects it was superseded and drops its reply. loadVoiceSettings()
+    // is re-fired often (every load(), the service watcher on owner-change, and
+    // restart/apply), so without this a slow stale reply from a daemon that just
+    // went away could clobber the fresh "unavailable" state.
+    const quint64 generation = ++m_voiceLoadGeneration;
+
     m_voiceServiceAvailable = probeVoiceAvailable();
 
-    if (m_voiceServiceAvailable) {
-        QDBusInterface iface(VOICE_SERVICE, VOICE_PATH, VOICE_IFACE, QDBusConnection::sessionBus());
-
-        QDBusReply<bool> enabledReply = iface.call(QStringLiteral("GetEnabled"));
-        if (enabledReply.isValid()) {
-            m_voiceEnabled = enabledReply.value();
-        }
-
-        // ListVoices -> a(sssu). Marshal into a QVariantList of maps the QML
-        // page reads by key (voice_id / display_name / language / num_speakers).
+    if (!m_voiceServiceAvailable) {
+        m_voiceEnabled = false;
         m_voiceList.clear();
-        QDBusMessage voicesReply = iface.call(QStringLiteral("ListVoices"));
-        if (voicesReply.type() != QDBusMessage::ErrorMessage && !voicesReply.arguments().isEmpty()) {
-            const QDBusArgument arg = voicesReply.arguments().first().value<QDBusArgument>();
+        m_voiceCurrentId.clear();
+        m_voiceCurrentSpeaker = -1;
+    }
+
+    // Local-only steps run IMMEDIATELY, never gated on the voice daemon, so the
+    // page (autostart toggle + TOML-backed config fields) is populated even when
+    // the daemon is wedged or absent. probeVoiceAutostart()/readVoiceConfig() are
+    // file/process-side (the systemctl subprocess moves async in PR 5/5).
+    // NB: device enumeration (pactl + arecord/aplay subprocesses) is NOT done
+    // here — loadVoiceSettings() runs from the KCM constructor's load(), which
+    // fires for every tab of this settings module, so spawning audio tools then
+    // would add startup latency even for users who never open the Voice tab. The
+    // Voice page calls loadAudioDevices() itself from Component.onCompleted.
+    m_voiceAutostart = probeVoiceAutostart();
+    readVoiceConfig();
+    Q_EMIT voiceChanged();
+    Q_EMIT voiceConfigChanged();
+
+    if (!m_voiceServiceAvailable) {
+        // Nothing live to read; the cleared state above is final for this pass.
+        return;
+    }
+
+    // --- Async live-state reads (KDE-2 / #57, PR 4/5) ------------------------
+    // GetEnabled / ListVoices / GetVoice were three serial blocking
+    // QDBusInterface::call round-trips on the UI thread. Fire each on its own
+    // watcher against the voice interface; each handler drops its reply when a
+    // newer loadVoiceSettings() has started (generation guard) and otherwise
+    // updates only its own field(s) and emits voiceChanged. The watchers are
+    // parented to `this`, so a reply landing after the KCM is gone is dropped.
+
+    // GetEnabled -> b.
+    asyncSettingsCall(
+        QStringLiteral("GetEnabled"), {}, DBUS_TIMEOUT_DEFAULT_MS,
+        [this, generation](const QDBusMessage &reply) {
+            if (generation != m_voiceLoadGeneration) {
+                return; // superseded
+            }
+            if (reply.type() == QDBusMessage::ErrorMessage) {
+                return; // keep current; don't surface (load is best-effort)
+            }
+            const auto args = reply.arguments();
+            if (!args.isEmpty()) {
+                m_voiceEnabled = args.first().toBool();
+                Q_EMIT voiceChanged();
+            }
+        },
+        VOICE_SERVICE, VOICE_PATH, VOICE_IFACE);
+
+    // ListVoices -> a(sssu). Marshal into a QVariantList of maps the QML page
+    // reads by key (voice_id / display_name / language / num_speakers). This
+    // demarshalling needs a live QDBusArgument, so it stays inline (not a
+    // bus-free helper).
+    asyncSettingsCall(
+        QStringLiteral("ListVoices"), {}, DBUS_TIMEOUT_DEFAULT_MS,
+        [this, generation](const QDBusMessage &reply) {
+            if (generation != m_voiceLoadGeneration) {
+                return; // superseded
+            }
+            if (reply.type() == QDBusMessage::ErrorMessage || reply.arguments().isEmpty()) {
+                return;
+            }
+            QVariantList voices;
+            const QDBusArgument arg = reply.arguments().first().value<QDBusArgument>();
             arg.beginArray();
             while (!arg.atEnd()) {
                 arg.beginStructure();
@@ -2306,43 +2375,42 @@ void DesktopAssistantKcm::loadVoiceSettings()
                 entry.insert(QStringLiteral("display_name"), name);
                 entry.insert(QStringLiteral("language"), lang);
                 entry.insert(QStringLiteral("num_speakers"), static_cast<int>(speakers));
-                m_voiceList.push_back(entry);
+                voices.push_back(entry);
             }
             arg.endArray();
-        }
+            m_voiceList = voices;
+            Q_EMIT voiceChanged();
+        },
+        VOICE_SERVICE, VOICE_PATH, VOICE_IFACE);
 
-        // GetVoice -> (si): (voice_id, speaker_id); speaker_id -1 if unset.
-        QDBusMessage currentReply = iface.call(QStringLiteral("GetVoice"));
-        if (currentReply.type() != QDBusMessage::ErrorMessage) {
-            const auto args = currentReply.arguments();
-            if (args.size() >= 2) {
-                m_voiceCurrentId = args[0].toString();
-                m_voiceCurrentSpeaker = args[1].toInt();
+    // GetVoice -> (si): (voice_id, speaker_id); speaker_id -1 if unset. The flat
+    // form is parsed by the bus-free helper; the wrapped single-QDBusArgument
+    // form still needs live demarshalling inline.
+    asyncSettingsCall(
+        QStringLiteral("GetVoice"), {}, DBUS_TIMEOUT_DEFAULT_MS,
+        [this, generation](const QDBusMessage &reply) {
+            if (generation != m_voiceLoadGeneration) {
+                return; // superseded
+            }
+            if (reply.type() == QDBusMessage::ErrorMessage) {
+                return;
+            }
+            const auto args = reply.arguments();
+            const auto sel = daemonreply::parseVoiceSelectionReply(args);
+            if (sel.ok) {
+                m_voiceCurrentId = sel.voiceId;
+                m_voiceCurrentSpeaker = sel.speaker;
+                Q_EMIT voiceChanged();
             } else if (args.size() == 1) {
                 // Some bindings wrap the struct; unpack via QDBusArgument.
                 const QDBusArgument inner = args.first().value<QDBusArgument>();
                 inner.beginStructure();
                 inner >> m_voiceCurrentId >> m_voiceCurrentSpeaker;
                 inner.endStructure();
+                Q_EMIT voiceChanged();
             }
-        }
-    } else {
-        m_voiceEnabled = false;
-        m_voiceList.clear();
-        m_voiceCurrentId.clear();
-        m_voiceCurrentSpeaker = -1;
-    }
-
-    m_voiceAutostart = probeVoiceAutostart();
-    readVoiceConfig();
-    // NB: device enumeration (pactl + arecord/aplay subprocesses) is NOT done
-    // here — loadVoiceSettings() runs from the KCM constructor's load(), which
-    // fires for every tab of this settings module, so spawning audio tools then
-    // would add startup latency even for users who never open the Voice tab. The
-    // Voice page calls loadAudioDevices() itself from Component.onCompleted.
-
-    Q_EMIT voiceChanged();
-    Q_EMIT voiceConfigChanged();
+        },
+        VOICE_SERVICE, VOICE_PATH, VOICE_IFACE);
 }
 
 void DesktopAssistantKcm::setVoice(const QString &voiceId, int speaker)
@@ -2354,38 +2422,46 @@ void DesktopAssistantKcm::setVoice(const QString &voiceId, int speaker)
     if (id.isEmpty()) {
         return;
     }
-    QDBusInterface iface(VOICE_SERVICE, VOICE_PATH, VOICE_IFACE, QDBusConnection::sessionBus());
-    QDBusMessage reply = iface.call(QStringLiteral("SetVoice"), id, speaker);
-    if (reply.type() == QDBusMessage::ErrorMessage) {
-        m_statusText = reply.errorMessage().isEmpty()
-            ? QStringLiteral("Failed to set voice")
-            : reply.errorMessage();
-        Q_EMIT statusTextChanged();
-        return;
-    }
-    m_voiceCurrentId = id;
-    m_voiceCurrentSpeaker = speaker;
+    // Async SetVoice (KDE-2 / #57, PR 4/5 — was a blocking QDBusInterface::call
+    // against the voice interface). The config persist + status only happen once
+    // the reply confirms success, so a wedged voice daemon can't stall the
+    // picker on the UI thread. The watcher is parented to `this`.
+    asyncSettingsCall(
+        QStringLiteral("SetVoice"), {id, speaker}, DBUS_TIMEOUT_DEFAULT_MS,
+        [this, id, speaker](const QDBusMessage &reply) {
+            if (reply.type() == QDBusMessage::ErrorMessage) {
+                m_statusText = reply.errorMessage().isEmpty()
+                    ? QStringLiteral("Failed to set voice")
+                    : reply.errorMessage();
+                Q_EMIT statusTextChanged();
+                return;
+            }
+            m_voiceCurrentId = id;
+            m_voiceCurrentSpeaker = speaker;
 
-    // SetVoice above only changes the RUNNING daemon. Persist the choice to
-    // config.toml under the active backend's voice key as well, so a restart
-    // (or "Restart voice service") reloads it instead of falling back to the
-    // daemon default. The key is backend-specific (repo adelie-ai/voice,
-    // crates/module/src/config.rs): Kokoro -> kokoro_voice, Polly -> polly_voice,
-    // Piper -> model_path (the daemon resolves <models_dir>/<id>.onnx, and our
-    // sttModelsDir() matches that models dir).
-    if (m_ttsBackend == QLatin1String("polly")) {
-        m_pollyVoice = id;
-    } else if (m_ttsBackend == QLatin1String("piper")) {
-        m_piperModelPath = QDir(sttModelsDir()).filePath(id + QStringLiteral(".onnx"));
-    } else {
-        m_kokoroVoice = id;
-    }
-    flushVoiceConfigWrite();
+            // SetVoice above only changes the RUNNING daemon. Persist the choice
+            // to config.toml under the active backend's voice key as well, so a
+            // restart (or "Restart voice service") reloads it instead of falling
+            // back to the daemon default. The key is backend-specific (repo
+            // adelie-ai/voice, crates/module/src/config.rs): Kokoro ->
+            // kokoro_voice, Polly -> polly_voice, Piper -> model_path (the daemon
+            // resolves <models_dir>/<id>.onnx, and our sttModelsDir() matches
+            // that models dir).
+            if (m_ttsBackend == QLatin1String("polly")) {
+                m_pollyVoice = id;
+            } else if (m_ttsBackend == QLatin1String("piper")) {
+                m_piperModelPath = QDir(sttModelsDir()).filePath(id + QStringLiteral(".onnx"));
+            } else {
+                m_kokoroVoice = id;
+            }
+            flushVoiceConfigWrite();
 
-    m_statusText = QStringLiteral("Voice set to %1").arg(id);
-    Q_EMIT voiceChanged();
-    Q_EMIT voiceConfigChanged();
-    Q_EMIT statusTextChanged();
+            m_statusText = QStringLiteral("Voice set to %1").arg(id);
+            Q_EMIT voiceChanged();
+            Q_EMIT voiceConfigChanged();
+            Q_EMIT statusTextChanged();
+        },
+        VOICE_SERVICE, VOICE_PATH, VOICE_IFACE);
 }
 
 void DesktopAssistantKcm::setVoiceAutostart(bool enabled)
@@ -2439,24 +2515,29 @@ void DesktopAssistantKcm::restartVoiceService()
     loadVoiceSettings();
 }
 
-bool DesktopAssistantKcm::tryDaemonReload() const
+void DesktopAssistantKcm::tryDaemonReload(std::function<void(bool)> done)
 {
-    // Forward-compatible hot-reload (adele-kde#37). The daemon will expose a
+    // Forward-compatible hot-reload (adele-kde#37). The daemon exposes a
     // `Reload` method on org.desktopAssistant.Voice (voice#52) that re-reads
     // config.toml without a restart. Until that lands the call comes back as
-    // UnknownMethod, which we treat as "not supported" -> false so the caller
-    // falls back to a service restart. We only attempt this when the service is
-    // actually on the bus (constructing the interface would otherwise D-Bus
-    // *activate* the daemon, which we don't want from a probe).
+    // UnknownMethod, which we treat as "not supported" -> done(false) so the
+    // caller falls back to a service restart. We only attempt this when the
+    // service is actually on the bus (an async call to an absent name would
+    // D-Bus *activate* the daemon, which we don't want from a probe).
+    //
+    // KDE-2 / #57, PR 4/5: was a blocking QDBusInterface::call. Now async — the
+    // result is delivered through `done` on the UI thread. The watcher is
+    // parented to `this`.
     if (!m_voiceServiceAvailable) {
-        return false;
+        done(false);
+        return;
     }
-    QDBusInterface iface(VOICE_SERVICE, VOICE_PATH, VOICE_IFACE, QDBusConnection::sessionBus());
-    if (!iface.isValid()) {
-        return false;
-    }
-    QDBusMessage reply = iface.call(QStringLiteral("Reload"));
-    return reply.type() != QDBusMessage::ErrorMessage;
+    asyncSettingsCall(
+        QStringLiteral("Reload"), {}, DBUS_TIMEOUT_DEFAULT_MS,
+        [done = std::move(done)](const QDBusMessage &reply) {
+            done(reply.type() != QDBusMessage::ErrorMessage);
+        },
+        VOICE_SERVICE, VOICE_PATH, VOICE_IFACE);
 }
 
 void DesktopAssistantKcm::applyVoiceChanges()
@@ -2467,25 +2548,34 @@ void DesktopAssistantKcm::applyVoiceChanges()
     // reload/restart, even if Apply was pressed mid-drag.
     flushVoiceConfigWrite();
 
-    if (tryDaemonReload()) {
-        m_statusText = QStringLiteral("Voice settings reloaded");
-        Q_EMIT statusTextChanged();
-        // A reload doesn't change availability/voice list, but re-read config so
-        // the page reflects exactly what's now on disk.
-        loadVoiceSettings();
-        return;
-    }
+    // Snapshot the values the fallback branch needs now: m_voiceServiceAvailable
+    // / m_voiceAutostart could change (e.g. via the service watcher) before the
+    // async Reload reply lands, but the decision below reflects the state at the
+    // moment Apply was pressed.
+    const bool serviceAvailable = m_voiceServiceAvailable;
+    const int autostart = m_voiceAutostart;
 
-    // Fall back to a restart. restartVoiceService() sets its own status and
-    // re-reads live state. If the unit isn't installed there's nothing to do
-    // beyond the on-disk write we already performed; say so honestly.
-    if (m_voiceAutostart < 0 && !m_voiceServiceAvailable) {
-        m_statusText = QStringLiteral(
-            "Saved. The voice service isn't running; changes apply when it next starts.");
-        Q_EMIT statusTextChanged();
-        return;
-    }
-    restartVoiceService();
+    tryDaemonReload([this, serviceAvailable, autostart](bool reloaded) {
+        if (reloaded) {
+            m_statusText = QStringLiteral("Voice settings reloaded");
+            Q_EMIT statusTextChanged();
+            // A reload doesn't change availability/voice list, but re-read config
+            // so the page reflects exactly what's now on disk.
+            loadVoiceSettings();
+            return;
+        }
+
+        // Fall back to a restart. restartVoiceService() sets its own status and
+        // re-reads live state. If the unit isn't installed there's nothing to do
+        // beyond the on-disk write we already performed; say so honestly.
+        if (autostart < 0 && !serviceAvailable) {
+            m_statusText = QStringLiteral(
+                "Saved. The voice service isn't running; changes apply when it next starts.");
+            Q_EMIT statusTextChanged();
+            return;
+        }
+        restartVoiceService();
+    });
 }
 
 QVariantList DesktopAssistantKcm::enumerateAudioDevices(const QString &direction) const

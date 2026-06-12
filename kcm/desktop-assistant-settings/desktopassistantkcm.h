@@ -452,9 +452,13 @@ private:
     // sets *ok to the exit==0 result. Empty/!ok on any failure.
     QString runSystemctlUser(const QStringList &args, bool *ok) const;
     // Apply config-file changes live. Tries the daemon's `Reload` D-Bus method
-    // (voice#52); returns true on success. On UnknownMethod / unavailable /
-    // error it returns false so the caller can fall back to a service restart.
-    bool tryDaemonReload() const;
+    // (voice#52) asynchronously (KDE-2 / #57, PR 4/5 — was a blocking
+    // QDBusInterface::call) and invokes `done(true)` on success, `done(false)`
+    // on UnknownMethod / unavailable / error so the caller can fall back to a
+    // service restart. When the voice service isn't on the bus it calls
+    // `done(false)` synchronously without issuing a call (so we never D-Bus
+    // *activate* the daemon from a probe).
+    void tryDaemonReload(std::function<void(bool)> done);
     // Enumerate audio devices for `direction` ("input"/"output"). Each entry is
     // a {value,label} map. Prefers `pactl`; falls back to ALSA card tokens from
     // `arecord -L` / `aplay -L`. Never includes the "default" sentinel — the
@@ -484,6 +488,15 @@ private:
     // reply if a newer load() has since started, so a slow/stale reply from a
     // previous load can never clobber fresher state (KDE-2 / #57).
     quint64 m_loadGeneration = 0;
+
+    // Monotonic generation counter bumped on every loadVoiceSettings() (KDE-2 /
+    // #57, PR 4/5). The voice reads (GetEnabled/ListVoices/GetVoice) are now
+    // async, and loadVoiceSettings() is re-fired frequently (each load(), the
+    // service watcher, restart/apply). Each async voice handler captures the
+    // value current when it was issued and drops its reply if a newer
+    // loadVoiceSettings() has since started — so a stale reply (e.g. from a
+    // daemon that just went away) can't clobber the fresh "unavailable" state.
+    quint64 m_voiceLoadGeneration = 0;
 
     QString m_statusText;
     bool m_gitEnabled = false;
