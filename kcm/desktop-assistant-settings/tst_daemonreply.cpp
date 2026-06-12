@@ -100,6 +100,165 @@ private Q_SLOTS:
         QCOMPARE(daemonreply::dbusErrorMessage(QString(), QString()),
                  QStringLiteral("D-Bus call failed"));
     }
+
+    // --- parsePersistenceReply (KDE-2 PR 2/5) --------------------------------
+
+    void persistenceParsesFullReply()
+    {
+        const QList<QVariant> args{true, QStringLiteral("git@host:repo.git"),
+                                   QStringLiteral("origin"), false};
+        const auto r = daemonreply::parsePersistenceReply(args);
+        QVERIFY(r.ok);
+        QVERIFY(r.error.isEmpty());
+        QCOMPARE(r.gitEnabled, true);
+        QCOMPARE(r.gitRemoteUrl, QStringLiteral("git@host:repo.git"));
+        QCOMPARE(r.gitRemoteName, QStringLiteral("origin"));
+        QCOMPARE(r.gitPushOnUpdate, false);
+    }
+
+    void persistenceShortReplyErrors()
+    {
+        const QList<QVariant> args{true, QStringLiteral("url")}; // only 2 of 4
+        const auto r = daemonreply::parsePersistenceReply(args);
+        QVERIFY(!r.ok);
+        QCOMPARE(r.error, QStringLiteral("Unexpected GetPersistenceSettings reply"));
+    }
+
+    // --- parseDatabaseReply --------------------------------------------------
+
+    void databaseParsesFullReply()
+    {
+        const QList<QVariant> args{QStringLiteral("sqlite:///db"), uint(7)};
+        const auto r = daemonreply::parseDatabaseReply(args);
+        QVERIFY(r.ok);
+        QCOMPARE(r.dbUrl, QStringLiteral("sqlite:///db"));
+        QCOMPARE(r.dbMaxConnections, 7);
+    }
+
+    void databaseShortReplyErrors()
+    {
+        const auto r = daemonreply::parseDatabaseReply({QStringLiteral("url")});
+        QVERIFY(!r.ok);
+        QCOMPARE(r.error, QStringLiteral("Unexpected GetDatabaseSettings reply"));
+    }
+
+    // --- parseBackendTasksReply ----------------------------------------------
+
+    void backendTasksParsesWithArchive()
+    {
+        const QList<QVariant> args{true, QStringLiteral("conn"), QStringLiteral("model"),
+                                   QStringLiteral("http://x"), true,
+                                   qulonglong(3600), uint(30)};
+        const auto r = daemonreply::parseBackendTasksReply(args);
+        QVERIFY(r.ok);
+        QCOMPARE(r.llmConnector, QStringLiteral("conn"));
+        QCOMPARE(r.llmModel, QStringLiteral("model"));
+        QCOMPARE(r.llmBaseUrl, QStringLiteral("http://x"));
+        QCOMPARE(r.dreamingEnabled, true);
+        QCOMPARE(r.dreamingIntervalSecs, 3600);
+        QCOMPARE(r.archiveAfterDays, 30);
+    }
+
+    void backendTasksArchiveDefaultsZeroWhenAbsent()
+    {
+        // 6-element reply (pre-archive daemon): archiveAfterDays falls back to 0.
+        const QList<QVariant> args{false, QString(), QString(), QString(),
+                                   false, qulonglong(60)};
+        const auto r = daemonreply::parseBackendTasksReply(args);
+        QVERIFY(r.ok);
+        QCOMPARE(r.dreamingIntervalSecs, 60);
+        QCOMPARE(r.archiveAfterDays, 0);
+    }
+
+    void backendTasksShortReplyErrors()
+    {
+        const QList<QVariant> args{false, QString(), QString()}; // < 6
+        const auto r = daemonreply::parseBackendTasksReply(args);
+        QVERIFY(!r.ok);
+        QCOMPARE(r.error, QStringLiteral("Unexpected GetBackendTasksSettings reply"));
+    }
+
+    // --- parseWsAuthReply (best-effort: short reply keeps defaults, no error) -
+
+    void wsAuthParsesFullReply()
+    {
+        const QList<QVariant> args{QStringList{QStringLiteral("oidc")},
+                                   QStringLiteral("https://issuer"),
+                                   QStringLiteral("https://auth"),
+                                   QStringLiteral("https://token"),
+                                   QStringLiteral("client"),
+                                   QStringLiteral("openid email")};
+        const auto r = daemonreply::parseWsAuthReply(args);
+        QVERIFY(r.ok);
+        QCOMPARE(r.methods, (QStringList{QStringLiteral("oidc")}));
+        QCOMPARE(r.oidcIssuer, QStringLiteral("https://issuer"));
+        QCOMPARE(r.oidcScopes, QStringLiteral("openid email"));
+    }
+
+    void wsAuthEmptyScopesGetsDefault()
+    {
+        const QList<QVariant> args{QStringList{}, QString(), QString(),
+                                   QString(), QString(), QString()};
+        const auto r = daemonreply::parseWsAuthReply(args);
+        QVERIFY(r.ok);
+        QCOMPARE(r.oidcScopes, QStringLiteral("openid profile email"));
+    }
+
+    void wsAuthShortReplyKeepsDefaultsNoError()
+    {
+        const auto r = daemonreply::parseWsAuthReply({QStringList{}}); // < 6
+        QVERIFY(!r.ok); // not populated; caller keeps in-memory defaults
+    }
+
+    // --- parsePersonalityReply -----------------------------------------------
+
+    void personalityReadsTrailingBlock()
+    {
+        // 18 base fields (placeholders) + the 7-trait block.
+        QList<QVariant> args;
+        for (int i = 0; i < 18; ++i) {
+            args << QStringLiteral("base");
+        }
+        args << uint(0) << uint(1) << uint(2) << uint(3) << uint(4)
+             << uint(2) << uint(3);
+        const auto r = daemonreply::parsePersonalityReply(args, 18);
+        QVERIFY(r.present);
+        QCOMPARE(r.professionalism, 0);
+        QCOMPARE(r.warmth, 1);
+        QCOMPARE(r.directness, 2);
+        QCOMPARE(r.enthusiasm, 3);
+        QCOMPARE(r.humor, 4);
+        QCOMPARE(r.sarcasm, 2);
+        QCOMPARE(r.pretentiousness, 3);
+    }
+
+    void personalityClampsOutOfRange()
+    {
+        QList<QVariant> args;
+        for (int i = 0; i < 18; ++i) {
+            args << QStringLiteral("base");
+        }
+        // Out-of-range values clamp to 0..4 (e.g. a shifted index landing on a
+        // large/negative int must not propagate).
+        args << int(-3) << uint(99) << uint(4) << uint(0) << uint(0)
+             << uint(0) << uint(0);
+        const auto r = daemonreply::parsePersonalityReply(args, 18);
+        QVERIFY(r.present);
+        QCOMPARE(r.professionalism, 0); // -3 -> 0
+        QCOMPARE(r.warmth, 4);          // 99 -> 4
+        QCOMPARE(r.directness, 4);
+    }
+
+    void personalityAbsentWhenReplyTooShort()
+    {
+        // Pre-#226 daemon: only the base fields, no personality block.
+        QList<QVariant> args;
+        for (int i = 0; i < 18; ++i) {
+            args << QStringLiteral("base");
+        }
+        const auto r = daemonreply::parsePersonalityReply(args, 18);
+        QVERIFY(!r.present);
+    }
 };
 
 QTEST_MAIN(TestDaemonReply)
