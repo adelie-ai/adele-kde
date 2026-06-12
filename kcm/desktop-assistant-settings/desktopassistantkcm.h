@@ -402,6 +402,12 @@ private:
     // toggled setNeedsSave(true) now calls one of these directly so
     // changes hit the daemon as soon as the user makes them; there is no
     // Apply gesture (the daemon hot-reloads inside each Set* handler).
+    //
+    // Shared fire-and-forget setter push (KDE-2 / #57, PR 3/5): issues `method`
+    // with `args` on the orchestrator Settings interface via asyncSettingsCall
+    // and surfaces only an error reply into statusText — nothing blocks the UI
+    // thread. Used by the per-section pushers below.
+    void pushSetterAsync(const QString &method, const QVariantList &args);
     void pushPersistenceSettings();
     void pushDatabaseSettings();
     void pushBackendTasksSettings();

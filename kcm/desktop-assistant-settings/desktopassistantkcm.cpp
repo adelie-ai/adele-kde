@@ -627,25 +627,21 @@ void DesktopAssistantKcm::pushPersonalityTrait(const char *setField, int value)
     }
     patch.endStructure();
 
-    // SetConfig takes a single ConfigPatchArgs struct argument, so we build the
-    // message by hand (QDBusInterface::call would pass each `patch` element as a
-    // separate argument). The reply is the flattened ConfigData; we only care
-    // whether it errored.
-    QDBusMessage msg = QDBusMessage::createMethodCall(
-        QString::fromLatin1(SERVICE),
-        QString::fromLatin1(PATH),
-        QString::fromLatin1(IFACE),
-        QStringLiteral("SetConfig")
-    );
-    msg.setArguments({QVariant::fromValue(patch)});
-    QDBusMessage reply = QDBusConnection::sessionBus().call(msg);
-    if (setStatusFromDbusError(reply)) {
-        // Most likely the daemon predates the personality fields
-        // (desktop-assistant#226): SetConfig rejects the longer ConfigPatchArgs
-        // signature. setStatusFromDbusError has already surfaced the message;
-        // the in-memory value stays so the slider reflects the user's choice.
-        return;
-    }
+    // SetConfig takes a single ConfigPatchArgs struct argument. asyncSettingsCall
+    // wraps it in a single-element QVariantList, so the struct is passed as one
+    // argument (NOT flattened into per-field args). The reply is the flattened
+    // ConfigData; we only care whether it errored (KDE-2 / #57, PR 3/5 — was a
+    // synchronous QDBusConnection::call that blocked the UI thread). The watcher
+    // is parented to `this`, so a reply landing after the KCM is gone is dropped.
+    asyncSettingsCall(
+        QStringLiteral("SetConfig"), {QVariant::fromValue(patch)}, DBUS_TIMEOUT_DEFAULT_MS,
+        [this](const QDBusMessage &reply) {
+            // A failure here most likely means the daemon predates the
+            // personality fields (desktop-assistant#226) and rejected the longer
+            // ConfigPatchArgs signature. Surface it; the in-memory slider value
+            // stays so the UI still reflects the user's choice.
+            setStatusFromDbusError(reply);
+        });
 }
 
 void DesktopAssistantKcm::load()
@@ -924,58 +920,56 @@ void DesktopAssistantKcm::save()
     // Kept for KQuickConfigModule's vtable / for any future hooks.
 }
 
+void DesktopAssistantKcm::pushSetterAsync(const QString &method, const QVariantList &args)
+{
+    // Fire-and-forget setter push (KDE-2 / #57, PR 3/5). Every per-section
+    // setter used to do a synchronous QDBusInterface::call — which both blocked
+    // on the constructor's introspection round-trip AND on the reply — so a
+    // wedged daemon froze System Settings on every keystroke/toggle. We now hand
+    // off to asyncSettingsCall and only consult the reply to surface an error
+    // into statusText; nothing waits on the UI thread. The watcher is parented
+    // to `this`, so a reply that lands after the KCM is gone is simply dropped.
+    asyncSettingsCall(
+        method, args, DBUS_TIMEOUT_DEFAULT_MS,
+        [this](const QDBusMessage &reply) {
+            // Only an error needs surfacing; success is silent (the setter has
+            // already updated the in-memory value + emitted its NOTIFY).
+            setStatusFromDbusError(reply);
+        });
+}
+
 void DesktopAssistantKcm::pushPersistenceSettings()
 {
-    QDBusInterface iface(SERVICE, PATH, IFACE, QDBusConnection::sessionBus());
-    QDBusMessage reply = iface.call(
-        "SetPersistenceSettings",
-        m_gitEnabled,
-        m_gitRemoteUrl,
-        m_gitRemoteName,
-        m_gitPushOnUpdate
-    );
-    setStatusFromDbusError(reply);
+    pushSetterAsync(QStringLiteral("SetPersistenceSettings"),
+                    {m_gitEnabled, m_gitRemoteUrl, m_gitRemoteName, m_gitPushOnUpdate});
 }
 
 void DesktopAssistantKcm::pushDatabaseSettings()
 {
-    QDBusInterface iface(SERVICE, PATH, IFACE, QDBusConnection::sessionBus());
-    QDBusMessage reply = iface.call(
-        "SetDatabaseSettings",
-        m_dbUrl,
-        static_cast<uint>(m_dbMaxConnections)
-    );
-    setStatusFromDbusError(reply);
+    pushSetterAsync(QStringLiteral("SetDatabaseSettings"),
+                    {m_dbUrl, static_cast<uint>(m_dbMaxConnections)});
 }
 
 void DesktopAssistantKcm::pushBackendTasksSettings()
 {
-    QDBusInterface iface(SERVICE, PATH, IFACE, QDBusConnection::sessionBus());
-    QDBusMessage reply = iface.call(
-        "SetBackendTasksSettings",
-        m_btLlmConnector,
-        m_btLlmModel,
-        m_btLlmBaseUrl,
-        m_btDreamingEnabled,
-        static_cast<qulonglong>(m_btDreamingIntervalSecs),
-        static_cast<uint>(m_btArchiveAfterDays)
-    );
-    setStatusFromDbusError(reply);
+    pushSetterAsync(QStringLiteral("SetBackendTasksSettings"),
+                    {m_btLlmConnector,
+                     m_btLlmModel,
+                     m_btLlmBaseUrl,
+                     m_btDreamingEnabled,
+                     static_cast<qulonglong>(m_btDreamingIntervalSecs),
+                     static_cast<uint>(m_btArchiveAfterDays)});
 }
 
 void DesktopAssistantKcm::pushWsAuthSettings()
 {
-    QDBusInterface iface(SERVICE, PATH, IFACE, QDBusConnection::sessionBus());
-    QDBusMessage reply = iface.call(
-        "SetWsAuthSettings",
-        m_wsAuthMethods,
-        m_oidcIssuer,
-        m_oidcAuthEndpoint,
-        m_oidcTokenEndpoint,
-        m_oidcClientId,
-        m_oidcScopes
-    );
-    setStatusFromDbusError(reply);
+    pushSetterAsync(QStringLiteral("SetWsAuthSettings"),
+                    {m_wsAuthMethods,
+                     m_oidcIssuer,
+                     m_oidcAuthEndpoint,
+                     m_oidcTokenEndpoint,
+                     m_oidcClientId,
+                     m_oidcScopes});
 }
 
 void DesktopAssistantKcm::defaults()
