@@ -24,6 +24,7 @@ kcmutils_add_qml_kcm(kcm_desktopassistant
     SOURCES
         desktopassistantkcm.cpp
         daemonreply.cpp
+        voiceconfig.cpp
     INSTALL_NAMESPACE
         plasma/kcms/systemsettings
 )
@@ -61,4 +62,18 @@ if(BUILD_KCM_TESTS)
             Qt6::Test
     )
     add_test(NAME tst_daemonreply COMMAND tst_daemonreply)
+
+    # Voice-config TOML helpers (KDE-6 #61 / KDE-7 #62): inline-comment stripping
+    # on read + surgical merge that preserves inline comments / unknown keys on
+    # write. Pure, file-free (voiceconfig.cpp), so covered without a filesystem.
+    add_executable(tst_voiceconfig
+        tst_voiceconfig.cpp
+        voiceconfig.cpp
+    )
+    target_link_libraries(tst_voiceconfig
+        PRIVATE
+            Qt6::Core
+            Qt6::Test
+    )
+    add_test(NAME tst_voiceconfig COMMAND tst_voiceconfig)
 endif()

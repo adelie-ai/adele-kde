@@ -11,6 +11,7 @@
 class QDBusMessage;
 class QDBusServiceWatcher;
 class QFile;
+class QTimer;
 class QNetworkAccessManager;
 class QNetworkReply;
 
@@ -429,6 +430,17 @@ private:
     bool probeVoiceAvailable() const;
     void readVoiceConfig();
     bool writeVoiceConfig();
+    // KDE-7 (#62): coalesce rapid config writes. A slider drag fires its setter
+    // many times per second; without debouncing each tick did a full
+    // read-merge-rewrite of config.toml (a write storm, and — before the atomic
+    // QSaveFile — a torn-file risk). Instead the property setters call
+    // scheduleVoiceConfigWrite(), which (re)arms a short single-shot timer; the
+    // actual writeVoiceConfig() runs once the value settles. Paths that must
+    // persist *now* before they act on the file (reset buttons, Apply/restart,
+    // SetVoice) call flushVoiceConfigWrite() to cancel the pending timer and
+    // write synchronously, so no debounced change is ever lost or applied late.
+    void scheduleVoiceConfigWrite();
+    bool flushVoiceConfigWrite();
     int probeVoiceAutostart() const; // -1 unknown, 0 off, 1 on
     // Run `systemctl --user <args>` synchronously; returns trimmed stdout and
     // sets *ok to the exit==0 result. Empty/!ok on any failure.
@@ -499,6 +511,10 @@ private:
     // service" / "Apply now", where systemctl returns before the daemon has
     // re-acquired its bus name. Without this the voice picker latches disabled.
     QDBusServiceWatcher *m_voiceWatcher = nullptr;
+    // Debounce timer for voice config writes (KDE-7 / #62). Lazily created on
+    // first scheduleVoiceConfigWrite(); single-shot, re-armed on each call so a
+    // burst of setter calls (a slider drag) collapses to one write.
+    QTimer *m_voiceWriteDebounce = nullptr;
     bool m_voiceServiceAvailable = false;
     bool m_voiceEnabled = false;
     QVariantList m_voiceList;

@@ -1,6 +1,7 @@
 #include "desktopassistantkcm.h"
 
 #include "daemonreply.h"
+#include "voiceconfig.h"
 
 #include <algorithm>
 #include <dlfcn.h>
@@ -30,10 +31,12 @@
 #include <QPointer>
 #include <QProcess>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QSet>
 #include <QStandardPaths>
 #include <QStringList>
 #include <QTextStream>
+#include <QTimer>
 #include <QUrl>
 #include <QVariantList>
 #include <QVariantMap>
@@ -1202,8 +1205,7 @@ bool DesktopAssistantKcm::saveWidgetConnectionSettings()
         root.insert(QStringLiteral("transport"), QStringLiteral("dbus"));
     }
 
-    QFile file(widgetSettingsPath());
-    const auto fileInfo = QFileInfo(file);
+    const QFileInfo fileInfo(widgetSettingsPath());
     QDir dir;
     if (!dir.mkpath(fileInfo.absolutePath())) {
         m_statusText = QStringLiteral("Unable to create widget settings directory");
@@ -1211,7 +1213,11 @@ bool DesktopAssistantKcm::saveWidgetConnectionSettings()
         return false;
     }
 
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+    // KDE-7 (#62): atomic write via QSaveFile (temp file + rename on commit), so
+    // a crash mid-write never leaves a truncated widget_settings.json. Matches
+    // the voice config path; a failed write leaves the old file untouched.
+    QSaveFile file(widgetSettingsPath());
+    if (!file.open(QIODevice::WriteOnly)) {
         m_statusText = QStringLiteral("Unable to write widget settings file");
         Q_EMIT statusTextChanged();
         return false;
@@ -1219,7 +1225,11 @@ bool DesktopAssistantKcm::saveWidgetConnectionSettings()
 
     const QJsonDocument doc(root);
     file.write(doc.toJson(QJsonDocument::Indented));
-    file.close();
+    if (!file.commit()) {
+        m_statusText = QStringLiteral("Unable to write widget settings file");
+        Q_EMIT statusTextChanged();
+        return false;
+    }
     return true;
 }
 
@@ -1409,7 +1419,11 @@ void DesktopAssistantKcm::readVoiceConfig()
             continue;
         }
         const QString key = trimmed.left(eq).trimmed();
-        QString value = trimmed.mid(eq + 1).trimmed();
+        // KDE-6 (#61): strip a trailing inline comment (` #...`, honouring
+        // quotes) BEFORE parsing the scalar — otherwise `sensitivity = 0.45 #x`
+        // failed toDouble() and the UI silently reverted to a default the user
+        // never chose, and the next write then deleted the comment.
+        QString value = voiceconfig::stripInlineComment(trimmed.mid(eq + 1));
         // Strip surrounding double quotes from string values.
         if (value.size() >= 2 && value.startsWith(QLatin1Char('"')) && value.endsWith(QLatin1Char('"'))) {
             value = value.mid(1, value.size() - 2);
@@ -1510,147 +1524,42 @@ bool DesktopAssistantKcm::writeVoiceConfig()
         }
     }
 
-    struct Target {
-        QString section;
-        QString key;
-        QString value; // raw string (formatLine adds quotes) or bare number
-        bool quoted;
-        bool omitWhenEmpty = false; // empty value -> drop the key entirely
-        bool done = false;
-    };
+    // The owned keys, marshalled into voiceconfig::Target. The merge (including
+    // KDE-6 inline-comment preservation) is a pure, unit-tested helper
+    // (voiceconfig::mergeTomlLines) so the file I/O below stays thin.
+    using voiceconfig::Target;
     QVector<Target> targets = {
-        {QStringLiteral("audio"), QStringLiteral("input_device"), m_inputDevice, true, false, false},
-        {QStringLiteral("audio"), QStringLiteral("output_device"), m_outputDevice, true, false, false},
+        {QStringLiteral("audio"), QStringLiteral("input_device"), m_inputDevice, true, false},
+        {QStringLiteral("audio"), QStringLiteral("output_device"), m_outputDevice, true, false},
         {QStringLiteral("wake_word"), QStringLiteral("sensitivity"),
-         formatTomlFloat(m_wakeSensitivity), false, false, false},
+         formatTomlFloat(m_wakeSensitivity), false, false},
         // Forward-compat wake-word keys (voice#50/#51). `eager` is a bare bool;
         // `listening_cue` is omit-when-empty so an unset cue doesn't pin a value.
         {QStringLiteral("wake_word"), QStringLiteral("eager"),
-         m_wakeEager ? QStringLiteral("true") : QStringLiteral("false"), false, false, false},
-        {QStringLiteral("wake_word"), QStringLiteral("listening_cue"), m_listeningCue, true, true, false},
+         m_wakeEager ? QStringLiteral("true") : QStringLiteral("false"), false, false},
+        {QStringLiteral("wake_word"), QStringLiteral("listening_cue"), m_listeningCue, true, true},
         // Endpointing (adele-kde#37): [vad] + [assistant].
         {QStringLiteral("vad"), QStringLiteral("speech_threshold"),
-         formatTomlFloat(m_vadSpeechThreshold), false, false, false},
+         formatTomlFloat(m_vadSpeechThreshold), false, false},
         {QStringLiteral("vad"), QStringLiteral("silence_duration_ms"),
-         QString::number(m_vadSilenceDurationMs), false, false, false},
+         QString::number(m_vadSilenceDurationMs), false, false},
         {QStringLiteral("assistant"), QStringLiteral("followup_timeout_ms"),
-         QString::number(m_followupTimeoutMs), false, false, false},
-        {QStringLiteral("stt"), QStringLiteral("language"), m_sttLanguage, true, false, false},
-        {QStringLiteral("stt"), QStringLiteral("model_path"), m_sttModelPath, true, true, false},
-        {QStringLiteral("tts"), QStringLiteral("backend"), m_ttsBackend, true, false, false},
-        {QStringLiteral("tts"), QStringLiteral("kokoro_lang"), m_kokoroLang, true, false, false},
+         QString::number(m_followupTimeoutMs), false, false},
+        {QStringLiteral("stt"), QStringLiteral("language"), m_sttLanguage, true, false},
+        {QStringLiteral("stt"), QStringLiteral("model_path"), m_sttModelPath, true, true},
+        {QStringLiteral("tts"), QStringLiteral("backend"), m_ttsBackend, true, false},
+        {QStringLiteral("tts"), QStringLiteral("kokoro_lang"), m_kokoroLang, true, false},
         // Persisted voice selection so a restart keeps the user's pick instead
         // of falling back to the daemon default (see setVoice). omit-when-empty
         // so clearing it restores the daemon default.
-        {QStringLiteral("tts"), QStringLiteral("kokoro_voice"), m_kokoroVoice, true, true, false},
-        {QStringLiteral("tts"), QStringLiteral("polly_voice"), m_pollyVoice, true, true, false},
-        {QStringLiteral("tts"), QStringLiteral("model_path"), m_piperModelPath, true, true, false},
-        {QStringLiteral("tts"), QStringLiteral("polly_engine"), m_pollyEngine, true, false, false},
-        {QStringLiteral("tts"), QStringLiteral("polly_region"), m_pollyRegion, true, true, false},
+        {QStringLiteral("tts"), QStringLiteral("kokoro_voice"), m_kokoroVoice, true, true},
+        {QStringLiteral("tts"), QStringLiteral("polly_voice"), m_pollyVoice, true, true},
+        {QStringLiteral("tts"), QStringLiteral("model_path"), m_piperModelPath, true, true},
+        {QStringLiteral("tts"), QStringLiteral("polly_engine"), m_pollyEngine, true, false},
+        {QStringLiteral("tts"), QStringLiteral("polly_region"), m_pollyRegion, true, true},
     };
 
-    auto formatLine = [](const Target &t) -> QString {
-        const QString rhs = t.quoted ? (QLatin1Char('"') + t.value + QLatin1Char('"')) : t.value;
-        return t.key + QStringLiteral(" = ") + rhs;
-    };
-    // Whether a target should actually be written. An omit-when-empty target
-    // with no value is dropped (not emitted, and its existing line removed).
-    auto shouldEmit = [](const Target &t) -> bool {
-        return !(t.omitWhenEmpty && t.value.isEmpty());
-    };
-
-    // First pass: update existing keys in place within their section. For a
-    // dropped (omit-when-empty, blank) target we mark it done and skip the line
-    // so the key disappears from the file.
-    QString currentSection;
-    QStringList merged;
-    for (const QString &raw : lines) {
-        const QString trimmed = raw.trimmed();
-        if (trimmed.startsWith(QLatin1Char('[')) && trimmed.endsWith(QLatin1Char(']'))) {
-            currentSection = trimmed.mid(1, trimmed.size() - 2).trimmed();
-            merged.push_back(raw);
-            continue;
-        }
-        bool replaced = false;
-        const int eq = trimmed.indexOf(QLatin1Char('='));
-        if (eq > 0 && !trimmed.startsWith(QLatin1Char('#'))) {
-            const QString key = trimmed.left(eq).trimmed();
-            for (auto &t : targets) {
-                if (!t.done && currentSection == t.section && key == t.key) {
-                    if (shouldEmit(t)) {
-                        merged.push_back(formatLine(t));
-                    }
-                    t.done = true;
-                    replaced = true;
-                    break;
-                }
-            }
-        }
-        if (!replaced) {
-            merged.push_back(raw);
-        }
-    }
-
-    // Second pass: append any keys whose section exists but lacked the key, or
-    // whose section is missing entirely. Group appends by section so we emit a
-    // section header at most once.
-    auto sectionPresent = [&merged](const QString &section) -> bool {
-        const QString header = QStringLiteral("[") + section + QStringLiteral("]");
-        for (const QString &l : merged) {
-            if (l.trimmed() == header) {
-                return true;
-            }
-        }
-        return false;
-    };
-
-    // A target still needs appending only if it's not done AND it should emit.
-    // Mark dropped (omit-when-empty, blank) targets done up front so they
-    // neither force a section to be created nor get appended.
-    for (auto &t : targets) {
-        if (!t.done && !shouldEmit(t)) {
-            t.done = true;
-        }
-    }
-
-    // Collect remaining (not-done) targets grouped by section, preserving order.
-    QStringList sectionsNeedingAppend;
-    for (const auto &t : targets) {
-        if (!t.done && !sectionsNeedingAppend.contains(t.section)) {
-            sectionsNeedingAppend.push_back(t.section);
-        }
-    }
-    for (const QString &section : sectionsNeedingAppend) {
-        if (sectionPresent(section)) {
-            // Insert the missing key(s) right after the existing header.
-            const QString header = QStringLiteral("[") + section + QStringLiteral("]");
-            QStringList rebuilt;
-            for (const QString &l : merged) {
-                rebuilt.push_back(l);
-                if (l.trimmed() == header) {
-                    for (auto &t : targets) {
-                        if (!t.done && t.section == section) {
-                            rebuilt.push_back(formatLine(t));
-                            t.done = true;
-                        }
-                    }
-                }
-            }
-            merged = rebuilt;
-        } else {
-            // Append a fresh section at the end.
-            if (!merged.isEmpty() && !merged.last().trimmed().isEmpty()) {
-                merged.push_back(QString());
-            }
-            merged.push_back(QStringLiteral("[") + section + QStringLiteral("]"));
-            for (auto &t : targets) {
-                if (!t.done && t.section == section) {
-                    merged.push_back(formatLine(t));
-                    t.done = true;
-                }
-            }
-        }
-    }
+    const QStringList merged = voiceconfig::mergeTomlLines(lines, targets);
 
     QFileInfo fileInfo(path);
     QDir dir;
@@ -1659,8 +1568,13 @@ bool DesktopAssistantKcm::writeVoiceConfig()
         Q_EMIT statusTextChanged();
         return false;
     }
-    QFile out(path);
-    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+    // KDE-7 (#62): atomic write. QSaveFile writes to a temp file and renames it
+    // into place on commit(), so a crash / power-loss mid-write can never leave
+    // the voice daemon a truncated config.toml it can't parse (the crash-loop
+    // class the daemon side just fixed). A failed write leaves the old file
+    // untouched.
+    QSaveFile out(path);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Text)) {
         m_statusText = QStringLiteral("Unable to write voice config file");
         Q_EMIT statusTextChanged();
         return false;
@@ -1669,8 +1583,45 @@ bool DesktopAssistantKcm::writeVoiceConfig()
     for (const QString &l : merged) {
         stream << l << '\n';
     }
-    out.close();
+    stream.flush();
+    if (!out.commit()) {
+        m_statusText = QStringLiteral("Unable to write voice config file");
+        Q_EMIT statusTextChanged();
+        return false;
+    }
     return true;
+}
+
+void DesktopAssistantKcm::scheduleVoiceConfigWrite()
+{
+    // KDE-7 (#62): coalesce a burst of setter calls (a slider drag fires its
+    // setter per tick) into a single config.toml write once the value settles.
+    // Re-arming the single-shot timer on each call collapses the burst; the
+    // delay is short enough to feel immediate to the user but long enough to
+    // outlast inter-tick gaps during a drag. flushVoiceConfigWrite() commits any
+    // pending write synchronously when a later action depends on it.
+    constexpr int kVoiceWriteDebounceMs = 400;
+    if (m_voiceWriteDebounce == nullptr) {
+        m_voiceWriteDebounce = new QTimer(this);
+        m_voiceWriteDebounce->setSingleShot(true);
+        connect(m_voiceWriteDebounce, &QTimer::timeout, this, [this]() {
+            writeVoiceConfig();
+        });
+    }
+    m_voiceWriteDebounce->start(kVoiceWriteDebounceMs);
+}
+
+bool DesktopAssistantKcm::flushVoiceConfigWrite()
+{
+    // Cancel any pending debounced write and persist immediately. Used by the
+    // paths that read or act on config.toml right after changing it (reset
+    // buttons, Apply/restart, SetVoice), so a debounced change is never lost or
+    // applied a beat late. Always writes (even with no timer armed) so callers
+    // get a single, authoritative on-disk state.
+    if (m_voiceWriteDebounce != nullptr) {
+        m_voiceWriteDebounce->stop();
+    }
+    return writeVoiceConfig();
 }
 
 bool DesktopAssistantKcm::voiceServiceAvailable() const
@@ -1743,7 +1694,7 @@ void DesktopAssistantKcm::setSttLanguage(const QString &value)
     }
     m_sttLanguage = normalized;
     Q_EMIT voiceConfigChanged();
-    writeVoiceConfig();
+    scheduleVoiceConfigWrite();
 }
 
 QString DesktopAssistantKcm::sttModelPath() const
@@ -1759,7 +1710,7 @@ void DesktopAssistantKcm::setSttModelPath(const QString &value)
     }
     m_sttModelPath = normalized;
     Q_EMIT voiceConfigChanged();
-    writeVoiceConfig();
+    scheduleVoiceConfigWrite();
 }
 
 // --- Whisper STT model selector (adele-kde#44) ------------------------------
@@ -2016,7 +1967,7 @@ void DesktopAssistantKcm::setTtsBackend(const QString &value)
     }
     m_ttsBackend = normalized;
     Q_EMIT voiceConfigChanged();
-    writeVoiceConfig();
+    scheduleVoiceConfigWrite();
 }
 
 QString DesktopAssistantKcm::kokoroLang() const
@@ -2032,7 +1983,7 @@ void DesktopAssistantKcm::setKokoroLang(const QString &value)
     }
     m_kokoroLang = normalized;
     Q_EMIT voiceConfigChanged();
-    writeVoiceConfig();
+    scheduleVoiceConfigWrite();
 }
 
 QString DesktopAssistantKcm::piperModelPath() const
@@ -2048,7 +1999,7 @@ void DesktopAssistantKcm::setPiperModelPath(const QString &value)
     }
     m_piperModelPath = normalized;
     Q_EMIT voiceConfigChanged();
-    writeVoiceConfig();
+    scheduleVoiceConfigWrite();
 }
 
 QString DesktopAssistantKcm::pollyEngine() const
@@ -2067,7 +2018,7 @@ void DesktopAssistantKcm::setPollyEngine(const QString &value)
     }
     m_pollyEngine = normalized;
     Q_EMIT voiceConfigChanged();
-    writeVoiceConfig();
+    scheduleVoiceConfigWrite();
 }
 
 QString DesktopAssistantKcm::pollyRegion() const
@@ -2083,7 +2034,7 @@ void DesktopAssistantKcm::setPollyRegion(const QString &value)
     }
     m_pollyRegion = normalized;
     Q_EMIT voiceConfigChanged();
-    writeVoiceConfig();
+    scheduleVoiceConfigWrite();
 }
 
 double DesktopAssistantKcm::wakeSensitivity() const
@@ -2100,7 +2051,7 @@ void DesktopAssistantKcm::setWakeSensitivity(double value)
     }
     m_wakeSensitivity = clamped;
     Q_EMIT voiceConfigChanged();
-    writeVoiceConfig();
+    scheduleVoiceConfigWrite();
 }
 
 QString DesktopAssistantKcm::inputDevice() const
@@ -2116,7 +2067,7 @@ void DesktopAssistantKcm::setInputDevice(const QString &value)
     }
     m_inputDevice = normalized;
     Q_EMIT voiceConfigChanged();
-    writeVoiceConfig();
+    scheduleVoiceConfigWrite();
 }
 
 QString DesktopAssistantKcm::outputDevice() const
@@ -2132,7 +2083,7 @@ void DesktopAssistantKcm::setOutputDevice(const QString &value)
     }
     m_outputDevice = normalized;
     Q_EMIT voiceConfigChanged();
-    writeVoiceConfig();
+    scheduleVoiceConfigWrite();
 }
 
 double DesktopAssistantKcm::vadSpeechThreshold() const
@@ -2149,7 +2100,7 @@ void DesktopAssistantKcm::setVadSpeechThreshold(double value)
     }
     m_vadSpeechThreshold = clamped;
     Q_EMIT voiceConfigChanged();
-    writeVoiceConfig();
+    scheduleVoiceConfigWrite();
 }
 
 int DesktopAssistantKcm::vadSilenceDurationMs() const
@@ -2165,7 +2116,7 @@ void DesktopAssistantKcm::setVadSilenceDurationMs(int value)
     }
     m_vadSilenceDurationMs = clamped;
     Q_EMIT voiceConfigChanged();
-    writeVoiceConfig();
+    scheduleVoiceConfigWrite();
 }
 
 int DesktopAssistantKcm::followupTimeoutMs() const
@@ -2181,7 +2132,7 @@ void DesktopAssistantKcm::setFollowupTimeoutMs(int value)
     }
     m_followupTimeoutMs = clamped;
     Q_EMIT voiceConfigChanged();
-    writeVoiceConfig();
+    scheduleVoiceConfigWrite();
 }
 
 bool DesktopAssistantKcm::wakeEager() const
@@ -2196,7 +2147,7 @@ void DesktopAssistantKcm::setWakeEager(bool value)
     }
     m_wakeEager = value;
     Q_EMIT voiceConfigChanged();
-    writeVoiceConfig();
+    scheduleVoiceConfigWrite();
 }
 
 QString DesktopAssistantKcm::listeningCue() const
@@ -2212,7 +2163,7 @@ void DesktopAssistantKcm::setListeningCue(const QString &value)
     }
     m_listeningCue = normalized;
     Q_EMIT voiceConfigChanged();
-    writeVoiceConfig();
+    scheduleVoiceConfigWrite();
 }
 
 QVariantList DesktopAssistantKcm::inputDeviceOptions() const
@@ -2331,7 +2282,7 @@ void DesktopAssistantKcm::setVoice(const QString &voiceId, int speaker)
     } else {
         m_kokoroVoice = id;
     }
-    writeVoiceConfig();
+    flushVoiceConfigWrite();
 
     m_statusText = QStringLiteral("Voice set to %1").arg(id);
     Q_EMIT voiceChanged();
@@ -2375,6 +2326,10 @@ void DesktopAssistantKcm::restartVoiceService()
     // sensitivity) only take effect on (re)start, so this applies them without
     // leaving the page. `restart` starts the unit if it was stopped, which is
     // the behaviour we want from a "Restart voice service" button.
+    //
+    // Flush any debounced config write (KDE-7 / #62) first so the daemon re-reads
+    // the user's latest values, not a stale file from before an in-flight write.
+    flushVoiceConfigWrite();
     bool ok = false;
     runSystemctlUser(
         QStringList{QStringLiteral("restart"), QString::fromUtf8(VOICE_UNIT)}, &ok);
@@ -2408,10 +2363,11 @@ bool DesktopAssistantKcm::tryDaemonReload() const
 
 void DesktopAssistantKcm::applyVoiceChanges()
 {
-    // Persist anything still pending, then apply live. Each setter already
-    // writes config.toml, but call it once more so an Apply press after a
-    // programmatic change (e.g. a Reset) is always durable before we reload.
-    writeVoiceConfig();
+    // Persist anything still pending, then apply live. Setters write via a
+    // debounce (KDE-7 / #62), so flush any in-flight write synchronously here —
+    // this guarantees the on-disk config is current before we ask the daemon to
+    // reload/restart, even if Apply was pressed mid-drag.
+    flushVoiceConfigWrite();
 
     if (tryDaemonReload()) {
         m_statusText = QStringLiteral("Voice settings reloaded");
@@ -2741,7 +2697,7 @@ void DesktopAssistantKcm::resetWakeDefaults()
     m_wakeSensitivity = kVoiceDefaultSensitivity;
     m_wakeEager = kVoiceDefaultWakeEager;
     m_listeningCue.clear();
-    writeVoiceConfig();
+    flushVoiceConfigWrite();
     Q_EMIT voiceConfigChanged();
     m_statusText = QStringLiteral("Wake-word settings reset to defaults");
     Q_EMIT statusTextChanged();
@@ -2752,7 +2708,7 @@ void DesktopAssistantKcm::resetEndpointingDefaults()
     m_vadSpeechThreshold = kVoiceDefaultSpeechThreshold;
     m_vadSilenceDurationMs = kVoiceDefaultSilenceDurationMs;
     m_followupTimeoutMs = kVoiceDefaultFollowupTimeoutMs;
-    writeVoiceConfig();
+    flushVoiceConfigWrite();
     Q_EMIT voiceConfigChanged();
     m_statusText = QStringLiteral("Endpointing settings reset to defaults");
     Q_EMIT statusTextChanged();
@@ -2762,7 +2718,7 @@ void DesktopAssistantKcm::resetDeviceDefaults()
 {
     m_inputDevice = QStringLiteral("default");
     m_outputDevice = QStringLiteral("default");
-    writeVoiceConfig();
+    flushVoiceConfigWrite();
     Q_EMIT voiceConfigChanged();
     m_statusText = QStringLiteral("Audio devices set to follow the system default");
     Q_EMIT statusTextChanged();
@@ -2778,7 +2734,7 @@ void DesktopAssistantKcm::resetVoiceTuningDefaults()
     m_followupTimeoutMs = kVoiceDefaultFollowupTimeoutMs;
     m_inputDevice = QStringLiteral("default");
     m_outputDevice = QStringLiteral("default");
-    writeVoiceConfig();
+    flushVoiceConfigWrite();
     Q_EMIT voiceConfigChanged();
     m_statusText = QStringLiteral("Voice tuning reset to defaults");
     Q_EMIT statusTextChanged();
