@@ -579,4 +579,11 @@ private:
     int m_personalityHumor = 2;
     int m_personalitySarcasm = 1;
     int m_personalityPretentiousness = 1;
+    // KDE-8 (#63): true only once a GetConfig reply has passed the ConfigData
+    // signature validation, so the personality block's positional indices are
+    // known to line up with the daemon's struct. pushPersonalityTrait refuses to
+    // send its hand-encoded ConfigPatchArgs while this is false, since a schema
+    // mismatch means the positional patch would write the wrong fields. Starts
+    // false (no trustworthy read yet) and is set by load()'s validated read.
+    bool m_personalitySchemaOk = false;
 };
