@@ -222,4 +222,35 @@ VoiceSelectionReply parseVoiceSelectionReply(const QList<QVariant> &args)
     return out;
 }
 
+int autostartStateToTriState(const QString &state)
+{
+    if (state == QLatin1String("enabled") || state == QLatin1String("enabled-runtime")) {
+        return 1;
+    }
+    if (state == QLatin1String("disabled") || state == QLatin1String("masked")
+        || state == QLatin1String("masked-runtime") || state == QLatin1String("static")) {
+        return 0;
+    }
+    // "not-found", empty, or any unexpected token -> treat as not-installed.
+    return -1;
+}
+
+double peakLevelFromS16le(const QByteArray &pcm)
+{
+    const int count = pcm.size() / static_cast<int>(sizeof(qint16));
+    if (count < 1) {
+        return -1.0;
+    }
+    qint16 peak = 0;
+    const auto *samples = reinterpret_cast<const qint16 *>(pcm.constData());
+    for (int i = 0; i < count; ++i) {
+        const qint16 s = samples[i];
+        const int mag = s < 0 ? -static_cast<int>(s) : static_cast<int>(s);
+        if (mag > peak) {
+            peak = static_cast<qint16>(qMin(mag, 32767));
+        }
+    }
+    return static_cast<double>(peak) / 32767.0;
+}
+
 } // namespace daemonreply

@@ -1425,46 +1425,56 @@ bool DesktopAssistantKcm::probeVoiceAvailable() const
     return reply.isValid() && reply.value();
 }
 
-QString DesktopAssistantKcm::runSystemctlUser(const QStringList &args, bool *ok) const
+void DesktopAssistantKcm::runSystemctlUserAsync(
+    const QStringList &args,
+    std::function<void(const QString &out, bool ok)> done)
 {
-    if (ok != nullptr) {
-        *ok = false;
-    }
-    QProcess proc;
-    proc.start(QStringLiteral("systemctl"), QStringList{QStringLiteral("--user")} + args);
-    if (!proc.waitForStarted(3000)) {
-        return QString();
-    }
-    if (!proc.waitForFinished(5000)) {
-        proc.kill();
-        proc.waitForFinished(1000);
-        return QString();
-    }
-    const QString out = QString::fromUtf8(proc.readAllStandardOutput()).trimmed();
-    if (ok != nullptr) {
-        *ok = proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0;
-    }
-    return out;
+    // Non-blocking `systemctl --user <args>` (KDE-2 / #57, PR 5/5). The old
+    // synchronous QProcess waitForStarted/waitForFinished blocked the System
+    // Settings UI thread up to ~8s (e.g. on a slow/hung systemd). We now spawn
+    // the process parented to `this` and report its trimmed stdout + ok (exit==0)
+    // through `done`, fired exactly once from finished/errorOccurred on the UI
+    // thread. The process self-deletes via deleteLater; if the KCM is destroyed
+    // first the parent-child teardown drops the pending callback.
+    auto *proc = new QProcess(this);
+    auto fired = std::make_shared<bool>(false);
+    auto finish = [proc, fired, done = std::move(done)](const QString &out, bool ok) {
+        if (*fired) {
+            return; // finished + errorOccurred can both arrive; report once.
+        }
+        *fired = true;
+        done(out, ok);
+        proc->deleteLater();
+    };
+
+    connect(proc, &QProcess::errorOccurred, this,
+            [finish](QProcess::ProcessError) { finish(QString(), false); });
+    connect(proc, &QProcess::finished, this,
+            [proc, finish](int exitCode, QProcess::ExitStatus status) {
+                const QString out =
+                    QString::fromUtf8(proc->readAllStandardOutput()).trimmed();
+                finish(out, status == QProcess::NormalExit && exitCode == 0);
+            });
+
+    proc->start(QStringLiteral("systemctl"), QStringList{QStringLiteral("--user")} + args);
 }
 
-int DesktopAssistantKcm::probeVoiceAutostart() const
+void DesktopAssistantKcm::probeVoiceAutostartAsync()
 {
-    // `systemctl --user is-enabled adele-voice.service`:
-    //   "enabled"  -> 1 (starts at login)
-    //   "disabled"/"masked"/anything else -> 0
-    //   unit not installed (non-zero, "not-found"/empty) -> -1 (unknown)
-    bool ok = false;
-    const QString state = runSystemctlUser(
-        QStringList{QStringLiteral("is-enabled"), QString::fromUtf8(VOICE_UNIT)}, &ok);
-    if (state == QLatin1String("enabled") || state == QLatin1String("enabled-runtime")) {
-        return 1;
-    }
-    if (state == QLatin1String("disabled") || state == QLatin1String("masked")
-        || state == QLatin1String("masked-runtime") || state == QLatin1String("static")) {
-        return 0;
-    }
-    // "not-found", empty, or any unexpected token -> treat as not-installed.
-    return -1;
+    // `systemctl --user is-enabled adele-voice.service` (now async, KDE-2 / #57
+    // PR 5/5). Maps the reported state to the tri-state m_voiceAutostart via the
+    // bus-free daemonreply::autostartStateToTriState helper, then emits
+    // voiceChanged so the toggle reflects reality. Re-issued whenever the unit
+    // state may have changed (load, enable/disable, restart).
+    runSystemctlUserAsync(
+        QStringList{QStringLiteral("is-enabled"), QString::fromUtf8(VOICE_UNIT)},
+        [this](const QString &state, bool /*ok*/) {
+            const int tri = daemonreply::autostartStateToTriState(state);
+            if (m_voiceAutostart != tri) {
+                m_voiceAutostart = tri;
+                Q_EMIT voiceChanged();
+            }
+        });
 }
 
 void DesktopAssistantKcm::readVoiceConfig()
@@ -2302,15 +2312,16 @@ void DesktopAssistantKcm::loadVoiceSettings()
     }
 
     // Local-only steps run IMMEDIATELY, never gated on the voice daemon, so the
-    // page (autostart toggle + TOML-backed config fields) is populated even when
-    // the daemon is wedged or absent. probeVoiceAutostart()/readVoiceConfig() are
-    // file/process-side (the systemctl subprocess moves async in PR 5/5).
+    // page (TOML-backed config fields) is populated even when the daemon is
+    // wedged or absent. readVoiceConfig() is pure file I/O; the autostart probe
+    // is now an async systemctl subprocess (KDE-2 / #57, PR 5/5) that updates
+    // m_voiceAutostart + emits voiceChanged when it lands.
     // NB: device enumeration (pactl + arecord/aplay subprocesses) is NOT done
     // here — loadVoiceSettings() runs from the KCM constructor's load(), which
     // fires for every tab of this settings module, so spawning audio tools then
     // would add startup latency even for users who never open the Voice tab. The
     // Voice page calls loadAudioDevices() itself from Component.onCompleted.
-    m_voiceAutostart = probeVoiceAutostart();
+    probeVoiceAutostartAsync();
     readVoiceConfig();
     Q_EMIT voiceChanged();
     Q_EMIT voiceConfigChanged();
@@ -2472,26 +2483,30 @@ void DesktopAssistantKcm::setVoiceAutostart(bool enabled)
         Q_EMIT statusTextChanged();
         return;
     }
-    bool ok = false;
-    runSystemctlUser(
+    // Async enable/disable (KDE-2 / #57, PR 5/5 — was a blocking systemctl
+    // subprocess). Surface a provisional "working" status now, then the real
+    // outcome + a fresh autostart re-probe when the process finishes.
+    m_statusText = enabled ? QStringLiteral("Enabling voice autostart…")
+                           : QStringLiteral("Disabling voice autostart…");
+    Q_EMIT statusTextChanged();
+    runSystemctlUserAsync(
         QStringList{enabled ? QStringLiteral("enable") : QStringLiteral("disable"),
                     QString::fromUtf8(VOICE_UNIT)},
-        &ok);
-    if (!ok) {
-        m_statusText = enabled
-            ? QStringLiteral("Failed to enable voice autostart")
-            : QStringLiteral("Failed to disable voice autostart");
-        Q_EMIT statusTextChanged();
-    } else {
-        m_statusText = enabled
-            ? QStringLiteral("Voice will start at login")
-            : QStringLiteral("Voice autostart disabled");
-        Q_EMIT statusTextChanged();
-    }
-    // Re-probe so the toggle reflects the real unit state (enable can be
-    // refused, e.g. for a static unit).
-    m_voiceAutostart = probeVoiceAutostart();
-    Q_EMIT voiceChanged();
+        [this, enabled](const QString & /*out*/, bool ok) {
+            if (!ok) {
+                m_statusText = enabled
+                    ? QStringLiteral("Failed to enable voice autostart")
+                    : QStringLiteral("Failed to disable voice autostart");
+            } else {
+                m_statusText = enabled
+                    ? QStringLiteral("Voice will start at login")
+                    : QStringLiteral("Voice autostart disabled");
+            }
+            Q_EMIT statusTextChanged();
+            // Re-probe so the toggle reflects the real unit state (enable can be
+            // refused, e.g. for a static unit); this emits voiceChanged itself.
+            probeVoiceAutostartAsync();
+        });
 }
 
 void DesktopAssistantKcm::restartVoiceService()
@@ -2504,15 +2519,25 @@ void DesktopAssistantKcm::restartVoiceService()
     // Flush any debounced config write (KDE-7 / #62) first so the daemon re-reads
     // the user's latest values, not a stale file from before an in-flight write.
     flushVoiceConfigWrite();
-    bool ok = false;
-    runSystemctlUser(
-        QStringList{QStringLiteral("restart"), QString::fromUtf8(VOICE_UNIT)}, &ok);
-    m_statusText = ok ? QStringLiteral("Voice service restarted")
-                      : QStringLiteral("Failed to restart the voice service");
+    // Async restart (KDE-2 / #57, PR 5/5 — was a blocking systemctl subprocess).
+    // Show a provisional status now, then the outcome + a reconcile when it
+    // finishes.
+    m_statusText = QStringLiteral("Restarting voice service…");
     Q_EMIT statusTextChanged();
-    // The restart re-spawns the daemon and re-reads config; reconcile the page
-    // (availability, enabled, voice list, autostart) against the new process.
-    loadVoiceSettings();
+    runSystemctlUserAsync(
+        QStringList{QStringLiteral("restart"), QString::fromUtf8(VOICE_UNIT)},
+        [this](const QString & /*out*/, bool ok) {
+            m_statusText = ok ? QStringLiteral("Voice service restarted")
+                              : QStringLiteral("Failed to restart the voice service");
+            Q_EMIT statusTextChanged();
+            // The restart re-spawns the daemon and re-reads config; reconcile the
+            // page (availability, enabled, voice list, autostart) against the new
+            // process. systemctl returns before the daemon has re-acquired its bus
+            // name, so the live reads here may still see it absent — the
+            // QDBusServiceWatcher installed in load() re-fires loadVoiceSettings()
+            // once the name reappears, which re-enables the picker on its own.
+            loadVoiceSettings();
+        });
 }
 
 void DesktopAssistantKcm::tryDaemonReload(std::function<void(bool)> done)
@@ -2825,15 +2850,24 @@ void DesktopAssistantKcm::loadAudioDevices()
     Q_EMIT audioDevicesChanged();
 }
 
-double DesktopAssistantKcm::measureInputLevel()
+void DesktopAssistantKcm::measureInputLevel()
 {
     // Briefly sample the input device and report a 0..1 peak so the page can
-    // nudge a too-quiet mic (ties into voice#47). We use `pactl` to find the
-    // running source's monitor isn't reliable for input, so instead we read the
-    // source volume peak via a short `parecord` capture and compute the peak
-    // sample magnitude. Returns -1 when no level could be taken.
+    // nudge a too-quiet mic (ties into voice#47), via a short `parecord` capture
+    // whose peak sample magnitude we compute.
+    //
+    // KDE-2 / #57, PR 5/5: this used to BLOCK the UI thread on
+    // waitForStarted/waitForReadyRead/waitForFinished (~0.4–3s). It is now
+    // NON-BLOCKING and void — it spawns the capture, lets a single-shot timer end
+    // it after a short window, and emits inputLevelMeasured(level) when done
+    // (level == -1 on any failure). The QML "Test" button binds micLevel from
+    // that signal. A re-entrancy guard ignores clicks while a capture is running.
+    if (m_inputLevelMeasuring) {
+        return;
+    }
     if (QStandardPaths::findExecutable(QStringLiteral("parecord")).isEmpty()) {
-        return -1.0;
+        Q_EMIT inputLevelMeasured(-1.0);
+        return;
     }
 
     // Raw 16-bit mono so we can scan samples directly; a short capture is enough
@@ -2849,35 +2883,43 @@ double DesktopAssistantKcm::measureInputLevel()
         QStringLiteral("--channels=1"),
     };
 
-    QProcess rec;
-    rec.start(QStringLiteral("parecord"), args);
-    if (!rec.waitForStarted(2000)) {
-        return -1.0;
-    }
-    // Let it capture briefly, then stop and read what we got.
-    rec.waitForReadyRead(400);
-    QByteArray data = rec.readAllStandardOutput();
-    rec.terminate();
-    if (!rec.waitForFinished(1000)) {
-        rec.kill();
-        rec.waitForFinished(500);
-    }
-    data += rec.readAllStandardOutput();
-    if (data.size() < 2) {
-        return -1.0;
-    }
+    m_inputLevelMeasuring = true;
+    m_statusText = QStringLiteral("Measuring microphone level…");
+    Q_EMIT statusTextChanged();
 
-    qint16 peak = 0;
-    const auto *samples = reinterpret_cast<const qint16 *>(data.constData());
-    const int count = data.size() / static_cast<int>(sizeof(qint16));
-    for (int i = 0; i < count; ++i) {
-        const qint16 s = samples[i];
-        const int mag = s < 0 ? -static_cast<int>(s) : static_cast<int>(s);
-        if (mag > peak) {
-            peak = static_cast<qint16>(qMin(mag, 32767));
+    auto *rec = new QProcess(this);
+    auto data = std::make_shared<QByteArray>();
+    auto fired = std::make_shared<bool>(false);
+
+    // Single shared completion path: compute the peak from whatever was captured
+    // and emit exactly once, then tear the process down. Called from the capture
+    // window timer (normal path) and errorOccurred (e.g. parecord missing/failed).
+    auto complete = [this, rec, data, fired](bool failed) {
+        if (*fired) {
+            return;
         }
-    }
-    return static_cast<double>(peak) / 32767.0;
+        *fired = true;
+        *data += rec->readAllStandardOutput();
+        const double level = failed
+            ? -1.0
+            : daemonreply::peakLevelFromS16le(*data);
+        m_inputLevelMeasuring = false;
+        rec->kill();
+        rec->deleteLater();
+        Q_EMIT inputLevelMeasured(level);
+    };
+
+    connect(rec, &QProcess::errorOccurred, this,
+            [complete](QProcess::ProcessError) { complete(true); });
+    connect(rec, &QProcess::readyReadStandardOutput, this,
+            [rec, data]() { *data += rec->readAllStandardOutput(); });
+
+    // End the capture after a short window, then complete on the captured data.
+    // peakLevelFromS16le returns -1 for an empty/sub-sample buffer, so a capture
+    // that produced nothing is reported as "no level" without a special case.
+    QTimer::singleShot(400, this, [complete]() { complete(false); });
+
+    rec->start(QStringLiteral("parecord"), args);
 }
 
 void DesktopAssistantKcm::resetWakeDefaults()

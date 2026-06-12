@@ -411,6 +411,65 @@ private Q_SLOTS:
         const auto r = daemonreply::parseVoiceSelectionReply({});
         QVERIFY(!r.ok);
     }
+
+    // --- autostartStateToTriState (KDE-2 / #57, PR 5/5) ----------------------
+
+    void autostartEnabledIsOne()
+    {
+        QCOMPARE(daemonreply::autostartStateToTriState(QStringLiteral("enabled")), 1);
+        QCOMPARE(daemonreply::autostartStateToTriState(QStringLiteral("enabled-runtime")), 1);
+    }
+
+    void autostartOffStatesAreZero()
+    {
+        QCOMPARE(daemonreply::autostartStateToTriState(QStringLiteral("disabled")), 0);
+        QCOMPARE(daemonreply::autostartStateToTriState(QStringLiteral("masked")), 0);
+        QCOMPARE(daemonreply::autostartStateToTriState(QStringLiteral("masked-runtime")), 0);
+        QCOMPARE(daemonreply::autostartStateToTriState(QStringLiteral("static")), 0);
+    }
+
+    void autostartUnknownIsMinusOne()
+    {
+        QCOMPARE(daemonreply::autostartStateToTriState(QStringLiteral("not-found")), -1);
+        QCOMPARE(daemonreply::autostartStateToTriState(QString()), -1);
+        QCOMPARE(daemonreply::autostartStateToTriState(QStringLiteral("garbage")), -1);
+    }
+
+    // --- peakLevelFromS16le (KDE-2 / #57, PR 5/5) ----------------------------
+
+    void peakLevelEmptyBufferIsMinusOne()
+    {
+        QCOMPARE(daemonreply::peakLevelFromS16le(QByteArray()), -1.0);
+        // A single byte is fewer than one whole s16 sample -> -1.
+        QCOMPARE(daemonreply::peakLevelFromS16le(QByteArray(1, '\x00')), -1.0);
+    }
+
+    void peakLevelSilenceIsZero()
+    {
+        QByteArray pcm(8, '\x00'); // four silent samples
+        QCOMPARE(daemonreply::peakLevelFromS16le(pcm), 0.0);
+    }
+
+    void peakLevelFullScaleIsOne()
+    {
+        // 0x7FFF == 32767 little-endian.
+        QByteArray pcm;
+        pcm.append('\xFF');
+        pcm.append('\x7F');
+        QCOMPARE(daemonreply::peakLevelFromS16le(pcm), 1.0);
+    }
+
+    void peakLevelTakesMaxMagnitudeAcrossSamples()
+    {
+        // Samples: +100 (0x0064), then -16384 (0xC000). Peak magnitude 16384.
+        QByteArray pcm;
+        pcm.append('\x64');
+        pcm.append('\x00');
+        pcm.append('\x00');
+        pcm.append('\xC0');
+        const double level = daemonreply::peakLevelFromS16le(pcm);
+        QVERIFY(level > 0.49 && level < 0.51); // 16384 / 32767 ~= 0.5
+    }
 };
 
 QTEST_MAIN(TestDaemonReply)

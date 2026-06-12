@@ -288,11 +288,17 @@ public:
     /// outputDeviceOptions. Always includes "Follow system default" first.
     Q_INVOKABLE void loadAudioDevices();
 
-    /// Sample the configured (or system-default) input device briefly and return
+    /// Sample the configured (or system-default) input device briefly and report
     /// a 0..1 peak level, so the page can nudge the user when the mic is too
-    /// quiet for reliable wake-word detection (ties into voice#47). Returns -1
-    /// when no level could be measured (no tool / no device).
-    Q_INVOKABLE double measureInputLevel();
+    /// quiet for reliable wake-word detection (ties into voice#47).
+    ///
+    /// KDE-2 / #57, PR 5/5: this used to BLOCK the UI thread ~0.4–3s on a
+    /// `parecord` capture and RETURN the level. It is now NON-BLOCKING and void —
+    /// it spawns the capture async and emits inputLevelMeasured(level) when done
+    /// (level == -1 when no level could be measured: no tool / no device). The
+    /// Voice page sets micLevel from that signal instead of the return value.
+    /// While a measurement is in flight statusText shows "Measuring…".
+    Q_INVOKABLE void measureInputLevel();
 
     /// Reset the wake-word knobs (sensitivity, eager, listening cue) to the
     /// documented defaults and persist them.
@@ -363,6 +369,10 @@ Q_SIGNALS:
     // Any of the seven personality traits changed (adele-kde#42). One shared
     // signal so the page resyncs every slider from a single handler.
     void personalityChanged();
+    // Async input-level measurement finished (KDE-2 / #57, PR 5/5). `level` is a
+    // 0..1 peak, or -1 when none could be measured. The Voice page binds its
+    // micLevel from this (measureInputLevel() is now void/non-blocking).
+    void inputLevelMeasured(double level);
 
 private:
     struct ConnectionProfile {
@@ -447,10 +457,19 @@ private:
     // write synchronously, so no debounced change is ever lost or applied late.
     void scheduleVoiceConfigWrite();
     bool flushVoiceConfigWrite();
-    int probeVoiceAutostart() const; // -1 unknown, 0 off, 1 on
-    // Run `systemctl --user <args>` synchronously; returns trimmed stdout and
-    // sets *ok to the exit==0 result. Empty/!ok on any failure.
-    QString runSystemctlUser(const QStringList &args, bool *ok) const;
+    // Run `systemctl --user <args>` NON-BLOCKING (KDE-2 / #57, PR 5/5 — was a
+    // synchronous QProcess that blocked the UI thread up to ~8s). Spawns a
+    // QProcess parented to `this` and invokes `done(trimmedStdout, ok)` on the UI
+    // thread from its finished/errorOccurred signal exactly once (ok == exit==0).
+    // The process self-deletes on finish; if the KCM is destroyed first the
+    // parent-child teardown cancels the callback.
+    void runSystemctlUserAsync(const QStringList &args,
+                               std::function<void(const QString &out, bool ok)> done);
+    // Asynchronously re-probe the autostart unit state (`is-enabled`) and, when
+    // it lands, update m_voiceAutostart (-1 unknown / 0 off / 1 on) + emit
+    // voiceChanged. Replaces the old blocking int probeVoiceAutostart() (KDE-2 /
+    // #57, PR 5/5).
+    void probeVoiceAutostartAsync();
     // Apply config-file changes live. Tries the daemon's `Reload` D-Bus method
     // (voice#52) asynchronously (KDE-2 / #57, PR 4/5 — was a blocking
     // QDBusInterface::call) and invokes `done(true)` on success, `done(false)`
@@ -540,6 +559,10 @@ private:
     QString m_voiceCurrentId;
     int m_voiceCurrentSpeaker = -1;
     int m_voiceAutostart = -1;
+    // Re-entrancy guard for the async measureInputLevel() (KDE-2 / #57, PR 5/5):
+    // true while a `parecord` capture is in flight, so repeated "Test" clicks
+    // don't spawn overlapping captures. Cleared when the measurement completes.
+    bool m_inputLevelMeasuring = false;
     QString m_sttLanguage = QStringLiteral("en");
     QString m_sttModelPath;
     // Whisper model download (adele-kde#44). The QNAM is created lazily on first

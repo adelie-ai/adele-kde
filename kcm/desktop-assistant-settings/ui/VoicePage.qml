@@ -936,7 +936,18 @@ ColumnLayout {
         QQC2.Button {
             text: "Test"
             icon.name: "audio-input-microphone"
-            onClicked: root.micLevel = kcm.measureInputLevel()
+            // measureInputLevel() is non-blocking (KDE-2 / #57, PR 5/5): it now
+            // returns nothing and reports the result asynchronously via
+            // kcm.inputLevelMeasured(level), handled by the Connections below.
+            onClicked: kcm.measureInputLevel()
+        }
+    }
+
+    // Receive the async microphone-level result (KDE-2 / #57, PR 5/5).
+    Connections {
+        target: kcm
+        function onInputLevelMeasured(level) {
+            root.micLevel = level
         }
     }
 

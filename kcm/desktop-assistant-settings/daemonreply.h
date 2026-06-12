@@ -7,6 +7,7 @@
 // session bus. The async D-Bus plumbing in the KCM (KDE-2 / #57) builds its
 // callbacks on top of these.
 
+#include <QByteArray>
 #include <QList>
 #include <QString>
 #include <QVariant>
@@ -178,5 +179,18 @@ struct VoiceSelectionReply {
 // Parse the flat (si) form of GetVoice's reply arguments. Returns ok == false
 // when fewer than two plain args are present (e.g. the wrapped struct form).
 VoiceSelectionReply parseVoiceSelectionReply(const QList<QVariant> &args);
+
+// Map a `systemctl --user is-enabled <unit>` state token to the KCM's tri-state
+// autostart value (KDE-2 / #57, PR 5/5): 1 = enabled (starts at login),
+// 0 = installed-but-off (disabled/masked/static), -1 = not installed / unknown
+// ("not-found", empty, or any unexpected token). Bus/process-free for testing.
+int autostartStateToTriState(const QString &state);
+
+// Compute the 0..1 peak level of a raw signed-16-bit little-endian mono PCM
+// buffer (the `parecord --raw --format=s16le` output measureInputLevel captures,
+// KDE-2 / #57, PR 5/5). Returns the largest sample magnitude / 32767, or -1.0
+// when the buffer holds fewer than one whole sample (nothing captured). Pure /
+// process-free so it is unit-testable without spawning parecord.
+double peakLevelFromS16le(const QByteArray &pcm);
 
 } // namespace daemonreply
