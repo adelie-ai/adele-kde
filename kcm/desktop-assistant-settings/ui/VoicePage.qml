@@ -249,7 +249,14 @@ ColumnLayout {
             to: 1.0
             stepSize: 0.05
             value: kcm.wakeSensitivity
-            onMoved: kcm.wakeSensitivity = value
+            // Commit on release, not per drag-tick (KDE-7 / #62): the label
+            // below binds to `value` for live feedback while dragging, but the
+            // model (which writes config.toml) is only updated when the handle
+            // is released. `onMoved` (drag) deliberately does NOT write;
+            // keyboard/click steps fire `moved` while not pressed, so those are
+            // handled by the !pressed guard here.
+            onPressedChanged: if (!pressed) kcm.wakeSensitivity = value
+            onMoved: if (!pressed) kcm.wakeSensitivity = value
         }
         QQC2.Label {
             Layout.preferredWidth: 44
@@ -371,7 +378,10 @@ ColumnLayout {
             to: 1.0
             stepSize: 0.05
             value: kcm.vadSpeechThreshold
-            onMoved: kcm.vadSpeechThreshold = value
+            // Commit on release, live label during drag (KDE-7 / #62) — see the
+            // wake-sensitivity slider above for the rationale.
+            onPressedChanged: if (!pressed) kcm.vadSpeechThreshold = value
+            onMoved: if (!pressed) kcm.vadSpeechThreshold = value
         }
         QQC2.Label {
             Layout.preferredWidth: 44
