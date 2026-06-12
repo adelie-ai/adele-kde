@@ -208,4 +208,18 @@ PersonalityConfig parsePersonalityConfig(const QList<QVariant> &args,
     return out;
 }
 
+VoiceSelectionReply parseVoiceSelectionReply(const QList<QVariant> &args)
+{
+    VoiceSelectionReply out;
+    if (args.size() < 2) {
+        // Empty, or the wrapped single-QDBusArgument struct form: the caller
+        // demarshals that case inline (needs a live QDBusArgument).
+        return out;
+    }
+    out.ok = true;
+    out.voiceId = args[0].toString();
+    out.speaker = args[1].toInt();
+    return out;
+}
+
 } // namespace daemonreply

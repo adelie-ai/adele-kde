@@ -364,6 +364,53 @@ private Q_SLOTS:
         const auto r = daemonreply::parsePersonalityReply(args, 18);
         QVERIFY(!r.present);
     }
+
+    // --- parseVoiceSelectionReply (KDE-2 / #57, PR 4/5) ----------------------
+
+    void voiceSelectionParsesFlatForm()
+    {
+        // GetVoice -> (si): the common flattened form, two plain QVariants.
+        const QList<QVariant> args{QStringLiteral("af_heart"), int(2)};
+        const auto r = daemonreply::parseVoiceSelectionReply(args);
+        QVERIFY(r.ok);
+        QCOMPARE(r.voiceId, QStringLiteral("af_heart"));
+        QCOMPARE(r.speaker, 2);
+    }
+
+    void voiceSelectionUnsetSpeakerIsNegativeOne()
+    {
+        const QList<QVariant> args{QStringLiteral("Joanna"), int(-1)};
+        const auto r = daemonreply::parseVoiceSelectionReply(args);
+        QVERIFY(r.ok);
+        QCOMPARE(r.voiceId, QStringLiteral("Joanna"));
+        QCOMPARE(r.speaker, -1);
+    }
+
+    void voiceSelectionExtraArgsParseLeadingPair()
+    {
+        // Defensive: a longer reply still reads the first (id, speaker) pair.
+        const QList<QVariant> args{QStringLiteral("v"), int(0), QStringLiteral("x")};
+        const auto r = daemonreply::parseVoiceSelectionReply(args);
+        QVERIFY(r.ok);
+        QCOMPARE(r.voiceId, QStringLiteral("v"));
+        QCOMPARE(r.speaker, 0);
+    }
+
+    void voiceSelectionWrappedFormNotOk()
+    {
+        // The single-QDBusArgument wrapped struct form (one arg) is not parseable
+        // flat: ok == false so the caller falls back to live demarshalling.
+        const QList<QVariant> args{QStringLiteral("wrapped-struct-placeholder")};
+        const auto r = daemonreply::parseVoiceSelectionReply(args);
+        QVERIFY(!r.ok);
+        QCOMPARE(r.speaker, -1); // default preserved
+    }
+
+    void voiceSelectionEmptyNotOk()
+    {
+        const auto r = daemonreply::parseVoiceSelectionReply({});
+        QVERIFY(!r.ok);
+    }
 };
 
 QTEST_MAIN(TestDaemonReply)

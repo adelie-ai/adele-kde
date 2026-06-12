@@ -161,4 +161,22 @@ PersonalityConfig parsePersonalityConfig(const QList<QVariant> &args,
                                          const QString &expectedBaseSignature,
                                          int traitCount);
 
+// --- Voice service replies (KDE-2 / #57, PR 4/5) -----------------------------
+// The voice daemon's GetVoice returns (s voice_id, i speaker_id), speaker -1
+// when unset. QtDBus usually flattens that struct into two positional args, but
+// some bindings wrap it in a single QDBusArgument struct. This helper handles
+// the flat case (two-or-more plain QVariants) so the async voice-load handler
+// can parse it without a bus; the wrapped single-QDBusArgument case still needs
+// live demarshalling and is handled inline at the call site.
+struct VoiceSelectionReply {
+    // ok == true only when the flat form was present and parsed. false means the
+    // caller should try the wrapped QDBusArgument form (or keep current state).
+    bool ok = false;
+    QString voiceId;
+    int speaker = -1;
+};
+// Parse the flat (si) form of GetVoice's reply arguments. Returns ok == false
+// when fewer than two plain args are present (e.g. the wrapped struct form).
+VoiceSelectionReply parseVoiceSelectionReply(const QList<QVariant> &args);
+
 } // namespace daemonreply
