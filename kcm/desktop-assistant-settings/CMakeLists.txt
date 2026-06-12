@@ -23,6 +23,7 @@ add_definitions(-DTRANSLATION_DOMAIN="kcm_desktopassistant")
 kcmutils_add_qml_kcm(kcm_desktopassistant
     SOURCES
         desktopassistantkcm.cpp
+        daemonreply.cpp
     INSTALL_NAMESPACE
         plasma/kcms/systemsettings
 )
@@ -38,3 +39,26 @@ target_link_libraries(kcm_desktopassistant
         KF6::CoreAddons
         KF6::KCMUtils
 )
+
+# --- C++ unit tests (KDE-2 / #57) --------------------------------------------
+# adele-kde's first C++ QtTest target. Covers the bus-free daemon-reply parsing
+# helpers (daemonreply.cpp) that the async D-Bus call path is built on; the live
+# D-Bus path itself needs a session bus + System Settings host and is verified
+# by manual QA. Built by default (the local `just check` gate compiles it); make
+# it optional only if a downstream packaging build wants to skip tests.
+option(BUILD_KCM_TESTS "Build the KCM C++ unit tests" ON)
+if(BUILD_KCM_TESTS)
+    find_package(Qt6 REQUIRED COMPONENTS Test)
+    enable_testing()
+
+    add_executable(tst_daemonreply
+        tst_daemonreply.cpp
+        daemonreply.cpp
+    )
+    target_link_libraries(tst_daemonreply
+        PRIVATE
+            Qt6::Core
+            Qt6::Test
+    )
+    add_test(NAME tst_daemonreply COMMAND tst_daemonreply)
+endif()

@@ -6,6 +6,8 @@
 #include <QStringList>
 #include <QVector>
 
+#include <functional>
+
 class QDBusMessage;
 class QDBusServiceWatcher;
 class QFile;
@@ -372,6 +374,23 @@ private:
 
     static QString dbusErrorMessage(const QDBusMessage &message);
     bool setStatusFromDbusError(const QDBusMessage &message);
+
+    // --- Async D-Bus plumbing (KDE-2 / #57) ----------------------------------
+    // Issue an async method call on a daemon interface and invoke `handler`
+    // (on the UI thread) with the finished reply. The call is built with
+    // QDBusMessage::createMethodCall + QDBusConnection::asyncCall (NEVER
+    // QDBusInterface, whose constructor blocks on introspection), so nothing
+    // ever stalls the System Settings UI thread. `timeoutMs` bounds the wait;
+    // the watcher is parented to `this` and self-deletes on finish. `service`,
+    // `path`, and `iface` default to the orchestrator Settings interface.
+    void asyncSettingsCall(const QString &method,
+                           const QVariantList &args,
+                           int timeoutMs,
+                           std::function<void(const QDBusMessage &)> handler,
+                           const char *service = nullptr,
+                           const char *path = nullptr,
+                           const char *iface = nullptr);
+
     int connectionIndexByName(const QString &name) const;
     int selectedConnectionIndex() const;
     void loadWidgetConnectionSettings();
@@ -441,6 +460,12 @@ private:
     void cleanupSttDownload(bool keepError);
 
     static QString voiceConfigPath();
+
+    // Monotonic generation counter bumped on every load(). Each async load
+    // handler captures the value current when it was issued and ignores its
+    // reply if a newer load() has since started, so a slow/stale reply from a
+    // previous load can never clobber fresher state (KDE-2 / #57).
+    quint64 m_loadGeneration = 0;
 
     QString m_statusText;
     bool m_gitEnabled = false;
