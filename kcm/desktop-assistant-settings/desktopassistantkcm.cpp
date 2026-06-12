@@ -499,6 +499,25 @@ const char *const PERSONALITY_SET_FIELDS[PERSONALITY_TRAIT_COUNT] = {
 // personality surface yet and we keep the built-in defaults.
 constexpr int CONFIG_DATA_BASE_FIELDS = 18;
 
+// D-Bus signature of those 18 leading ConfigData fields, in declaration order
+// (desktop-assistant crates/dbus-interface/src/settings.rs `struct ConfigData`):
+//   llm_connector(s) llm_model(s) llm_base_url(s) llm_has_api_key(b)
+//   embeddings_connector(s) embeddings_model(s) embeddings_base_url(s)
+//   embeddings_has_api_key(b) embeddings_available(b) embeddings_is_default(b)
+//   persistence_enabled(b) persistence_remote_url(s) persistence_remote_name(s)
+//   persistence_push_on_update(b) llm_temperature(d) llm_top_p(d)
+//   llm_max_tokens(u) llm_hosted_tool_search(i)
+// KDE-8 (#63) validates the GetConfig reply against this signature before
+// indexing the trailing personality block, so a daemon field inserted ahead of
+// the block is detected (schema mismatch -> keep defaults) instead of silently
+// shifting garbage into the 0..4-clamped traits. Must stay in sync with
+// ConfigData; its length must equal CONFIG_DATA_BASE_FIELDS (asserted below).
+constexpr auto CONFIG_DATA_BASE_SIGNATURE = "sssbsssbbbbssbddui";
+static_assert(std::char_traits<char>::length(CONFIG_DATA_BASE_SIGNATURE)
+                  == static_cast<size_t>(CONFIG_DATA_BASE_FIELDS),
+              "CONFIG_DATA_BASE_SIGNATURE must describe exactly "
+              "CONFIG_DATA_BASE_FIELDS leading ConfigData fields");
+
 int clampTrait(int value)
 {
     return std::clamp(value, 0, 4);
@@ -561,6 +580,23 @@ void DesktopAssistantKcm::pushPersonalityTrait(const char *setField, int value)
     // The leading (pre-personality) patch fields mirror the current daemon's
     // input signature (bsbsbsbsbsbsbsbbbsbsbbbdbdbubi); the 7 trailing
     // bool+u32 pairs are the personality block #226 appends.
+    //
+    // KDE-8 (#63): this patch is hand-encoded POSITIONALLY, so it is only safe
+    // when the daemon's config struct matches the shape we assume. load() sets
+    // m_personalitySchemaOk once a GetConfig reply has passed signature
+    // validation; if it never did (daemon down at load, pre-#226 daemon, or a
+    // schema mismatch) the positional patch could write the wrong fields, so we
+    // refuse to push and surface why. The in-memory slider value still updated,
+    // so the UI reflects the user's choice — it just isn't persisted to a daemon
+    // whose schema we can't trust.
+    if (!m_personalitySchemaOk) {
+        m_statusText = QStringLiteral(
+            "Personality not saved: the desktop-assistant daemon's config schema "
+            "could not be validated (daemon unavailable or version mismatch).");
+        Q_EMIT statusTextChanged();
+        return;
+    }
+
     const QString setName = QString::fromLatin1(setField);
 
     QDBusArgument patch;
@@ -619,6 +655,13 @@ void DesktopAssistantKcm::load()
     // was superseded and drop its stale reply — a slow reply from a previous
     // load() must never clobber fresher state.
     const quint64 generation = ++m_loadGeneration;
+
+    // KDE-8 (#63): distrust the daemon's config schema until a GetConfig reply
+    // for THIS load() passes signature validation below. Resetting here means a
+    // reply that never arrives (daemon down) or is superseded leaves the
+    // positional SetConfig push correctly disabled (pushPersonalityTrait guards
+    // on this flag).
+    m_personalitySchemaOk = false;
 
     // The legacy single-LLM/embeddings settings (GetLlmSettings /
     // GetEmbeddingsSettings) are no longer surfaced by this KCM: model
@@ -780,10 +823,24 @@ void DesktopAssistantKcm::load()
     // Personality (adele-kde#42): the seven traits have no granular getter, so
     // the aggregate GetConfig is the only read path. QtDBus flattens the
     // returned ConfigData struct into one positional arg per field; the
-    // personality u32s are the trailing block after CONFIG_DATA_BASE_FIELDS. A
-    // daemon error (down) or a pre-#226 daemon (shorter reply) keeps the
-    // built-in defaults. A reply shape/signature mismatch is hardened further
-    // client-side in KDE-8 (#63).
+    // personality u32s are the trailing block after CONFIG_DATA_BASE_FIELDS.
+    //
+    // KDE-8 (#63): the block is read by FIXED positional index, so a daemon field
+    // inserted ahead of it would silently shift plausible-looking garbage into
+    // the 0..4-clamped sliders. Guard against that by validating the reply
+    // against the expected ConfigData signature before indexing
+    // (parsePersonalityConfig): the leading fields must match
+    // CONFIG_DATA_BASE_SIGNATURE and the reply must end in exactly seven u32
+    // traits. On a clean validation we populate and mark the schema OK (so the
+    // SetConfig push is allowed). A daemon error (down) keeps defaults and is the
+    // section's recorded outcome. A bare pre-#226 daemon (exactly the base
+    // fields, no personality block) is the expected older case — keep defaults,
+    // no error, schema stays not-ok so we never push. Any other shape is a schema
+    // mismatch: keep defaults, leave the schema NOT-ok (blocks the positional
+    // push), and surface a clear status (it ranks below an outright daemon error
+    // in load()'s status precedence). m_personalitySchemaOk is reset before the
+    // reads (see top of load()), so a superseded/never-arriving reply leaves the
+    // push correctly disabled.
     asyncSettingsCall(
         QStringLiteral("GetConfig"), {}, DBUS_TIMEOUT_DEFAULT_MS,
         [this, applyOutcome](const QDBusMessage &reply) {
@@ -791,19 +848,31 @@ void DesktopAssistantKcm::load()
                 applyOutcome(dbusErrorMessage(reply));
                 return;
             }
-            const auto parsed = daemonreply::parsePersonalityReply(
-                reply.arguments(), CONFIG_DATA_BASE_FIELDS);
-            if (!applyOutcome(QString())) {
+            const auto configArgs = reply.arguments();
+            if (configArgs.size() == CONFIG_DATA_BASE_FIELDS) {
+                // Pre-#226 daemon: no personality surface. Keep defaults; this is
+                // not an error, and the schema stays not-ok so we never push.
+                applyOutcome(QString());
                 return;
             }
-            if (parsed.present) {
-                m_personalityProfessionalism = parsed.professionalism;
-                m_personalityWarmth = parsed.warmth;
-                m_personalityDirectness = parsed.directness;
-                m_personalityEnthusiasm = parsed.enthusiasm;
-                m_personalityHumor = parsed.humor;
-                m_personalitySarcasm = parsed.sarcasm;
-                m_personalityPretentiousness = parsed.pretentiousness;
+            const auto pc = daemonreply::parsePersonalityConfig(
+                configArgs,
+                QString::fromLatin1(CONFIG_DATA_BASE_SIGNATURE),
+                PERSONALITY_TRAIT_COUNT);
+            // A schema mismatch is this section's recorded error; a clean parse is
+            // a clean outcome. Either way applyOutcome decides staleness + status.
+            if (!applyOutcome(pc.signatureOk ? QString() : pc.error)) {
+                return; // superseded — drop without touching fields/schema flag
+            }
+            if (pc.signatureOk) {
+                m_personalitySchemaOk = true;
+                m_personalityProfessionalism = pc.professionalism;
+                m_personalityWarmth = pc.warmth;
+                m_personalityDirectness = pc.directness;
+                m_personalityEnthusiasm = pc.enthusiasm;
+                m_personalityHumor = pc.humor;
+                m_personalitySarcasm = pc.sarcasm;
+                m_personalityPretentiousness = pc.pretentiousness;
                 Q_EMIT personalityChanged();
             }
         });
