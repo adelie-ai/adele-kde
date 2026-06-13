@@ -41,6 +41,10 @@ target_link_libraries(kcm_desktopassistant
         KF6::KCMUtils
 )
 
+# Warnings-as-errors. cmake_minimum_required is 3.20 (< 3.24), so the global
+# CMAKE_COMPILE_WARNING_AS_ERROR variable isn't available; enforce per-target.
+target_compile_options(kcm_desktopassistant PRIVATE -Werror)
+
 # --- C++ unit tests (KDE-2 / #57) --------------------------------------------
 # adele-kde's first C++ QtTest target. Covers the bus-free daemon-reply parsing
 # helpers (daemonreply.cpp) that the async D-Bus call path is built on; the live
