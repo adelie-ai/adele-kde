@@ -319,8 +319,8 @@ Kirigami.OverlaySheet {
             color: Kirigami.Theme.disabledTextColor
             // Documents exactly what the hard cap does, per connector kind.
             text: connectorType === "ollama"
-                ? "Hard ceiling on the context window, in tokens. Leave blank for “Max available” — the assistant uses the model's full reported window (e.g. 32k for qwen2.5). Set a number to cap it lower, e.g. 16384 if the model's full window won't fit in RAM on this machine. The effective window is min(this, the model's reported max); that same value is sent to Ollama as num_ctx and used as the prompt budget, so they always agree."
-                : "Hard ceiling on the context window, in tokens. Leave blank for “Max available” — the assistant uses the model's full window. Set a number to cap how much context the assistant will pack per request (effective = min(this, the model's window)), e.g. to bound cost on a metered API even if the model supports far more."
+                ? "Hard ceiling on the context window, in tokens — a down-only cap. Leave blank for no cap; the window then follows the model's default and your per-purpose context setting. Set a number to hold the window at no more than this, e.g. 16384 if the model's full window won't fit in RAM on this machine. The cap lowers the num_ctx sent to Ollama and the prompt budget together, so they stay consistent."
+                : "Hard ceiling on the context window, in tokens — a down-only cap. Leave blank for “Max available” (the model's full window). Set a number to cap how much context the assistant packs per request (effective = min(this, the model's window)), e.g. to bound cost on a metered API even if the model supports far more."
         }
 
         QQC2.Label {
