@@ -38,6 +38,13 @@ Kirigami.OverlaySheet {
 
     // Shared
     property string fieldBaseUrl: ""
+    // Streaming stall budgets (seconds); blank = use the connector default.
+    // Supported on every connector; most useful for slow local Ollama models.
+    property string fieldConnectTimeout: ""
+    property string fieldStreamTimeout: ""
+    // Context length hard cap (tokens); blank = "Max available". See the help
+    // text on the field below. Supported on every connector.
+    property string fieldMaxContextTokens: ""
     // Anthropic + OpenAI
     property string fieldApiKeyEnv: ""
     property string fieldApiKeyInput: ""
@@ -46,6 +53,7 @@ Kirigami.OverlaySheet {
     property string fieldRegion: ""
     // Ollama
     property bool fieldAutoPull: false
+    property bool fieldKeepWarm: false
     // Bedrock models refresh state
     property string refreshStatus: ""
     property var refreshedModels: []
@@ -55,11 +63,15 @@ Kirigami.OverlaySheet {
         connectionId = ""
         isNew = true
         fieldBaseUrl = ""
+        fieldConnectTimeout = ""
+        fieldStreamTimeout = ""
+        fieldMaxContextTokens = ""
         fieldApiKeyEnv = ""
         fieldApiKeyInput = ""
         fieldAwsProfile = ""
         fieldRegion = ""
         fieldAutoPull = false
+        fieldKeepWarm = false
         refreshStatus = ""
         refreshedModels = []
         open()
@@ -69,19 +81,28 @@ Kirigami.OverlaySheet {
         connectorType = String(item.connector_type || "").toLowerCase()
         connectionId = String(item.id || "")
         isNew = false
-        fieldBaseUrl = ""
-        fieldApiKeyEnv = ""
         fieldApiKeyInput = ""
-        fieldAwsProfile = ""
-        fieldRegion = ""
-        fieldAutoPull = false
         refreshStatus = ""
         refreshedModels = []
-        // The daemon never returns secrets or the full config on
-        // `ListConnections`, only the aggregate view. Editing therefore
-        // starts from blank fields — users re-enter env var names and
-        // toggles, and existing secrets remain in place unless an API key
-        // is explicitly provided.
+        // The daemon echoes the stored *non-secret* config on `ListConnections`
+        // (`ConnectionView.config`), so pre-fill from it. This matters because
+        // `update_connection` REPLACES the whole connection — without pre-fill,
+        // saving a keep-warm/timeout tweak would wipe an existing base_url.
+        // API-key *values* are never echoed (only the env-var name) and stay
+        // in the keyring untouched unless a new value is typed below.
+        var c = item.config || {}
+        fieldBaseUrl = String(c.base_url || "")
+        fieldApiKeyEnv = String(c.api_key_env || "")
+        fieldAwsProfile = String(c.aws_profile || "")
+        fieldRegion = String(c.region || "")
+        fieldAutoPull = false
+        fieldConnectTimeout = (c.connect_timeout_secs !== undefined && c.connect_timeout_secs !== null)
+            ? String(c.connect_timeout_secs) : ""
+        fieldStreamTimeout = (c.stream_timeout_secs !== undefined && c.stream_timeout_secs !== null)
+            ? String(c.stream_timeout_secs) : ""
+        fieldMaxContextTokens = (c.max_context_tokens !== undefined && c.max_context_tokens !== null)
+            ? String(c.max_context_tokens) : ""
+        fieldKeepWarm = c.keep_warm === true
         open()
     }
 
@@ -103,6 +124,10 @@ Kirigami.OverlaySheet {
             if (fieldBaseUrl.trim().length > 0) config.base_url = fieldBaseUrl.trim()
         } else if (connectorType === "ollama") {
             if (fieldBaseUrl.trim().length > 0) config.base_url = fieldBaseUrl.trim()
+            // Keep this connection's interactive model resident in Ollama's
+            // memory (maps to `OllamaConnection.keep_warm`). Only send `true`;
+            // omit when off so the field round-trips cleanly.
+            if (fieldKeepWarm) config.keep_warm = true
             // `auto_pull` is a UI intent that doesn't map to a daemon field
             // today (see ConnectionConfigView::Ollama). We stash it into a
             // future-proof `_meta` key so the field survives round-trips
@@ -111,6 +136,19 @@ Kirigami.OverlaySheet {
             refreshStatus = "Unsupported connector type: " + connectorType
             return
         }
+
+        // Streaming stall budgets apply to every connector. Blank → omit
+        // (use the connector default); a positive integer → override seconds.
+        const connectSecs = parseInt(fieldConnectTimeout.trim(), 10)
+        if (!isNaN(connectSecs) && connectSecs > 0) config.connect_timeout_secs = connectSecs
+        const streamSecs = parseInt(fieldStreamTimeout.trim(), 10)
+        if (!isNaN(streamSecs) && streamSecs > 0) config.stream_timeout_secs = streamSecs
+
+        // Context length hard cap applies to every connector. Blank → omit =
+        // "Max available" (use the model's reported/curated window); a positive
+        // integer caps the effective window to min(value, model max).
+        const maxCtx = parseInt(fieldMaxContextTokens.trim(), 10)
+        if (!isNaN(maxCtx) && maxCtx > 0) config.max_context_tokens = maxCtx
 
         const variant = isNew ? "create_connection" : "update_connection"
         kcm.daemonCall(variant, { id: id, config: config }, function(result, error) {
@@ -219,6 +257,81 @@ Kirigami.OverlaySheet {
             }
         }
 
+        // Streaming stall budgets (all connectors). Most useful for Ollama,
+        // where a large model on CPU can take longer than the 30s default just
+        // to return its first token.
+        RowLayout {
+            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "bedrock" || connectorType === "ollama"
+            Layout.fillWidth: true
+            QQC2.Label {
+                text: "Connect timeout (s)"
+                Layout.preferredWidth: 160
+            }
+            QQC2.TextField {
+                Layout.fillWidth: true
+                inputMethodHints: Qt.ImhDigitsOnly
+                validator: IntValidator { bottom: 0 }
+                placeholderText: "default 30 — blank to keep"
+                text: fieldConnectTimeout
+                onTextEdited: fieldConnectTimeout = text
+            }
+        }
+
+        RowLayout {
+            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "bedrock" || connectorType === "ollama"
+            Layout.fillWidth: true
+            QQC2.Label {
+                text: "Stream timeout (s)"
+                Layout.preferredWidth: 160
+            }
+            QQC2.TextField {
+                Layout.fillWidth: true
+                inputMethodHints: Qt.ImhDigitsOnly
+                validator: IntValidator { bottom: 0 }
+                placeholderText: "default 60 — blank to keep"
+                text: fieldStreamTimeout
+                onTextEdited: fieldStreamTimeout = text
+            }
+        }
+
+        RowLayout {
+            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "bedrock" || connectorType === "ollama"
+            Layout.fillWidth: true
+            QQC2.Label {
+                text: "Context length hard cap"
+                Layout.preferredWidth: 160
+            }
+            QQC2.TextField {
+                Layout.fillWidth: true
+                inputMethodHints: Qt.ImhDigitsOnly
+                validator: IntValidator { bottom: 0 }
+                placeholderText: "Max available"
+                text: fieldMaxContextTokens
+                onTextEdited: fieldMaxContextTokens = text
+            }
+        }
+
+        QQC2.Label {
+            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "bedrock" || connectorType === "ollama"
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+            font: Kirigami.Theme.smallFont
+            color: Kirigami.Theme.disabledTextColor
+            // Documents exactly what the hard cap does, per connector kind.
+            text: connectorType === "ollama"
+                ? "Hard ceiling on the context window, in tokens. Leave blank for “Max available” — the assistant uses the model's full reported window (e.g. 32k for qwen2.5). Set a number to cap it lower, e.g. 16384 if the model's full window won't fit in RAM on this machine. The effective window is min(this, the model's reported max); that same value is sent to Ollama as num_ctx and used as the prompt budget, so they always agree."
+                : "Hard ceiling on the context window, in tokens. Leave blank for “Max available” — the assistant uses the model's full window. Set a number to cap how much context the assistant will pack per request (effective = min(this, the model's window)), e.g. to bound cost on a metered API even if the model supports far more."
+        }
+
+        QQC2.Label {
+            visible: connectorType === "ollama"
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+            font: Kirigami.Theme.smallFont
+            color: Kirigami.Theme.disabledTextColor
+            text: "Tip: a large Ollama model on CPU can take well over 30s for its first token. Raise the connect timeout, and enable keep-warm below, if you see “Ollama stream stalled”."
+        }
+
         // Bedrock fields
         RowLayout {
             visible: connectorType === "bedrock"
@@ -292,6 +405,23 @@ Kirigami.OverlaySheet {
                 text: "Auto-pull missing models"
                 checked: fieldAutoPull
                 onToggled: fieldAutoPull = checked
+            }
+        }
+
+        RowLayout {
+            visible: connectorType === "ollama"
+            Layout.fillWidth: true
+            QQC2.CheckBox {
+                text: "Keep interactive model warm"
+                checked: fieldKeepWarm
+                onToggled: fieldKeepWarm = checked
+            }
+            QQC2.Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                font: Kirigami.Theme.smallFont
+                color: Kirigami.Theme.disabledTextColor
+                text: "Periodically re-loads the interactive model so replies aren't delayed by a cold load. Only the interactive model is kept resident."
             }
         }
 
