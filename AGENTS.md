@@ -12,6 +12,34 @@ Three pieces that all talk to `desktop-assistant-daemon`:
 
 This is a mixed-language repo (QML / Python / C++) — the per-piece conventions below matter more than usual.
 
+## Transport: D-Bus is the default
+
+KDE clients talk to the daemon over **D-Bus**, and only D-Bus, unless there is a
+very good reason **documented in this section**. D-Bus is the canonical desktop
+IPC, it keeps the KCM and the plasmoids consistent, and — because Qt ships
+`Qt6::DBus` — a native D-Bus client adds nothing to the installed footprint. (A
+Rust/UDS-FFI client, by contrast, statically links the entire Rust runtime into a
+shipped `.so`; and voice is D-Bus-only regardless, so a non-D-Bus chat path would
+mean two IPC mechanisms inside one widget.)
+
+- **Front door:** the daemon's standalone bridge owns `org.desktopAssistant`, with
+  interfaces `Conversations` (CRUD + `SendPrompt` + `SubscribeConversations` + the
+  streamed `ResponseChunk` / `ResponseComplete` / `ResponseError` /
+  `UserMessageAdded` / `ConversationListChanged` / `ClientToolCall` signals),
+  `Commands` (a generic `SendCommand` escape hatch), `Connections` (incl.
+  `ListAvailableModels`), `Knowledge`, `Settings`, `BackgroundTasks` (+ `Task*`
+  signals), and `Reload`. **Voice is a separate service:**
+  `org.desktopAssistant.Voice` (state / enabled / push-to-talk / stop / voices).
+- **Native clients use QtDBus** (`Qt6::DBus`). The KCM does this from its C++. The
+  plasmoid chat does it through a C++ `QObject` — the `org.desktopassistant.client`
+  QML plugin — that owns the D-Bus connection and re-emits signals to QML. **QML
+  never opens D-Bus directly.** Because the plugin holds a persistent connection it
+  consumes the live signals (no polling).
+- **Don't** reach for UDS-direct, a Rust FFI over the UDS `Connector`, or a raw
+  WebSocket for a KDE client. If an interface is missing, **extend the bridge**
+  first. Only if that is genuinely impractical may you deviate — and then record
+  the what and the why right here so the next contributor sees it.
+
 ## Where things live
 
 - `plasmoid/<name>/contents/` — per-plasmoid QML and metadata.
