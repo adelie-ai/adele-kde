@@ -1,8 +1,9 @@
 /*
  * Purposes page (issue adele-kde#1).
  *
- * Shows one row per purpose — interactive / dreaming / embedding / titling —
- * and lets the user bind each to a `(connection, model, effort)` tuple via
+ * Shows one row per purpose — interactive / dreaming (extraction) /
+ * consolidation / titling / embedding — and lets the user bind each to a
+ * `(connection, model, effort)` tuple via
  * the daemon's `GetPurposes` / `SetPurpose` commands. Connection and model
  * dropdowns are populated from `ListConnections` and `ListAvailableModels`.
  *
@@ -29,12 +30,37 @@ ColumnLayout {
 
     // Keys are the purpose slugs; mirror the daemon's PurposeKindApi. Order
     // matters in the UI so we walk this list rather than iterating over
-    // the response object directly.
+    // the response object directly. Each entry carries a short `description`
+    // surfaced via a hover info-icon, keeping the row itself terse.
     readonly property var purposeOrder: [
-        { key: "interactive", label: "Interactive (chat)" },
-        { key: "titling", label: "Titling (conversation names)" },
-        { key: "dreaming", label: "Dreaming (background memory)" },
-        { key: "embedding", label: "Embedding (semantic search)" },
+        {
+            key: "interactive",
+            label: "Interactive (chat)",
+            description: "The model that powers live conversation with you."
+        },
+        {
+            key: "dreaming",
+            label: "Dreaming: Extraction (quick/cheap)",
+            description: "Frequent, lightweight pass that pulls durable facts out of each "
+                + "conversation into the knowledge base. A small or local model is fine here."
+        },
+        {
+            key: "consolidation",
+            label: "Dreaming: Consolidation (slower, bigger model)",
+            description: "Slower daily pass that reviews the whole knowledge base to merge "
+                + "duplicates, tighten entries, and prune low-value notes. Benefits from a "
+                + "stronger model."
+        },
+        {
+            key: "titling",
+            label: "Titling (conversation names)",
+            description: "Generates short titles for conversations."
+        },
+        {
+            key: "embedding",
+            label: "Embedding (semantic search)",
+            description: "Produces the vectors used for knowledge-base semantic search."
+        },
     ]
 
     function reload() {
@@ -88,6 +114,7 @@ ColumnLayout {
                 out.push({
                     key: entry.key,
                     label: entry.label,
+                    description: entry.description || "",
                     connection: conn,
                     model: model,
                     effort: cfg.effort ? String(cfg.effort) : "",
@@ -192,9 +219,26 @@ ColumnLayout {
                     contentItem: ColumnLayout {
                         spacing: 4
 
-                        QQC2.Label {
-                            text: purposeCard.rowData.label
-                            font.bold: true
+                        RowLayout {
+                            spacing: Kirigami.Units.smallSpacing
+
+                            QQC2.Label {
+                                text: purposeCard.rowData.label
+                                font.bold: true
+                            }
+
+                            // Exposition lives behind a hover info-icon rather
+                            // than inline text, keeping each row terse.
+                            Kirigami.Icon {
+                                source: "help-contextual"
+                                Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                                Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                                visible: (purposeCard.rowData.description || "").length > 0
+
+                                HoverHandler { id: descHover }
+                                QQC2.ToolTip.visible: descHover.hovered
+                                QQC2.ToolTip.text: purposeCard.rowData.description || ""
+                            }
                         }
 
                         RowLayout {
