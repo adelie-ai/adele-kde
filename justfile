@@ -4,8 +4,6 @@ panel_widget := "plasmoid/org.desktopassistant.panelchat"
 desktop_widget := "plasmoid/org.desktopassistant.desktopchat"
 kcm_dir := "kcm/desktop-assistant-settings"
 kcm_build_dir := "build/kde-kcm"
-client_dir := "client"
-client_build_dir := "build/kde-client"
 panel_widget_id := "org.desktopassistant.panelchat"
 desktop_widget_id := "org.desktopassistant.desktopchat"
 shared_chat_module_src := "shared/chat-module"
@@ -121,29 +119,6 @@ kcm-build:
     cmake --build {{kcm_build_dir}}
     ctest --test-dir {{kcm_build_dir}} --output-on-failure
 
-# Configure + build the native QML client plugin (org.desktopassistant.client),
-# also running its C++ unit tests. Needs cargo + a desktop-assistant checkout
-# (default ../desktop-assistant; override via the DESKTOP_ASSISTANT_DIR env var
-# for worktrees/packaging). Degrades to a skip when those are absent so a
-# QML/Python-only change isn't blocked by the native toolchain.
-client-build:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if ! command -v cargo >/dev/null 2>&1; then
-        echo "client-build: cargo not found — skipping the native QML client plugin." >&2
-        exit 0
-    fi
-    da="${DESKTOP_ASSISTANT_DIR:-../desktop-assistant}"
-    if [ ! -f "$da/crates/client-ffi/Cargo.toml" ]; then
-        echo "client-build: '$da/crates/client-ffi' not found — skipping. Set DESKTOP_ASSISTANT_DIR to build it." >&2
-        exit 0
-    fi
-    extra=()
-    [ -n "${DESKTOP_ASSISTANT_DIR:-}" ] && extra+=("-DDESKTOP_ASSISTANT_DIR=$DESKTOP_ASSISTANT_DIR")
-    cmake -S {{client_dir}} -B {{client_build_dir}} -G Ninja -DCMAKE_BUILD_TYPE=Release "${extra[@]}"
-    cmake --build {{client_build_dir}}
-    ctest --test-dir {{client_build_dir}} --output-on-failure
-
 # System is the only supported install — there is no user-local mode: a ~/.local
 # copy is invisible to a normally launched System Settings yet still shadows the
 # system one, which is what makes settings appear to silently revert. kcm-cleanup
@@ -250,16 +225,15 @@ smoke:
 
 # Clean build artifacts
 clean:
-    rm -rf {{kcm_build_dir}} build/kde-kcm-system {{client_build_dir}}
+    rm -rf {{kcm_build_dir}} build/kde-kcm-system
 
 # --- Local verification ("local CI") -----------------------------------------
 # Run locally instead of GitHub Actions. `install-hooks` wires `check` into a
 # git pre-push hook so it runs automatically before every push. (Not Rust, so
 # there's no cargo gate — this runs the QML/C++/Python checks that apply here.)
 
-# Full local gate: shared-QML drift, qmllint, KCM C++ build, native client
-# plugin build + tests, Python + QML tests
-check: chatview-verify lint kcm-build client-build test
+# Full local gate: shared-QML drift, qmllint, KCM C++ build, Python + QML tests
+check: chatview-verify lint kcm-build test
 
 # Lint every QML file (production + tests) with qmllint; excludes build artifacts
 lint:
