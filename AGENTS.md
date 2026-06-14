@@ -12,33 +12,42 @@ Three pieces that all talk to `desktop-assistant-daemon`:
 
 This is a mixed-language repo (QML / Python / C++) — the per-piece conventions below matter more than usual.
 
-## Transport: D-Bus is the default
+## Transport: D-Bus to the bridge; shared Rust core for chat
 
-KDE clients talk to the daemon over **D-Bus**, and only D-Bus, unless there is a
-very good reason **documented in this section**. D-Bus is the canonical desktop
-IPC, it keeps the KCM and the plasmoids consistent, and — because Qt ships
-`Qt6::DBus` — a native D-Bus client adds nothing to the installed footprint. (A
-Rust/UDS-FFI client, by contrast, statically links the entire Rust runtime into a
-shipped `.so`; and voice is D-Bus-only regardless, so a non-D-Bus chat path would
-mean two IPC mechanisms inside one widget.)
+KDE clients reach the daemon over **D-Bus** — the `org.desktopAssistant` bridge —
+and only D-Bus, unless a deviation is justified and **documented in this section**.
+D-Bus is the canonical desktop IPC and keeps the clients consistent; never bypass
+the bridge (e.g. raw UDS) for a KDE client.
 
-- **Front door:** the daemon's standalone bridge owns `org.desktopAssistant`, with
-  interfaces `Conversations` (CRUD + `SendPrompt` + `SubscribeConversations` + the
-  streamed `ResponseChunk` / `ResponseComplete` / `ResponseError` /
-  `UserMessageAdded` / `ConversationListChanged` / `ClientToolCall` signals),
-  `Commands` (a generic `SendCommand` escape hatch), `Connections` (incl.
-  `ListAvailableModels`), `Knowledge`, `Settings`, `BackgroundTasks` (+ `Task*`
-  signals), and `Reload`. **Voice is a separate service:**
-  `org.desktopAssistant.Voice` (state / enabled / push-to-talk / stop / voices).
-- **Native clients use QtDBus** (`Qt6::DBus`). The KCM does this from its C++. The
-  plasmoid chat does it through a C++ `QObject` — the `org.desktopassistant.client`
-  QML plugin — that owns the D-Bus connection and re-emits signals to QML. **QML
-  never opens D-Bus directly.** Because the plugin holds a persistent connection it
-  consumes the live signals (no polling).
-- **Don't** reach for UDS-direct, a Rust FFI over the UDS `Connector`, or a raw
-  WebSocket for a KDE client. If an interface is missing, **extend the bridge**
-  first. Only if that is genuinely impractical may you deviate — and then record
-  the what and the why right here so the next contributor sees it.
+There are two shapes, by surface:
+
+- **KCM (settings):** talks the bridge directly with **QtDBus** from its C++
+  (`Connections` / `Settings` / `Knowledge`). It is settings-only — no chat state,
+  no shared model needed — so keep it on direct QtDBus.
+
+- **Plasmoid chat (model + controller):** the conversation model/controller is the
+  shared, view-agnostic Rust reducer in the **`client-ui-common`** crate — the same
+  `WindowState` streaming state machine gtk/tui run. **Reuse it; never reimplement
+  it in C++/QML** (that is both a rewrite and a segfault farm). A thin **Rust core**
+  (an FFI cdylib) owns that reducer plus a `client-common` `Connector` in **D-Bus
+  mode** (so the wire transport is still the bridge), runs the reducer's RPC effects
+  itself, and pushes its view effects out to the widget via a callback. The C++/QML
+  side is **glue only**: user input → intent calls; pushed view-effects → QML. Keep
+  C++ minimal — the model+controller and the transport stay in safe Rust.
+
+So, for a KDE client: keep the daemon transport on D-Bus (the bridge) and don't
+bypass it, and for chat **don't reimplement the reducer** — consume
+`client-ui-common` through the thin FFI. If the bridge is missing something the
+reducer needs, **extend the bridge** first. Deviate only if that is genuinely
+impractical — and then record the what and the why right here.
+
+**Bridge surface:** `Conversations` (CRUD + `SendPrompt` + `SubscribeConversations`
++ streamed `ResponseChunk` / `ResponseComplete` / `ResponseError` /
+`UserMessageAdded` / `ConversationListChanged` / `ClientToolCall` + the richer
+status/context/title/warning/scratchpad signals), `Commands` (generic
+`SendCommand`), `Connections` (incl. `ListAvailableModels`), `Knowledge`,
+`Settings`, `BackgroundTasks` (+ `Task*`), `Reload`. Voice is a separate service:
+`org.desktopAssistant.Voice`.
 
 ## Where things live
 
