@@ -111,23 +111,32 @@ KCM.AbstractKCM {
                     width: parent.width
                     spacing: 12
 
-                    QQC2.Label {
+                    RowLayout {
                         Layout.fillWidth: true
-                        wrapMode: Text.Wrap
-                        text: "Backend tasks (title generation, summary compaction, dreaming) use the connection and model assigned to their purpose on the Purposes tab. This page configures the schedule and retention policy."
+                        spacing: Kirigami.Units.smallSpacing
+                        QQC2.Label {
+                            text: "Schedule & retention"
+                            font.bold: true
+                        }
+                        InfoTip {
+                            text: "Backend tasks (title generation, summary compaction, dreaming) use the connection and model assigned to their purpose on the Purposes tab. This page configures the schedule and retention policy."
+                        }
+                        Item { Layout.fillWidth: true }
                     }
 
                     Kirigami.Separator { Layout.fillWidth: true }
 
-                    QQC2.Label {
-                        font.bold: true
-                        text: "Dreaming"
-                    }
-
-                    QQC2.Label {
+                    RowLayout {
                         Layout.fillWidth: true
-                        wrapMode: Text.Wrap
-                        text: "Dreaming periodically reviews conversations and extracts long-term facts into the knowledge base."
+                        spacing: Kirigami.Units.smallSpacing
+                        QQC2.Label {
+                            text: "Dreaming"
+                            font.bold: true
+                        }
+                        InfoTip {
+                            text: "Dreaming periodically reviews conversations and extracts long-term facts into the knowledge base."
+                        }
+                        Item { Layout.fillWidth: true }
                     }
 
                     QQC2.CheckBox {
@@ -177,15 +186,17 @@ KCM.AbstractKCM {
 
                     Kirigami.Separator { Layout.fillWidth: true }
 
-                    QQC2.Label {
-                        font.bold: true
-                        text: "Database"
-                    }
-
-                    QQC2.Label {
+                    RowLayout {
                         Layout.fillWidth: true
-                        wrapMode: Text.Wrap
-                        text: "Optional PostgreSQL database for structured storage. Leave the URL empty to use the built-in SQLite default."
+                        spacing: Kirigami.Units.smallSpacing
+                        QQC2.Label {
+                            text: "Database"
+                            font.bold: true
+                        }
+                        InfoTip {
+                            text: "Optional PostgreSQL database for structured storage. Leave the URL empty to use the built-in SQLite default."
+                        }
+                        Item { Layout.fillWidth: true }
                     }
 
                     RowLayout {
@@ -214,15 +225,17 @@ KCM.AbstractKCM {
 
                     Kirigami.Separator { Layout.fillWidth: true }
 
-                    QQC2.Label {
-                        font.bold: true
-                        text: "Git Versioning"
-                    }
-
-                    QQC2.Label {
+                    RowLayout {
                         Layout.fillWidth: true
-                        wrapMode: Text.Wrap
-                        text: "Version built-in memory and preferences in a local git repository. Optionally push each update to a remote for backup."
+                        spacing: Kirigami.Units.smallSpacing
+                        QQC2.Label {
+                            text: "Git Versioning"
+                            font.bold: true
+                        }
+                        InfoTip {
+                            text: "Version built-in memory and preferences in a local git repository. Optionally push each update to a remote for backup."
+                        }
+                        Item { Layout.fillWidth: true }
                     }
 
                     QQC2.CheckBox {
@@ -277,10 +290,17 @@ KCM.AbstractKCM {
                     width: parent.width
                     spacing: 12
 
-                    QQC2.Label {
+                    RowLayout {
                         Layout.fillWidth: true
-                        wrapMode: Text.Wrap
-                        text: "Define Adelie connections once, set a global default, and let each widget pick a connection by name. 'local' is the default fallback, but any configured connection can be selected as default."
+                        spacing: Kirigami.Units.smallSpacing
+                        QQC2.Label {
+                            text: "Daemon instances"
+                            font.bold: true
+                        }
+                        InfoTip {
+                            text: "Define Adelie connections once, set a global default, and let each widget pick a connection by name. 'local' is the default fallback, but any configured connection can be selected as default."
+                        }
+                        Item { Layout.fillWidth: true }
                     }
 
                     RowLayout {
@@ -424,10 +444,17 @@ KCM.AbstractKCM {
                     width: parent.width
                     spacing: 12
 
-                    QQC2.Label {
+                    RowLayout {
                         Layout.fillWidth: true
-                        wrapMode: Text.Wrap
-                        text: "Configure which authentication methods the WebSocket API accepts. Password uses local OS credentials or a static password. OIDC delegates to an external identity provider."
+                        spacing: Kirigami.Units.smallSpacing
+                        QQC2.Label {
+                            text: "WebSocket authentication"
+                            font.bold: true
+                        }
+                        InfoTip {
+                            text: "Configure which authentication methods the WebSocket API accepts. Password uses local OS credentials or a static password. OIDC delegates to an external identity provider."
+                        }
+                        Item { Layout.fillWidth: true }
                     }
 
                     QQC2.Label {

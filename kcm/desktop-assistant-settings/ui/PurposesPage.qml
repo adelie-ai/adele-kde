@@ -229,15 +229,8 @@ ColumnLayout {
 
                             // Exposition lives behind a hover info-icon rather
                             // than inline text, keeping each row terse.
-                            Kirigami.Icon {
-                                source: "help-contextual"
-                                Layout.preferredWidth: Kirigami.Units.iconSizes.small
-                                Layout.preferredHeight: Kirigami.Units.iconSizes.small
-                                visible: (purposeCard.rowData.description || "").length > 0
-
-                                HoverHandler { id: descHover }
-                                QQC2.ToolTip.visible: descHover.hovered
-                                QQC2.ToolTip.text: purposeCard.rowData.description || ""
+                            InfoTip {
+                                text: purposeCard.rowData.description || ""
                             }
                         }
 
