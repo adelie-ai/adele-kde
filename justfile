@@ -4,6 +4,8 @@ panel_widget := "plasmoid/org.desktopassistant.panelchat"
 desktop_widget := "plasmoid/org.desktopassistant.desktopchat"
 kcm_dir := "kcm/desktop-assistant-settings"
 kcm_build_dir := "build/kde-kcm"
+client_dir := "client"
+client_build_dir := "build/kde-client"
 panel_widget_id := "org.desktopassistant.panelchat"
 desktop_widget_id := "org.desktopassistant.desktopchat"
 shared_chat_module_src := "shared/chat-module"
@@ -119,6 +121,25 @@ kcm-build:
     cmake --build {{kcm_build_dir}}
     ctest --test-dir {{kcm_build_dir}} --output-on-failure
 
+# Build the native client QML plugin (cargo-builds the Rust core) + run its C++ tests
+client-build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Degrade to a skip when cargo or the client-ui-common checkout (with the
+    # `ffi` crate) is absent, so the gate still runs without the Rust toolchain
+    # or the sibling repo set up.
+    if ! command -v cargo >/dev/null 2>&1; then
+        echo "client-build: cargo not found — skipping the native client plugin" >&2
+        exit 0
+    fi
+    if [ ! -f "{{client_dir}}/../../client-ui-common/ffi/Cargo.toml" ]; then
+        echo "client-build: ../client-ui-common/ffi not found — skipping (set up the sibling checkout)" >&2
+        exit 0
+    fi
+    cmake -S {{client_dir}} -B {{client_build_dir}} -G Ninja -DCMAKE_BUILD_TYPE=Debug
+    cmake --build {{client_build_dir}}
+    ctest --test-dir {{client_build_dir}} --output-on-failure
+
 # System is the only supported install — there is no user-local mode: a ~/.local
 # copy is invisible to a normally launched System Settings yet still shadows the
 # system one, which is what makes settings appear to silently revert. kcm-cleanup
@@ -225,15 +246,16 @@ smoke:
 
 # Clean build artifacts
 clean:
-    rm -rf {{kcm_build_dir}} build/kde-kcm-system
+    rm -rf {{kcm_build_dir}} {{client_build_dir}} build/kde-kcm-system
 
 # --- Local verification ("local CI") -----------------------------------------
 # Run locally instead of GitHub Actions. `install-hooks` wires `check` into a
 # git pre-push hook so it runs automatically before every push. (Not Rust, so
 # there's no cargo gate — this runs the QML/C++/Python checks that apply here.)
 
-# Full local gate: shared-QML drift, qmllint, KCM C++ build, Python + QML tests
-check: chatview-verify lint kcm-build test
+# Full local gate: shared-QML drift, qmllint, KCM C++ build, native client
+# plugin (Rust core + C++ tests), Python + QML tests
+check: chatview-verify lint kcm-build client-build test
 
 # Lint every QML file (production + tests) with qmllint; excludes build artifacts
 lint:

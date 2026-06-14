@@ -56,6 +56,7 @@ status/context/title/warning/scratchpad signals), `Commands` (generic
 - `shared/chat-module/code/dbus_client.py` — the Python transport. Both plasmoids and any tooling that needs to talk to the daemon should go through this rather than re-implementing transport.
 - `shared/chat-module/ui/` — QML shared across plasmoids.
 - `kcm/desktop-assistant-settings/` — `CMakeLists.txt`, C++ source (`desktopassistantkcm.cpp/h`), JSON metadata, and `ui/*.qml`.
+- `client/` — the native C++/QML plugin (`org.desktopassistant.client`, element `AdeleCore`) that loads the Rust core cdylib (`libadele_client_core`, built from `client-ui-common/ffi`) and turns its pushed view-events into a Qt `viewEvent(type, data)` signal; intents go out via `Q_INVOKABLE`s. This is the FFI **glue** the Transport section describes — model/controller/transport stay in Rust. Built + unit-tested via `just client-build` (cargo-builds the core; degrades to a skip without cargo or the `../client-ui-common` checkout). The plasmoids' rewire onto it — retiring the Python helper — is in progress.
 
 ## Plasmoid (QML) conventions
 
