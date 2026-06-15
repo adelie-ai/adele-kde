@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
 # D-Bus connectivity smoke test.
 #
-# Run this AFTER a change, WITH the daemon running. It verifies two things the
-# plasmoid depends on but that no unit test can cover (they need a live bus):
-#   1. the daemon owns its well-known name on the session bus, and
-#   2. the widget's OWN client (shared/chat-module/code/dbus_client.py — the
-#      same script the plasmoid runs via its Plasma5Support DataSource) can
-#      round-trip a read-only call over D-Bus.
+# Run AFTER a change, WITH the daemon running. It verifies the D-Bus surface the
+# native chat plugin depends on — the one no unit test can cover (it needs a live
+# bus). The plugin (org.desktopassistant.client → a client-common Connector in
+# D-Bus mode) talks to the daemon's Conversations interface, so we check:
+#   1. the daemon owns its well-known name + Conversations interface, and
+#   2. a read-only ListConversations call round-trips over the session bus
+#      (the same call the Connector issues on connect).
 #
-# Pairs with `just test-qml` (which proves the widgets *load*); together they
-# are wired as `just smoke`. Exits non-zero with a clear reason on any failure.
+# The plugin itself (AdeleCore / VoiceController) is covered by the C++ tests
+# (`just client-build`) and live plasmashell QA; this is the bus-level check.
+# Pairs with `just test-qml` (widgets load); together wired as `just smoke`.
 set -uo pipefail
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 
 SERVICE="${DESKTOP_ASSISTANT_DBUS_SERVICE:-org.desktopAssistant}"
-PY="${PYTHON:-python3}"
-CLIENT="$REPO_ROOT/shared/chat-module/code/dbus_client.py"
+CONV_PATH="/org/desktopAssistant/Conversations"
+CONV_IFACE="org.desktopAssistant.Conversations"
 
 fail() {
     echo "SMOKE FAIL: $*" >&2
@@ -24,44 +24,19 @@ fail() {
 }
 
 # 1) Is the daemon reachable on the session bus?
-echo "[1/3] D-Bus reachable: introspecting ${SERVICE} ..."
+echo "[1/2] D-Bus reachable: introspecting ${SERVICE} ..."
 if ! gdbus introspect --session --dest "$SERVICE" \
-        --object-path /org/desktopAssistant/Conversations >/dev/null 2>&1; then
+        --object-path "$CONV_PATH" >/dev/null 2>&1; then
     fail "${SERVICE} is not on the session bus — is the daemon running? Start it, then re-run."
 fi
 echo "      ok — ${SERVICE} owns the Conversations interface"
 
-# 2) Can the widget's own client round-trip a read-only call?
-echo "[2/3] widget client round-trip: dbus_client.py list ..."
-[ -f "$CLIENT" ] || fail "client not found at ${CLIENT}"
-OUT="$("$PY" "$CLIENT" list 2>&1)" || fail "dbus_client.py exited non-zero: ${OUT}"
-printf '%s' "$OUT" | "$PY" -c '
-import json, sys
-try:
-    d = json.load(sys.stdin)
-except Exception as e:
-    sys.exit("not valid JSON: %s" % e)
-if not isinstance(d, dict) or "conversations" not in d or "error" in d:
-    sys.exit("expected JSON with a conversations key and no error, got: %r" % d)
-print("      ok — %d conversation(s) returned over D-Bus" % len(d["conversations"]))
-' || fail "unexpected dbus_client.py output: ${OUT}"
+# 2) Read-only round-trip — the same ListConversations(max_age_days, include_archived)
+#    call the plugin's Connector makes on connect.
+echo "[2/2] read-only round-trip: ${CONV_IFACE}.ListConversations ..."
+OUT="$(gdbus call --session --dest "$SERVICE" --object-path "$CONV_PATH" \
+        --method "${CONV_IFACE}.ListConversations" 0 false 2>&1)" \
+    || fail "ListConversations failed over D-Bus: ${OUT}"
+echo "      ok — ListConversations round-tripped over D-Bus"
 
-# 3) Does the widget client's own status check agree the daemon is up?
-#    This exercises the status path (NameHasOwner over D-Bus, or a WS ping)
-#    that the unit tests can only stub.
-echo "[3/3] widget client status round-trip: dbus_client.py status ..."
-OUT="$("$PY" "$CLIENT" status 2>&1)" || fail "dbus_client.py status exited non-zero: ${OUT}"
-printf '%s' "$OUT" | "$PY" -c '
-import json, sys
-try:
-    d = json.load(sys.stdin)
-except Exception as e:
-    sys.exit("not valid JSON: %s" % e)
-if not isinstance(d, dict) or "error" in d:
-    sys.exit("status reported an error: %r" % d)
-if not d.get("production_running"):
-    sys.exit("status says the daemon is not running: %r" % d)
-print("      ok — status reports the daemon running over %s" % d.get("transport", "?"))
-' || fail "unexpected dbus_client.py status output: ${OUT}"
-
-echo "SMOKE PASS: ${SERVICE} reachable and the widget client round-trips (list + status) over D-Bus."
+echo "SMOKE PASS: ${SERVICE} reachable and ListConversations round-trips over D-Bus."

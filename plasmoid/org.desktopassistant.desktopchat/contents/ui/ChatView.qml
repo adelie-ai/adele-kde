@@ -1,15 +1,28 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// The KDE chat view. All model/controller/transport logic lives in the shared
+// Rust core (org.desktopassistant.client): `AdeleCore` owns the client-ui-common
+// reducer + a client-common Connector in D-Bus mode (the org.desktopAssistant
+// bridge), and `VoiceController` is native QtDBus glue for the separate voice
+// daemon (org.desktopAssistant.Voice). This QML is a thin VIEW: it renders the
+// deltas the core pushes via `viewEvent(type, data)` and forwards user actions as
+// intents. There is no polling, no daemon parsing, and no Python helper — the
+// reducer already decided what changed, so there is no controller logic here.
+//
+// Live cross-client sync (#367), streaming, the conversation list, and (now, over
+// D-Bus for the first time) the initial loads all flow through the core's signal
+// pump. See the worktree's client/ plugin and client-ui-common/ffi.
+
 import QtQuick
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import QtCore
 import org.kde.kirigami as Kirigami
 import org.kde.plasma.plasmoid
-import org.kde.plasma.core as PlasmaCore
-import org.kde.plasma.components as PlasmaComponents
-import org.kde.plasma.plasma5support as Plasma5Support
+
+import org.desktopassistant.client
 
 import "LinkSafety.js" as LinkSafety
-import "HelperRunner.js" as HelperRunner
 
 Item {
     id: root
@@ -19,90 +32,54 @@ Item {
     property bool panelMode: false
     implicitWidth: 520
     implicitHeight: 620
+
     readonly property color themeBackgroundColor: Kirigami.Theme.backgroundColor
     readonly property color themeTextColor: Kirigami.Theme.textColor
     readonly property color themeDisabledTextColor: Kirigami.Theme.disabledTextColor
     readonly property color themeHighlightColor: Kirigami.Theme.highlightColor
     readonly property color themeHighlightedTextColor: Kirigami.Theme.highlightedTextColor
 
-    // Qt.resolvedUrl returns a percent-encoded file URL; HelperRunner.decodeHelperPath
-    // strips file:// and decodeURIComponent's it back to the real on-disk path
-    // (e.g. "%20" → space) so python3 can find the helper when the install path
-    // contains spaces. The result is always passed through shellEscape() in
-    // helperCommand() before reaching a shell (KDE-11).
-    property string helperPath: HelperRunner.decodeHelperPath(Qt.resolvedUrl("../code/dbus_client.py").toString())
-    property string productionService: "org.desktopAssistant"
-    property string developmentService: "org.desktopAssistant.Dev"
-    readonly property string configuredConnectionName: String(Plasmoid.configuration.connectionName || "").trim()
-    property string runtimeTransportMode: "dbus"
-    readonly property bool usingWsTransport: runtimeTransportMode === "ws"
-    property string activeConnectionName: configuredConnectionName
-    property string activeService: productionService
-    property bool serviceInitialized: false
-    property bool productionServiceRunning: false
-    property bool devServiceRunning: false
+    // --- main.qml contract -------------------------------------------------
+    // The plasmoid shell reads these off the loaded item: a hide flag, the voice
+    // wake-word state for the "Enable Hey Adele" context action, and a tasks
+    // backend + badge-click signal for the process-manager window. Voice state is
+    // forwarded straight from the VoiceController so the shell needs no change.
     readonly property bool hideWidget: false
-    property var serviceChoices: []
+    property alias voiceAvailable: voice.available
+    property alias voiceEnabled: voice.enabled
+    function setVoiceEnabled(enabled) {
+        voice.setEnabled(enabled)
+    }
+    signal tasksBadgeClicked()
+    // Background tasks now arrive over D-Bus via the core, but the tasks panel +
+    // its actions (cancel/logs) need new FFI intents — a focused follow-up. Until
+    // then this backend is inert, so the badge stays hidden (count 0) and the
+    // shell wiring keeps working unchanged.
+    readonly property var tasksBackend: ({
+        get tasks() { return [] },
+        get runningTaskCount() { return 0 },
+        cancelTask: function(_id) {},
+        openConversation: function(id) { root.selectConversationById(id) },
+        refreshLogs: function(_id) {},
+        taskLogs: function(_id) { return "" }
+    })
+
+    // --- view state (driven by the core's viewEvent deltas) ----------------
     property string conversationId: ""
+    property string connectionLabel: ""
+    // The reducer disables sending while a reply streams; we mirror it as `busy`
+    // to gate the composer + flip the header avatar to "thinking".
     property bool busy: false
-    property bool loadingConversation: false
-    property double loadingConversationStartedAtMs: 0
-    property int conversationLoadSequence: 0
-    property bool initialLoadAutoScrollPending: true
-    property bool debugEnabled: false
-    property bool serviceStatusRequestInFlight: false
-    property int currentMessageCount: 0
-    property var transcriptEntries: []
-    property int transcriptEntryIdSeq: 0
-    property var expandedToolEntries: ({})
-    // ── QV4 GC HAZARD — read before touching any of the sites below ──────────
-    // QV4 does not reliably root plain JS local variables (const/let/var) under
-    // GC pressure, and its JIT may hold heap objects in CPU registers that the
-    // GC does not scan.  Creating a multi-property JS object literal and then
-    // storing it under a dynamic string key causes a confirmed plasmawindowed
-    // SEGV in Object::insertMember (Feb 2026): each property set during the
-    // literal's construction calls insertMember, which can trigger a GC cycle,
-    // and if the partially-constructed object is only live in an un-scanned
-    // CPU register the GC collects it mid-construction.
-    //
-    // Safe patterns:
-    //   • Build the whole object in one Object.assign() expression.            (site 1)
-    //   • Compute all fields before calling Object.assign, pass them as the    (site 2)
-    //     initial literal so no post-creation mutation is needed.
-    //   • Assign to a QML property var first (a GC root), then mutate.        (site 3)
-    //   • Use Array.push() for new entries: push uses integer-indexed putIndexed (site 4)
-    //     rather than insertMember, so it never triggers the hazardous code path.
-    //
-    // DO NOT "clean up" these sites by introducing a local variable and then
-    // writing fields to it in separate statements — that is exactly the pattern
-    // that caused confirmed plasmawindowed SEGV crashes (Feb 2026).
-    //
-    // These properties must NOT be readonly: QV4 does not reliably root
-    // readonly var properties under GC pressure.
-    //
-    // pending callbacks are stored in four parallel arrays (site 4) rather than
-    // a plain-object map to avoid the insertMember hazard entirely.  Each
-    // Array.push() call writes to an integer-indexed slot (putIndexed), which
-    // does NOT go through Object::insertMember.
-    property var _pendingCmds: []
-    property var _pendingSuccess: []
-    property var _pendingError: []
-    property var _pendingDebug: []
-    readonly property int maxTranscriptEntries: 400
-    // Configurable UI back-load limit. 0 means full history.
-    // Default is 50 to balance responsiveness and context visibility.
-    readonly property int defaultMaxRenderedMessages: 50
-    readonly property int maxLoadedMessageChars: 12000
-    readonly property int maxLiveMessageChars: 12000
-    readonly property int maxDebugPayloadChars: 1200
-    readonly property int conversationLoadTimeoutMs: 15000
-    property string promptText: ""
-    property int _optimisticUserMsgId: -1
-    property string _optimisticUserMsgText: ""
+    property string statusText: "Connecting…"
+    // Transient "Thinking…" line under the transcript while a turn is in flight.
+    property string chatStatusText: ""
+    // Sidebar list: [{id, title, message_count, archived}].
     property var conversationChoices: []
+    // Index of the in-progress assistant bubble in transcriptModel, or -1.
+    property int streamingIndex: -1
+
+    // --- view configuration (preserved styling) ----------------------------
     property real uiScale: 1.0
-    readonly property string conversationTitle: panelMode ? "Panel Chat" : "Desktop Chat"
-    readonly property real awaitTimeoutSeconds: panelMode ? 45.0 : 60.0
     readonly property real minUiScale: 0.9
     readonly property real maxUiScale: 1.35
     readonly property real zoomStep: 0.05
@@ -122,262 +99,34 @@ Item {
     readonly property string homeDirectory: StandardPaths.writableLocation(StandardPaths.HomeLocation)
     readonly property string accountName: {
         const trimmedHome = String(homeDirectory || "").replace(/\/+$/, "")
-        const chunks = trimmedHome.split("/").filter(function(chunk) {
-            return chunk.length > 0
-        })
+        const chunks = trimmedHome.split("/").filter(function(chunk) { return chunk.length > 0 })
         return chunks.length > 0 ? chunks[chunks.length - 1] : ""
     }
-    readonly property bool hasRealMessages: {
-        for (let i = 0; i < transcriptEntries.length; i++) {
-            if (transcriptEntries[i].kind === "message") return true
-        }
-        return false
-    }
-    property int lateResponsePollRemaining: 0
 
-    // --- Multi-connection model selector (issue adele-kde#1) ------------------
-    // `modelChoices` is a flattened list of `{connection_id, connection_label,
-    // model_id, model_display_name, label}` entries populated from the daemon's
-    // `list_available_models` command. `selectedModelIndex < 0` means "inherit
-    // from the interactive purpose"; the widget sends no override in that case.
-    // `perConversationSelections` is a local cache keyed by conversation id so
-    // switching conversations restores each conversation's most recently chosen
-    // model without a round-trip to the daemon; desktop-assistant#18 will add
-    // a daemon-side `last_model_selection` field on `ConversationView` that we
-    // hydrate from when present.
-    property var modelChoices: []
-    property int selectedModelIndex: -1
-    property var perConversationSelections: ({})
-    property bool modelListLoading: false
-    property var currentConversationWarnings: []
-    // Per-model effort hints (keyed by "connection_id|model_id"). Today the
-    // daemon accepts but does not fully act on effort overrides; we still
-    // send the values so behaviour lights up as desktop-assistant#18 lands.
-    property var modelEffortOverrides: ({})
-    property string autoLabel: "Auto (coming soon)"
-
-    // --- Background tasks (adele-kde#7) --------------------------------------
-    // `tasksList` is the polled `Vec<TaskView>` from the daemon's
-    // `ListBackgroundTasks`. `runningTaskCount` drives the header badge and
-    // is recomputed on every list refresh — Pending and Running both count.
-    // `taskLogBuffers` is a per-task log buffer keyed by id; the QML tasks
-    // window reads it via `taskLogs(id)`. Polling cadence matches the
-    // existing service-status timer (5s) so we don't open a second
-    // long-running subprocess. The pseudo-subscribe call below is a hint to
-    // the daemon and a no-op on D-Bus until #116 ships.
-    property var tasksList: []
-    property int runningTaskCount: 0
-    property var taskLogBuffers: ({})
-    property bool tasksFetchInFlight: false
-
-    readonly property var tasksBackend: ({
-        get tasks() { return root.tasksList },
-        get runningTaskCount() { return root.runningTaskCount },
-        cancelTask: function(id) { root.cancelBackgroundTask(id) },
-        openConversation: function(id) { root.openTaskConversation(id) },
-        refreshLogs: function(id) { root.refreshTaskLogs(id) },
-        taskLogs: function(id) { return root.taskLogBuffers[String(id || "")] || "" }
-    })
-
-    function refreshBackgroundTasks() {
-        if (tasksFetchInFlight) {
-            return
-        }
-        tasksFetchInFlight = true
-        runCommand(
-            helperCommand("tasks-list --include-finished"),
-            function(stdout) {
-                tasksFetchInFlight = false
-                let payload
-                try {
-                    payload = JSON.parse(stdout)
-                } catch (e) {
-                    return
-                }
-                if (payload && !payload.error) {
-                    tasksList = payload.tasks || []
-                    runningTaskCount = Number(payload.running_count || 0)
-                }
-            },
-            function(_stderr) {
-                tasksFetchInFlight = false
-            },
-            false
-        )
-    }
-
-    function subscribeBackgroundTasksHint() {
-        // Fire-and-forget: the daemon subscribes this connection to Task*
-        // events. We don't have a persistent connection (the helper exits
-        // after each call), so polling is still required — but registering
-        // intent is cheap and lights up server-side reconnect-replay.
-        runCommand(
-            helperCommand("tasks-subscribe"),
-            function(_out) {},
-            function(_err) {},
-            false
-        )
-    }
-
-    function cancelBackgroundTask(taskId) {
-        const id = String(taskId || "").trim()
-        if (id.length === 0) {
-            return
-        }
-        runCommand(
-            helperCommand("tasks-cancel " + shellEscape(id)),
-            function(_out) {
-                appendStatus("Cancelling task " + id)
-                refreshBackgroundTasks()
-            },
-            function(stderr) {
-                appendStatus("Cancel task failed: " + stderr)
-            },
-            false
-        )
-    }
-
-    function refreshTaskLogs(taskId) {
-        const id = String(taskId || "").trim()
-        if (id.length === 0) {
-            return
-        }
-        runCommand(
-            helperCommand("tasks-logs " + shellEscape(id)),
-            function(stdout) {
-                let payload
-                try {
-                    payload = JSON.parse(stdout)
-                } catch (e) {
-                    return
-                }
-                if (!payload || payload.error) {
-                    return
-                }
-                const entries = payload.entries || []
-                const lines = []
-                for (let i = 0; i < entries.length; i++) {
-                    const entry = entries[i]
-                    const ts = entry.timestamp ? String(entry.timestamp) : ""
-                    const level = String(entry.level || "info")
-                    const msg = String(entry.message || "")
-                    lines.push("[" + level + "] " + ts + " " + msg)
-                }
-                // QV4 GC HAZARD — assign new object to QML property var (a GC root)
-                // before keying into it. See the GC hazard block above.
-                taskLogBuffers = Object.assign({}, taskLogBuffers)
-                taskLogBuffers[id] = lines.join("\n")
-            },
-            function(_stderr) {},
-            false
-        )
-    }
-
-    function openTaskConversation(taskId) {
-        const id = String(taskId || "").trim()
-        if (id.length === 0) {
-            return
-        }
-        const target = findConversationIdForTask(id)
-        if (target.length === 0) {
-            appendStatus("Task " + id + " has no associated conversation")
-            return
-        }
-        const idx = conversationIndexById(target)
-        if (idx >= 0) {
-            switchConversation(idx)
-        } else {
-            // The task's conversation isn't in our cached list — set the
-            // id directly and let refreshConversation hydrate the rest.
-            conversationId = target
-            transcriptEntries = []
-            refreshConversation()
-            reloadConversationList()
-        }
-    }
-
-    function findConversationIdForTask(taskId) {
-        for (let i = 0; i < tasksList.length; i++) {
-            const task = tasksList[i]
-            if (!task || task.id !== taskId) {
-                continue
-            }
-            const kind = task.kind || {}
-            if (kind.conversation && kind.conversation.conversation_id) {
-                return String(kind.conversation.conversation_id)
-            }
-            if (kind.subagent && kind.subagent.conversation_id) {
-                return String(kind.subagent.conversation_id)
-            }
-            if (kind.standalone && kind.standalone.conversation_id) {
-                return String(kind.standalone.conversation_id)
-            }
-        }
-        return ""
-    }
-
-    signal tasksBadgeClicked()
-
-    // --- Voice service (adele-kde#29, repo adelie-ai/voice) -------------------
-    // The plasmoid is just another client of the voice daemon
-    // (org.desktopAssistant.Voice — a DISTINCT bus name from the orchestrator).
-    // We never receive its StateChanged signal directly: the Python helper is a
-    // one-shot subprocess (it exits after each gdbus call), exactly like the
-    // background-tasks path. So we POLL `voice-status` on the same 5s cadence;
-    // that one call folds in availability + state + enabled + current voice.
-    //
-    // `voiceAvailable` gates the whole UI: when the service has no bus owner
-    // (not installed / not running / masked) every voice control disables
-    // cleanly rather than surfacing a ServiceUnknown D-Bus error.
-    property bool voiceAvailable: false
-    property string voiceState: "Idle"   // Idle | Listening | Processing | Speaking
-    property bool voiceEnabled: false
-    property string voiceId: ""
-    property int voiceSpeakerId: -1
-    property var voiceChoices: []
-    property bool voiceStatusInFlight: false
-    property bool voiceVoicesLoaded: false
+    // --- voice state derived from the VoiceController -----------------------
+    readonly property bool voiceActive: voice.available && voice.state !== "Idle"
+    readonly property bool voiceListening: voice.available && voice.state === "Listening"
+    readonly property bool voiceProcessing: voice.available && voice.state === "Processing"
 
     readonly property string voiceStateLabel: {
-        if (!voiceAvailable) return ""
-        switch (voiceState) {
+        if (!voice.available) return ""
+        switch (voice.state) {
             case "Listening": return "Listening…"
             case "Processing": return "Thinking…"
             case "Speaking": return "Speaking…"
             default: return "Idle"
         }
     }
-
-    // Icon that tracks pipeline state so the mic button reads at a glance.
     readonly property string voiceStateIcon: {
-        switch (voiceState) {
+        switch (voice.state) {
             case "Listening": return "audio-input-microphone"
             case "Processing": return "view-refresh-symbolic"
             case "Speaking": return "audio-volume-high"
             default: return "audio-input-microphone-muted"
         }
     }
-
-    // "A turn is in flight" — the mic is open, the daemon is thinking, or it's
-    // talking back. Drives the prominent in-widget indicator and the toggle.
-    readonly property bool voiceActive: voiceAvailable && voiceState !== "Idle"
-    // The mic is specifically OPEN and capturing. This is the state the user
-    // most needs to notice ("am I being recorded?"), so it gets the strongest
-    // accent + the breathing animation + the panel badge.
-    readonly property bool voiceListening: voiceAvailable && voiceState === "Listening"
-    // The daemon is thinking (STT/LLM working). Deliberately distinct from
-    // Listening/Speaking so a busy turn never reads as idle: it gets an amber
-    // accent and its own (gentler) pulse on the chip/ring/panel badge.
-    readonly property bool voiceProcessing: voiceAvailable && voiceState === "Processing"
-
-    // Accent colour per pipeline state, used for the mic ring and the state
-    // chip so the widget's conversational state reads at a glance:
-    //   Listening → negative/red    ("recording" — the one to really notice)
-    //   Processing→ neutral/amber    (thinking — distinct from idle and the
-    //                                 other two; KDE's semantic "neutral" hue)
-    //   Speaking  → highlight/blue   (the assistant is talking back)
     readonly property color voiceStateColor: {
-        switch (voiceState) {
+        switch (voice.state) {
             case "Listening": return Kirigami.Theme.negativeTextColor
             case "Speaking": return themeHighlightColor
             case "Processing": return Kirigami.Theme.neutralTextColor
@@ -385,106 +134,199 @@ Item {
         }
     }
 
-    function refreshVoiceStatus() {
-        if (voiceStatusInFlight) {
+    // ======================================================================
+    //  The shared Rust core + the native voice glue
+    // ======================================================================
+    AdeleCore {
+        id: core
+        onViewEvent: function(type, data) { root.handleViewEvent(type, data) }
+    }
+
+    VoiceController {
+        id: voice
+    }
+
+    // ======================================================================
+    //  view-event handling (the reducer's deltas → render state)
+    // ======================================================================
+    function handleViewEvent(type, data) {
+        switch (type) {
+        case "connected":
+            root.connectionLabel = String(data.label || "")
+            root.statusText = ""
+            break
+        case "connect_error":
+            root.statusText = "Connection failed: " + String(data.message || "")
+            break
+        case "client_cleared":
+            root.statusText = "Disconnected"
+            break
+        case "status":
+            root.statusText = String(data.text || "")
+            break
+        case "send_sensitive":
+            root.busy = !(data.value === true)
+            break
+        case "conversations":
+            root.conversationChoices = data.items || []
+            root.syncConversationPicker()
+            break
+        case "load_conversation":
+            root.loadConversation(data.detail || {})
+            break
+        case "clear_chat":
+            transcriptModel.clear()
+            root.streamingIndex = -1
+            break
+        case "chat_status":
+            root.chatStatusText = String(data.text || "")
+            break
+        case "clear_chat_status":
+            root.chatStatusText = ""
+            break
+        case "add_user_message":
+            root.appendMessage("user", String(data.content || ""))
+            break
+        case "chunk":
+            root.appendChunk(String(data.text || ""))
+            break
+        case "complete":
+            root.completeStreaming(String(data.text || ""))
+            break
+        case "inline_note":
+            root.appendNote(String(data.text || ""))
+            break
+        case "toast":
+            root.statusText = String(data.text || "")
+            break
+        case "speak":
+            // Route the model's say_this through the voice daemon's TTS.
+            voice.sayText(String(data.text || ""))
+            break
+        // Ignored in this view (no KDE UI yet — all were D-Bus no-ops before, so
+        // there is no regression; each lands with its own FFI intent later):
+        //   context_usage, models, model_selection, default_model,
+        //   model_picker_visible, tasks_replace_all/task_*, scratchpad,
+        //   refresh_side_pane_tasks, adele_output_dropdown
+        default:
+            break
+        }
+    }
+
+    function loadConversation(detail) {
+        root.conversationId = String(detail.id || "")
+        transcriptModel.clear()
+        root.streamingIndex = -1
+        const messages = detail.messages || []
+        for (let i = 0; i < messages.length; i++) {
+            transcriptModel.append({
+                kind: "message",
+                role: String(messages[i].role || ""),
+                body: String(messages[i].content || ""),
+            })
+        }
+        root.syncConversationPicker()
+        Qt.callLater(function() {
+            if (transcript && transcript.count > 0) {
+                transcript.positionViewAtEnd()
+            }
+        })
+    }
+
+    function appendMessage(role, body) {
+        transcriptModel.append({ kind: "message", role: role, body: body })
+        root.maybeStickToBottom()
+    }
+
+    function appendNote(text) {
+        transcriptModel.append({ kind: "note", role: "assistant", body: text })
+        root.maybeStickToBottom()
+    }
+
+    function appendChunk(text) {
+        if (root.streamingIndex < 0) {
+            transcriptModel.append({ kind: "message", role: "assistant", body: "" })
+            root.streamingIndex = transcriptModel.count - 1
+        }
+        const current = transcriptModel.get(root.streamingIndex)
+        transcriptModel.setProperty(root.streamingIndex, "body", (current ? current.body : "") + text)
+        root.maybeStickToBottom()
+    }
+
+    function completeStreaming(text) {
+        if (root.streamingIndex >= 0) {
+            transcriptModel.setProperty(root.streamingIndex, "body", text)
+            root.streamingIndex = -1
+        } else {
+            transcriptModel.append({ kind: "message", role: "assistant", body: text })
+        }
+        root.maybeStickToBottom()
+    }
+
+    // Stick to the newest message only when the user is already near the bottom,
+    // so a streaming reply scrolls into view without yanking the viewport while
+    // they're scrolled up reading history.
+    function maybeStickToBottom() {
+        if (!transcript) {
             return
         }
-        voiceStatusInFlight = true
-        runCommand(
-            helperCommand("voice-status"),
-            function(stdout) {
-                voiceStatusInFlight = false
-                let payload
-                try {
-                    payload = JSON.parse(stdout)
-                } catch (e) {
-                    return
+        const nearBottom = transcript.contentHeight <= transcript.height
+            || (transcript.contentY + transcript.height) >= (transcript.contentHeight - 48)
+        if (nearBottom) {
+            Qt.callLater(function() {
+                if (transcript && transcript.count > 0) {
+                    transcript.positionViewAtEnd()
                 }
-                if (!payload || payload.error) {
-                    voiceAvailable = false
-                    return
-                }
-                const nowAvailable = payload.available === true
-                voiceAvailable = nowAvailable
-                if (!nowAvailable) {
-                    // Service went away — forget any cached voice list so it is
-                    // re-fetched fresh when it comes back.
-                    voiceVoicesLoaded = false
-                    return
-                }
-                if (typeof payload.state === "string") {
-                    voiceState = payload.state
-                }
-                if (typeof payload.enabled === "boolean") {
-                    voiceEnabled = payload.enabled
-                }
-                if (payload.voice && typeof payload.voice === "object") {
-                    voiceId = String(payload.voice.voice_id || "")
-                    voiceSpeakerId = Number(payload.voice.speaker_id)
-                    if (!Number.isFinite(voiceSpeakerId)) {
-                        voiceSpeakerId = -1
-                    }
-                }
-                // Lazily pull the installed-voice list once the service is up.
-                if (!voiceVoicesLoaded) {
-                    reloadVoiceList()
-                }
-            },
-            function(_stderr) {
-                voiceStatusInFlight = false
-                voiceAvailable = false
-            },
-            false
-        )
+            })
+        }
     }
 
-    // Build a short, legible label for the voice switcher: "Amy (en_US)".
-    function buildVoiceLabel(entry) {
-        const name = String(entry.display_name || entry.voice_id || "")
-        const lang = String(entry.language || "")
-        if (lang.length === 0) return name
-        return name + " (" + lang + ")"
+    // ======================================================================
+    //  intents (user actions → the core)
+    // ======================================================================
+    function submitPrompt() {
+        if (root.busy) {
+            return
+        }
+        const text = promptInput.text
+        if (text.trim().length === 0) {
+            return
+        }
+        core.sendPrompt(text)
+        promptInput.clear()
     }
 
-    function reloadVoiceList() {
-        runCommand(
-            helperCommand("voice-list-voices"),
-            function(stdout) {
-                let payload
-                try {
-                    payload = JSON.parse(stdout)
-                } catch (e) {
-                    return
-                }
-                if (!payload || payload.error) {
-                    return
-                }
-                voiceVoicesLoaded = true
-                const entries = payload.voices || []
-                const choices = []
-                for (let i = 0; i < entries.length; i++) {
-                    const entry = entries[i]
-                    if (!entry || !entry.voice_id) {
-                        continue
-                    }
-                    choices.push({
-                        voice_id: String(entry.voice_id),
-                        display_name: String(entry.display_name || entry.voice_id),
-                        language: String(entry.language || ""),
-                        num_speakers: Number(entry.num_speakers || 1),
-                        label: buildVoiceLabel(entry),
-                    })
-                }
-                voiceChoices = choices
-            },
-            function(_stderr) {},
-            false
-        )
+    function conversationIndexById(id) {
+        for (let i = 0; i < conversationChoices.length; i++) {
+            if (conversationChoices[i].id === id) {
+                return i
+            }
+        }
+        return -1
     }
 
+    function selectConversationById(id) {
+        const target = String(id || "")
+        if (target.length === 0) {
+            return
+        }
+        core.selectConversation(target)
+    }
+
+    function syncConversationPicker() {
+        const idx = conversationIndexById(conversationId)
+        if (idx >= 0 && conversationPicker.currentIndex !== idx) {
+            conversationPicker.currentIndex = idx
+        }
+    }
+
+    // ======================================================================
+    //  voice intent helpers (delegate to the VoiceController)
+    // ======================================================================
     function voiceIndexById(id) {
-        for (let i = 0; i < voiceChoices.length; i++) {
-            if (voiceChoices[i].voice_id === id) {
+        const list = voice.voices
+        for (let i = 0; i < list.length; i++) {
+            if (list[i].voice_id === id) {
                 return i
             }
         }
@@ -493,178 +335,49 @@ Item {
 
     function voiceSpeakerCount(id) {
         const idx = voiceIndexById(id)
-        return idx >= 0 ? Math.max(1, Number(voiceChoices[idx].num_speakers || 1)) : 1
+        return idx >= 0 ? Math.max(1, Number(voice.voices[idx].num_speakers || 1)) : 1
     }
 
-    // Change the active TTS voice. `speaker` is -1 for single-speaker / default.
-    function selectVoice(voiceIdValue, speaker) {
-        const id = String(voiceIdValue || "").trim()
-        if (id.length === 0 || !voiceAvailable) {
-            return
-        }
-        let args = "voice-set-voice " + shellEscape(id)
-        if (Number.isFinite(speaker) && speaker >= 0) {
-            args += " --speaker " + speaker
-        }
-        runCommand(
-            helperCommand(args),
-            function(_stdout) {
-                voiceId = id
-                voiceSpeakerId = (Number.isFinite(speaker) && speaker >= 0) ? speaker : -1
-                appendStatus("Voice set to " + id)
-            },
-            function(stderr) {
-                appendStatus("Set voice failed: " + stderr)
-            },
-            false
-        )
-    }
-
-    // Build the push-to-talk helper invocation. Factored out (and exposed) so
-    // it's unit-testable without a live daemon: with an orchestrator
-    // conversation id the daemon dictates into THAT conversation (voice#24); an
-    // empty id falls back to its own "Voice Conversation" session. The id is
-    // shell-escaped because it's interpolated into the helper command line.
-    function pushToTalkHelperArgs(convId) {
-        if (convId && convId.length > 0) {
-            return "voice-push-to-talk --conversation-id " + shellEscape(convId)
-        }
-        return "voice-push-to-talk"
-    }
-
-    // Start an explicit dictation turn (push-to-talk). Works even when the
-    // wake word is off. Optimistically reflect Listening so the UI responds
-    // immediately; the next poll confirms the real pipeline state.
-    function voicePushToTalk() {
-        if (!voiceAvailable) {
-            return
-        }
-        if (voiceState === "Speaking") {
-            // Barge-in: stop playback first so PTT isn't fighting the speaker.
-            voiceStopSpeaking()
-        }
-        // Dictate into the conversation this view is showing (voice#24) so the
-        // spoken prompt and reply land in this chat, not the daemon's own
-        // session (see pushToTalkHelperArgs).
-        runCommand(
-            helperCommand(pushToTalkHelperArgs(conversationId)),
-            function(_stdout) {
-                voiceState = "Listening"
-                refreshVoiceStatus()
-            },
-            function(stderr) {
-                appendStatus("Push-to-talk failed: " + stderr)
-            },
-            false
-        )
-    }
-
-    function voiceStopSpeaking() {
-        if (!voiceAvailable) {
-            return
-        }
-        runCommand(
-            helperCommand("voice-stop-speaking"),
-            function(_stdout) { refreshVoiceStatus() },
-            function(_stderr) {},
-            false
-        )
-    }
-
-    // Abort an in-flight dictation/processing/speaking turn via the daemon's
-    // StopListening() (returns the pipeline to Idle). Optimistically flip to
-    // Idle so the toggle feels instant; the next poll reconciles the truth.
-    function voiceStopListening() {
-        if (!voiceAvailable) {
-            return
-        }
-        runCommand(
-            helperCommand("voice-stop-listening"),
-            function(_stdout) {
-                voiceState = "Idle"
-                refreshVoiceStatus()
-            },
-            function(stderr) {
-                appendStatus("Stop listening failed: " + stderr)
-                refreshVoiceStatus()
-            },
-            false
-        )
-    }
-
-    // The mic button is a toggle: it STARTS a dictation turn only from Idle and
-    // otherwise STOPS the active turn. Factored out (and pure) so the start/stop
-    // decision is unit-testable without a live daemon. Any non-Idle pipeline
-    // state (Listening/Processing/Speaking) means "a turn is in flight → stop".
-    function micButtonStops(state) {
-        return state === "Listening" || state === "Processing" || state === "Speaking"
-    }
-
-    // Single onClicked entry point for the mic toggle. Speaking still routes
-    // through StopSpeaking (barge-in / cut playback); Listening and Processing
-    // route through StopListening (abort capture / pending turn).
+    // The mic button is a toggle: start a dictation turn from Idle, otherwise
+    // stop the active one (StopSpeaking while Speaking, else StopListening).
     function voiceMicToggle() {
-        if (!voiceAvailable) {
+        if (!voice.available) {
             return
         }
-        if (voiceState === "Speaking") {
-            voiceStopSpeaking()
-        } else if (micButtonStops(voiceState)) {
-            voiceStopListening()
+        if (voice.state === "Speaking") {
+            voice.stopSpeaking()
+        } else if (voice.state !== "Idle") {
+            voice.stopListening()
         } else {
-            voicePushToTalk()
+            voice.pushToTalk(root.conversationId)
         }
     }
 
-    // Abort whatever the assistant is doing this turn and return to
-    // Idle/wake-listening (adele-kde#38). A dedicated "cancel this turn"
-    // affordance, distinct from the mic toggle: it always stops, never starts.
-    // Speaking cuts playback (StopSpeaking); Listening/Processing abort the
-    // capture/pending turn (StopListening). Both land the pipeline back at Idle.
+    // The dedicated cancel affordance only ever STOPS the current turn.
     function voiceCancelTurn() {
-        if (!voiceAvailable || !voiceActive) {
+        if (!root.voiceActive) {
             return
         }
-        if (voiceState === "Speaking") {
-            voiceStopSpeaking()
+        if (voice.state === "Speaking") {
+            voice.stopSpeaking()
         } else {
-            voiceStopListening()
+            voice.stopListening()
         }
     }
 
-    // Tooltip text for the mic button, per pipeline state. Pulled out so the
-    // start-vs-stop affordance reads identically wherever the button is shown.
     function micButtonTooltip() {
-        if (voiceState === "Speaking") {
+        if (voice.state === "Speaking") {
             return "Stop speaking"
         }
-        if (micButtonStops(voiceState)) {
+        if (voice.state !== "Idle") {
             return "Stop listening" + (voiceStateLabel.length > 0 ? " — " + voiceStateLabel : "")
         }
         return "Push to talk" + (voiceStateLabel.length > 0 ? " — " + voiceStateLabel : "")
     }
 
-    // Toggle resident "Hey Adele" wake-word listening. Optimistically flips the
-    // local flag so the checkbox feels instant; the poll reconciles on error.
-    function setVoiceEnabled(enabled) {
-        if (!voiceAvailable) {
-            return
-        }
-        const target = enabled === true
-        runCommand(
-            helperCommand("voice-set-enabled " + (target ? "true" : "false")),
-            function(_stdout) {
-                voiceEnabled = target
-                appendStatus(target ? "“Hey Adele” enabled" : "“Hey Adele” disabled")
-            },
-            function(stderr) {
-                appendStatus("Toggle “Hey Adele” failed: " + stderr)
-                refreshVoiceStatus()
-            },
-            false
-        )
-    }
-
+    // ======================================================================
+    //  pure view helpers (no daemon / no transport)
+    // ======================================================================
     function toImageSource(pathValue) {
         const value = String(pathValue || "").trim()
         if (value.length === 0) {
@@ -693,128 +406,12 @@ Item {
         return candidates
     }
 
-    function shellEscape(value) {
-        return HelperRunner.shellEscape(value)
-    }
-
-    function limitDebugPayload(text) {
-        const normalized = String(text || "")
-        if (normalized.length <= maxDebugPayloadChars) {
-            return normalized
-        }
-        return normalized.substring(0, maxDebugPayloadChars) + "…"
-    }
-
-    function parseToolCommand(command) {
-        const normalized = String(command || "").trim()
-        const helperMatch = normalized.match(/^python3\s+'([^']+)'\s+--service\s+'([^']+)'\s*(.*)$/)
-        if (helperMatch) {
-            const args = String(helperMatch[3] || "").trim()
-            return {
-                toolName: "dbus_client.py",
-                inputText: args.length > 0
-                    ? ("service=" + helperMatch[2] + "\nargs: " + args)
-                    : ("service=" + helperMatch[2]),
-            }
-        }
-
-        const settingsMatch = normalized.match(/^systemsettings\s+(.+)$/)
-        if (settingsMatch) {
-            return {
-                toolName: "systemsettings",
-                inputText: settingsMatch[1],
-            }
-        }
-
-        return {
-            toolName: "shell",
-            inputText: normalized,
-        }
-    }
-
-    function appendToolExecutionDebug(phase, command, details) {
-        if (!debugEnabled) {
-            return
-        }
-        const parsed = parseToolCommand(command)
-        const lines = [
-            "tool: " + parsed.toolName,
-            "phase: " + phase,
-            "input:",
-            limitDebugPayload(parsed.inputText),
-        ]
-        const trimmedDetails = String(details || "").trim()
-        if (trimmedDetails.length > 0) {
-            lines.push("result:")
-            lines.push(limitDebugPayload(trimmedDetails))
-        }
-        appendMessage("tool", lines.join("\n"), {
-            toolName: parsed.toolName,
-        })
-    }
-
-    function runCommand(command, onSuccess, onError, logDebug) {
-        const shouldLogDebug = logDebug !== false
-        if (shouldLogDebug) {
-            appendToolExecutionDebug("run", command, "")
-        }
-        // QV4 GC HAZARD (site 4) — use parallel arrays + push, not pending[cmd] = {}
-        // Array.push writes to an integer index (putIndexed), bypassing insertMember
-        // entirely.  See the QV4 GC HAZARD block near the _pendingCmds declaration.
-        _pendingCmds.push(command)
-        _pendingSuccess.push(onSuccess)
-        _pendingError.push(onError)
-        _pendingDebug.push(shouldLogDebug)
-        executable.connectSource(command)
-    }
-
-    function helperCommand(commandText) {
-        let command = "python3 " + shellEscape(helperPath)
-        if (configuredConnectionName.length > 0) {
-            command += " --connection-name " + shellEscape(configuredConnectionName)
-        }
-        if (!usingWsTransport) {
-            command += " --service " + shellEscape(activeService)
-        }
-        return command + " " + commandText
-    }
-
-    function zoomInUi() {
-        uiScale = Math.min(maxUiScale, uiScale + zoomStep)
-    }
-
-    function zoomOutUi() {
-        uiScale = Math.max(minUiScale, uiScale - zoomStep)
-    }
-
-    function resetZoomUi() {
-        uiScale = 1.0
-    }
-
-    function maxSessionAgeDays() {
-        const configured = Number(Plasmoid.configuration.maxSessionAgeDays)
-        if (!Number.isFinite(configured) || configured < 0) {
-            return 7
-        }
-        return Math.floor(configured)
-    }
-
-    function maxRenderedMessages() {
-        const configured = Number(Plasmoid.configuration.maxRenderedMessages)
-        if (!Number.isFinite(configured) || configured < 0) {
-            return defaultMaxRenderedMessages
-        }
-        return Math.floor(configured)
-    }
-
     function markdownListLineCount(textValue) {
         const normalized = String(textValue === undefined || textValue === null ? "" : textValue)
-            .replace(/\r\n/g, "\n")
-            .replace(/\r/g, "\n")
+            .replace(/\r\n/g, "\n").replace(/\r/g, "\n")
         if (normalized.length === 0) {
             return 0
         }
-
         const lines = normalized.split("\n")
         let count = 0
         for (let i = 0; i < lines.length; i++) {
@@ -825,328 +422,16 @@ Item {
         return count
     }
 
+    // Render assistant text as Markdown unless it's a very large list (which Qt's
+    // MarkdownText lays out slowly enough to stutter the shell).
     function shouldRenderAssistantAsMarkdown(textValue) {
         const normalized = String(textValue === undefined || textValue === null ? "" : textValue)
         if (normalized.length === 0) {
             return false
         }
-
         const listLines = markdownListLineCount(normalized)
         const hasLargeList = listLines >= 45 && normalized.length >= 1800
         return !hasLargeList
-    }
-
-    function loadPersistedService() {
-        const persisted = String(Plasmoid.configuration.selectedService || "").trim()
-        if (persisted === productionService || persisted === developmentService) {
-            activeService = persisted
-        }
-        serviceInitialized = true
-    }
-
-    function persistActiveService() {
-        if (Plasmoid.configuration.selectedService !== activeService) {
-            Plasmoid.configuration.selectedService = activeService
-        }
-    }
-
-    function serviceIndexByValue(serviceName) {
-        for (let i = 0; i < serviceChoices.length; i++) {
-            if (serviceChoices[i].value === serviceName) {
-                return i
-            }
-        }
-        return -1
-    }
-
-    function sameServiceChoices(left, right) {
-        if (!left || !right || left.length !== right.length) {
-            return false
-        }
-        for (let i = 0; i < left.length; i++) {
-            if (left[i].value !== right[i].value || left[i].label !== right[i].label) {
-                return false
-            }
-        }
-        return true
-    }
-
-    function syncServicePicker() {
-        const idx = serviceIndexByValue(activeService)
-        if (idx >= 0) {
-            servicePicker.currentIndex = idx
-        }
-    }
-
-    function switchService(index) {
-        if (index < 0 || index >= serviceChoices.length || busy) {
-            return
-        }
-
-        const selectedService = serviceChoices[index].value
-        if (selectedService === developmentService && !devServiceRunning) {
-            appendStatus("Development service is not running")
-            syncServicePicker()
-            return
-        }
-        if (selectedService === activeService) {
-            return
-        }
-
-        activeService = selectedService
-        persistActiveService()
-        conversationId = ""
-        promptText = ""
-        currentMessageCount = 0
-        resetOptimisticUserTracking(false)
-        transcriptEntries = [
-            {
-                kind: "status",
-                role: "status",
-                text: "Switched to " + activeService,
-            }
-        ]
-        reloadConversationList()
-        refreshConversation()
-    }
-
-    function refreshServiceStatus(onReady, options) {
-        const opts = options || {}
-        const silent = opts.silent === true
-        if (serviceStatusRequestInFlight) {
-            if (onReady) {
-                onReady()
-            }
-            return
-        }
-        serviceStatusRequestInFlight = true
-
-        const command = helperCommand("status")
-        runCommand(
-            command,
-            function(stdout) {
-                try {
-                    const payload = JSON.parse(stdout)
-                    runtimeTransportMode = String(payload.transport || "dbus").toLowerCase() === "ws" ? "ws" : "dbus"
-                    activeConnectionName = String(payload.selected_connection || configuredConnectionName || "").trim()
-                    productionServiceRunning = !!payload.production_running
-                    devServiceRunning = !!payload.dev_running
-                    if (payload.default_service && payload.default_service.length > 0) {
-                        productionService = payload.default_service
-                    }
-                    if (payload.dev_service && payload.dev_service.length > 0) {
-                        developmentService = payload.dev_service
-                    }
-
-                    let nextServiceChoices = [
-                        {
-                            value: productionService,
-                            label: "Production",
-                        }
-                    ]
-
-                    if (devServiceRunning) {
-                        nextServiceChoices = nextServiceChoices.concat([
-                            {
-                                value: developmentService,
-                                label: "Development",
-                            }
-                        ])
-                    }
-
-                    if (!sameServiceChoices(serviceChoices, nextServiceChoices)) {
-                        serviceChoices = nextServiceChoices
-                    }
-
-                    if (!serviceInitialized && runtimeTransportMode !== "ws") {
-                        loadPersistedService()
-                    }
-
-                    if (runtimeTransportMode === "ws") {
-                        activeService = productionService
-                    } else if (activeService !== productionService && activeService !== developmentService) {
-                        activeService = String(payload.selected_service || productionService)
-                    }
-
-                    if (runtimeTransportMode !== "ws" && !devServiceRunning && activeService === developmentService) {
-                        if (!silent) {
-                            appendStatus("Development service stopped; switching to production")
-                        }
-                        activeService = productionService
-                        persistActiveService()
-                    }
-
-                    syncServicePicker()
-                } catch (parseError) {
-                    if (!silent) {
-                        appendStatus("Service status parse error: " + parseError)
-                    }
-                } finally {
-                    serviceStatusRequestInFlight = false
-                    if (onReady) {
-                        onReady()
-                    }
-                }
-            },
-            function(stderr) {
-                serviceStatusRequestInFlight = false
-                if (!silent) {
-                    appendStatus("Service status error: " + stderr)
-                }
-                if (onReady) {
-                    onReady()
-                }
-            },
-            false
-        )
-    }
-
-    function openSettingsDialog() {
-        runCommand(
-            "systemsettings kcm_desktopassistant",
-            function(_stdout) {},
-            function(_stderr) {
-                appendStatus("Settings dialog failed to open")
-            }
-        )
-    }
-
-    function appendMessage(role, text, meta) {
-        const entry = buildMessageEntry(role, text, meta)
-        if (!entry) {
-            return
-        }
-        appendTranscriptEntry(entry)
-    }
-
-    function buildMessageEntry(role, text, meta) {
-        const normalizedText = String(text === undefined || text === null ? "" : text)
-        const clippedText = normalizedText.length > maxLiveMessageChars
-            ? normalizedText.substring(0, maxLiveMessageChars) + "\n\n[…message truncated for widget stability…]"
-            : normalizedText
-        if (clippedText.trim().length === 0) {
-            return null
-        }
-        // QV4 GC HAZARD (site 1) — DO NOT split into: const entry = {}; entry.x = y
-        // Build the whole object in one Object.assign expression so QV4 never
-        // sees an incompletely-constructed object that could be collected mid-write.
-        // See the QV4 GC HAZARD comment near the `pending` property declaration.
-        return Object.assign({ kind: "message", role: role, text: clippedText }, meta || {})
-    }
-
-    function appendStatus(text) {
-        appendTranscriptEntry({
-            kind: "status",
-            role: "status",
-            text: text,
-        })
-    }
-
-    function resetOptimisticUserTracking(removeFromTranscript) {
-        if (removeFromTranscript === true && _optimisticUserMsgId >= 0) {
-            transcriptEntries = transcriptEntries.filter(function(e) { return e.entryId !== _optimisticUserMsgId })
-        }
-        _optimisticUserMsgId = -1
-        _optimisticUserMsgText = ""
-    }
-
-    function normalizeOptimisticCompareText(textValue) {
-        const normalized = String(textValue === undefined || textValue === null ? "" : textValue)
-        return normalized.replace(/\n\n\[…message truncated for [^\]]+\]$/, "")
-    }
-
-    function hasConfirmedOptimisticUserEntry(entries) {
-        if (_optimisticUserMsgId < 0 || _optimisticUserMsgText.length === 0 || !entries || entries.length === 0) {
-            return false
-        }
-        const optimisticNormalized = normalizeOptimisticCompareText(_optimisticUserMsgText)
-        for (let i = 0; i < entries.length; i++) {
-            const entry = entries[i]
-            if (!entry || entry.kind !== "message" || entry.role !== "user") {
-                continue
-            }
-            const candidate = normalizeOptimisticCompareText(entry.text)
-            if (candidate === optimisticNormalized) {
-                return true
-            }
-        }
-        return false
-    }
-
-    function clipLoadedMessageText(textValue) {
-        const normalized = String(textValue === undefined || textValue === null ? "" : textValue)
-        if (normalized.length <= maxLoadedMessageChars) {
-            return normalized
-        }
-        return normalized.substring(0, maxLoadedMessageChars) + "\n\n[…message truncated for performance…]"
-    }
-
-    function transcriptIsAtBottom() {
-        if (!transcript) {
-            return true
-        }
-        const viewportHeight = Math.max(0, Number(transcript.height || 0))
-        const contentHeight = Math.max(0, Number(transcript.contentHeight || 0))
-        const maxContentY = Math.max(0, contentHeight - viewportHeight)
-        const currentY = Math.max(0, Number(transcript.contentY || 0))
-        return maxContentY <= 0 || currentY >= maxContentY - 2 || transcript.atYEnd
-    }
-
-    // removeIds: optional array of entryId values to atomically remove from the
-    // existing transcript in the same assignment as the new entries are appended.
-    // This avoids the two-step filter-then-append pattern that causes a spurious
-    // QML ListView re-render between the two assignments (jump + flash).
-    function appendTranscriptEntries(entries, stickIfAlreadyAtBottom, removeIds) {
-        const hasRemove = removeIds && removeIds.length > 0
-        if ((!entries || entries.length === 0) && !hasRemove) {
-            return
-        }
-        const previousContentY = Math.max(0, Number(transcript ? transcript.contentY : 0))
-        const shouldStickToBottom = stickIfAlreadyAtBottom === true && transcriptIsAtBottom()
-        const preparedEntries = []
-        for (let i = 0; i < (entries ? entries.length : 0); i++) {
-            if (!entries[i]) {
-                continue
-            }
-            // QV4 GC HAZARD (site 2) — DO NOT rewrite as: const e = Object.assign({}, src); e.entryId = id
-            // Compute entryId before calling Object.assign and pass it in the
-            // initial literal so the object is fully formed in one expression.
-            // See the QV4 GC HAZARD comment near the `pending` property declaration.
-            const src = entries[i]
-            const entryId = src.entryId !== undefined
-                ? src.entryId
-                : (transcriptEntryIdSeq = transcriptEntryIdSeq + 1, transcriptEntryIdSeq)
-            preparedEntries.push(Object.assign({ entryId: entryId }, src))
-        }
-        if (preparedEntries.length === 0 && !hasRemove) {
-            return
-        }
-        // One assignment: filter out removed ids and concat new entries atomically
-        // so the ListView never sees an intermediate state.
-        const base = hasRemove
-            ? transcriptEntries.filter(function(e) { return removeIds.indexOf(e.entryId) < 0 })
-            : transcriptEntries
-        const nextEntries = base.concat(preparedEntries)
-        const overflow = nextEntries.length - maxTranscriptEntries
-        transcriptEntries = overflow > 0 ? nextEntries.slice(overflow) : nextEntries
-        Qt.callLater(function() {
-            if (!transcript) {
-                return
-            }
-            if (shouldStickToBottom) {
-                transcript.positionViewAtEnd()
-                return
-            }
-            const nowViewportHeight = Math.max(0, Number(transcript.height || 0))
-            const nowContentHeight = Math.max(0, Number(transcript.contentHeight || 0))
-            const nowMaxContentY = Math.max(0, nowContentHeight - nowViewportHeight)
-            transcript.contentY = Math.max(0, Math.min(nowMaxContentY, previousContentY))
-        })
-    }
-
-    function appendTranscriptEntry(entry) {
-        const isMessageEntry = entry && entry.kind === "message"
-        appendTranscriptEntries([entry], isMessageEntry)
     }
 
     function keepPromptCursorVisible() {
@@ -1170,858 +455,40 @@ Item {
         }
     }
 
-    function applyInitialLoadAutoScrollIfNeeded() {
-        if (!initialLoadAutoScrollPending) {
-            return
-        }
-        initialLoadAutoScrollPending = false
-        Qt.callLater(function() {
-            if (!transcript || Number(transcript.count || 0) <= 0) {
-                return
-            }
-            transcript.positionViewAtEnd()
-            Qt.callLater(function() {
-                if (transcript && Number(transcript.count || 0) > 0) {
-                    transcript.positionViewAtEnd()
-                }
-            })
-        })
+    function zoomInUi() {
+        uiScale = Math.min(maxUiScale, uiScale + zoomStep)
+    }
+    function zoomOutUi() {
+        uiScale = Math.max(minUiScale, uiScale - zoomStep)
+    }
+    function resetZoomUi() {
+        uiScale = 1.0
     }
 
-    function isToolEntryExpanded(entryId) {
-        return expandedToolEntries[String(entryId)] === true
+    // ======================================================================
+    //  models
+    // ======================================================================
+    // The transcript. Roles: kind ("message" | "note"), role ("user" |
+    // "assistant"), body (text). A ListModel (C++-backed) sidesteps the QV4
+    // insertMember GC hazard that a `property var` array of objects carries.
+    ListModel {
+        id: transcriptModel
     }
 
-    function toggleToolEntryExpanded(entryId) {
-        const key = String(entryId)
-        const nextValue = !isToolEntryExpanded(entryId)
-        // QV4 GC HAZARD (site 3) — DO NOT rewrite as: const m = Object.assign({}, expandedToolEntries); m[key] = v
-        // Assign the Object.assign result directly to the QML property var, which
-        // is a GC root, before writing the toggled key into it.
-        // See the QV4 GC HAZARD comment near the `pending` property declaration.
-        expandedToolEntries = Object.assign({}, expandedToolEntries)
-        expandedToolEntries[key] = nextValue
-    }
+    // ======================================================================
+    //  shortcuts
+    // ======================================================================
+    Shortcut { sequence: "Ctrl++"; context: Qt.WindowShortcut; onActivated: root.zoomInUi() }
+    Shortcut { sequence: "Ctrl+="; context: Qt.WindowShortcut; onActivated: root.zoomInUi() }
+    Shortcut { sequence: "Ctrl+-"; context: Qt.WindowShortcut; onActivated: root.zoomOutUi() }
+    Shortcut { sequence: "Ctrl+_"; context: Qt.WindowShortcut; onActivated: root.zoomOutUi() }
+    Shortcut { sequence: "Ctrl+0"; context: Qt.WindowShortcut; onActivated: root.resetZoomUi() }
 
-    function appendDebugStatus(text) {
-        if (debugEnabled) {
-            appendMessage("tool", text)
-        }
-    }
-
-    function ensureConversation(onReady) {
-        if (conversationId.length > 0) {
-            if (onReady) {
-                onReady()
-            }
-            return
-        }
-
-        const command = helperCommand("ensure --title " + shellEscape(conversationTitle))
-        appendDebugStatus("Initializing conversation…")
-        runCommand(
-            command,
-            function(stdout) {
-                const payload = JSON.parse(stdout)
-                if (payload.error) {
-                    appendStatus("Conversation init failed: " + payload.error)
-                    return
-                }
-                conversationId = payload.conversation_id
-                appendStatus("Using conversation " + conversationId)
-                reloadConversationList()
-                refreshConversation()
-                if (onReady) {
-                    onReady()
-                }
-            },
-            function(stderr) {
-                appendStatus("Conversation error: " + stderr)
-            }
-        )
-    }
-
-    function newConversation() {
-        if (busy) {
-            return
-        }
-
-        const title = conversationTitle + " " + Date.now()
-        const command = helperCommand("create --title " + shellEscape(title))
-        runCommand(
-            command,
-            function(stdout) {
-                const payload = JSON.parse(stdout)
-                if (payload.error) {
-                    appendStatus("Failed to create new conversation: " + payload.error)
-                    return
-                }
-
-                conversationId = payload.conversation_id
-                promptText = ""
-                currentMessageCount = 0
-                resetOptimisticUserTracking(false)
-                expandedToolEntries = ({})
-                transcriptEntries = [
-                    {
-                        kind: "status",
-                        role: "status",
-                        text: "New conversation ready",
-                    }
-                ]
-                appendStatus("Using conversation " + conversationId)
-                reloadConversationList()
-            },
-            function(stderr) {
-                appendStatus(stderr)
-            }
-        )
-    }
-
-    function conversationIndexById(id) {
-        for (let i = 0; i < conversationChoices.length; i++) {
-            if (conversationChoices[i].id === id) {
-                return i
-            }
-        }
-        return -1
-    }
-
-    // Build a flattened `Connection · Model` label; keep it short so the
-    // picker stays legible in the panel plasmoid where horizontal space is
-    // scarce.
-    function buildModelLabel(entry) {
-        const conn = String(entry.connection_label || entry.connection_id || "")
-        const model = String(entry.model_display_name || entry.model_id || "")
-        if (conn.length === 0) return model
-        if (model.length === 0) return conn
-        return conn + " · " + model
-    }
-
-    function modelKey(entry) {
-        return String(entry.connection_id || "") + "|" + String(entry.model_id || "")
-    }
-
-    function reloadModelList(onLoaded) {
-        modelListLoading = true
-        const command = helperCommand("list-models")
-        runCommand(
-            command,
-            function(stdout) {
-                modelListLoading = false
-                let payload
-                try {
-                    payload = JSON.parse(stdout)
-                } catch (e) {
-                    appendStatus("Could not parse model list: " + e)
-                    return
-                }
-                if (payload.error) {
-                    // Don't nag the user if the daemon is old/offline — the
-                    // selector will just stay empty. Log to debug instead.
-                    return
-                }
-                const entries = payload.models || []
-                const choices = []
-                for (let i = 0; i < entries.length; i++) {
-                    const entry = entries[i]
-                    if (!entry || !entry.connection_id || !entry.model_id) {
-                        continue
-                    }
-                    const label = buildModelLabel(entry)
-                    choices.push({
-                        connection_id: String(entry.connection_id),
-                        connection_label: String(entry.connection_label || entry.connection_id),
-                        model_id: String(entry.model_id),
-                        model_display_name: String(entry.model_display_name || entry.model_id),
-                        label: label,
-                    })
-                }
-                modelChoices = choices
-                applyRememberedModelSelection()
-                if (onLoaded) {
-                    onLoaded(choices)
-                }
-            },
-            function(stderr) {
-                modelListLoading = false
-                // Quiet failure — keeps panel chatty noise down when the
-                // daemon does not support multi-connection yet.
-            }
-        )
-    }
-
-    function modelIndexByKey(key) {
-        for (let i = 0; i < modelChoices.length; i++) {
-            if (modelKey(modelChoices[i]) === key) {
-                return i
-            }
-        }
-        return -1
-    }
-
-    function applyRememberedModelSelection() {
-        if (modelChoices.length === 0) {
-            selectedModelIndex = -1
-            return
-        }
-        const remembered = perConversationSelections[conversationId || ""]
-        if (!remembered) {
-            selectedModelIndex = -1
-            return
-        }
-        const key = String(remembered.connection_id || "") + "|" + String(remembered.model_id || "")
-        selectedModelIndex = modelIndexByKey(key)
-    }
-
-    function currentModelSelection() {
-        if (selectedModelIndex < 0 || selectedModelIndex >= modelChoices.length) {
-            return null
-        }
-        const entry = modelChoices[selectedModelIndex]
-        const out = {
-            connection_id: entry.connection_id,
-            model_id: entry.model_id,
-        }
-        const effort = modelEffortOverrides[modelKey(entry)]
-        if (effort === "low" || effort === "medium" || effort === "high") {
-            out.effort = effort
-        }
-        return out
-    }
-
-    function onModelSelectorActivated(index) {
-        // Index 0 is the disabled "Auto (coming soon)" sentinel.
-        if (index <= 0) {
-            selectedModelIndex = -1
-            if (conversationId.length > 0) {
-                const clone = Object.assign({}, perConversationSelections)
-                delete clone[conversationId]
-                perConversationSelections = clone
-            }
-            return
-        }
-        const choiceIndex = index - 1
-        if (choiceIndex >= 0 && choiceIndex < modelChoices.length) {
-            selectedModelIndex = choiceIndex
-            if (conversationId.length > 0) {
-                const entry = modelChoices[choiceIndex]
-                const updated = Object.assign({}, perConversationSelections)
-                updated[conversationId] = {
-                    connection_id: entry.connection_id,
-                    model_id: entry.model_id,
-                }
-                perConversationSelections = updated
-            }
-        }
-    }
-
-    function rememberModelSelectionFor(convId, selection) {
-        if (!convId || convId.length === 0 || !selection) {
-            return
-        }
-        const updated = Object.assign({}, perConversationSelections)
-        updated[convId] = {
-            connection_id: String(selection.connection_id || ""),
-            model_id: String(selection.model_id || ""),
-        }
-        perConversationSelections = updated
-    }
-
-    function maybeShowConversationWarnings(warnings) {
-        if (!warnings || warnings.length === 0) {
-            return
-        }
-        currentConversationWarnings = warnings
-        for (let i = 0; i < warnings.length; i++) {
-            const warn = warnings[i]
-            if (!warn || warn.type !== "dangling_model_selection") {
-                continue
-            }
-            const prev = warn.previous_selection || {}
-            const fallback = warn.fallback_to || {}
-            const prevText = (prev.connection_id || "?") + " · " + (prev.model_id || "?")
-            const fallbackText = (fallback.connection_id || "?") + " · " + (fallback.model_id || "?")
-            const message = "Previous model selection '" + prevText + "' is no longer available. Falling back to '" + fallbackText + "'."
-            appendStatus(message)
-            if (typeof Kirigami.showPassiveNotification === "function") {
-                try {
-                    Kirigami.showPassiveNotification(message, "long")
-                } catch (e) {
-                    // passive notifications are best-effort; avoid crashing the widget
-                }
-            }
-        }
-    }
-
-    function reloadConversationList(onLoaded) {
-        const command = helperCommand("list --max-age-days " + maxSessionAgeDays())
-        runCommand(
-            command,
-            function(stdout) {
-                const payload = JSON.parse(stdout)
-                if (payload.error) {
-                    appendStatus(payload.error)
-                    return
-                }
-
-                const conversations = payload.conversations || []
-                conversationChoices = conversations.map(function(conversation) {
-                    const timestamp = String(conversation.updated_at || "").trim()
-                    const titleText = timestamp.length > 0
-                        ? (conversation.title + " · " + timestamp)
-                        : conversation.title
-                    return {
-                        id: conversation.id,
-                        title: titleText + " (" + conversation.message_count + ")",
-                    }
-                })
-
-                const idx = conversationIndexById(conversationId)
-                if (idx >= 0 && !panelMode) {
-                    conversationPicker.currentIndex = idx
-                }
-
-                if (onLoaded) {
-                    onLoaded(conversations)
-                }
-            },
-            function(stderr) {
-                appendStatus(stderr)
-            }
-        )
-    }
-
-    function deleteConversation(targetId) {
-        if (busy || targetId.length === 0) {
-            return
-        }
-
-        const deletingCurrent = targetId === conversationId
-        const command = helperCommand("delete " + shellEscape(targetId))
-        runCommand(
-            command,
-            function(stdout) {
-                const payload = JSON.parse(stdout)
-                if (payload.error) {
-                    appendStatus("Failed to delete conversation: " + payload.error)
-                    return
-                }
-
-                appendStatus("Deleted conversation " + targetId)
-                reloadConversationList(function(conversations) {
-                    if (!deletingCurrent) {
-                        return
-                    }
-
-                    if (conversations.length > 0) {
-                        conversationId = conversations[0].id
-                        conversationPicker.currentIndex = 0
-                        refreshConversation()
-                        return
-                    }
-
-                    conversationId = ""
-                    promptText = ""
-                    currentMessageCount = 0
-                    resetOptimisticUserTracking(false)
-                    expandedToolEntries = ({})
-                    transcriptEntries = [
-                        {
-                            kind: "status",
-                            role: "status",
-                            text: "No conversations yet",
-                        }
-                    ]
-                })
-            },
-            function(stderr) {
-                appendStatus(stderr)
-            }
-        )
-    }
-
-    function switchConversation(index) {
-        if (index < 0 || index >= conversationChoices.length) {
-            return
-        }
-
-        const selectedId = conversationChoices[index].id
-        if (selectedId === conversationId) {
-            return
-        }
-
-        conversationId = selectedId
-        promptText = ""
-        currentMessageCount = 0
-        resetOptimisticUserTracking(false)
-        expandedToolEntries = ({})
-        transcriptEntries = []
-        appendStatus("Switched to conversation " + conversationId)
-        currentConversationWarnings = []
-        applyRememberedModelSelection()
-        refreshConversation()
-    }
-
-    function loadSelectedConversation() {
-        if (busy || loadingConversation) {
-            return
-        }
-
-        const idx = conversationPicker.currentIndex
-        if (idx < 0 || idx >= conversationChoices.length) {
-            appendStatus("No conversation selected")
-            return
-        }
-
-        const selectedId = conversationChoices[idx].id
-        if (selectedId !== conversationId) {
-            switchConversation(idx)
-            return
-        }
-
-        refreshConversation()
-    }
-
-    function refreshConversation() {
-        if (conversationId.length === 0 || loadingConversation) {
-            return
-        }
-
-        const baselineCount = Math.max(0, Number(currentMessageCount || 0))
-        const useIncrementalLoad = baselineCount > 0 || _optimisticUserMsgId >= 0
-        const requestId = conversationId
-        conversationLoadSequence = conversationLoadSequence + 1
-        const sequence = conversationLoadSequence
-        loadingConversation = true
-        loadingConversationStartedAtMs = Date.now()
-        conversationLoadTimeoutTimer.stop()
-        conversationLoadTimeoutTimer.start()
-        if (!hasRealMessages) {
-            appendStatus("Loading conversation…")
-        }
-
-        // NOTE: `--tail` is a UI-only fetch limit. Core conversation context remains
-        // intact in the daemon store for model prompting.
-        // Role filtering is done server-side: include tool messages only when
-        // debug mode is on so they count against the tail budget correctly.
-        const roles = debugEnabled ? "user,assistant,tool" : "user,assistant"
-        const command = useIncrementalLoad
-            ? helperCommand("get " + shellEscape(requestId) + " --after-count " + baselineCount + " --roles " + shellEscape(roles))
-            : helperCommand("get " + shellEscape(requestId) + " --tail " + maxRenderedMessages() + " --roles " + shellEscape(roles))
-        runCommand(
-            command,
-            function(stdout) {
-                if (sequence !== conversationLoadSequence) {
-                    return
-                }
-                conversationLoadTimeoutTimer.stop()
-                loadingConversation = false
-                loadingConversationStartedAtMs = 0
-                const payload = JSON.parse(stdout)
-                if (payload.error) {
-                    appendStatus(payload.error)
-                    return
-                }
-
-                if (requestId !== conversationId) {
-                    return
-                }
-
-                // Hydrate the model picker from the daemon's persisted
-                // `last_model_selection` (when present) and surface any
-                // one-shot `warnings` (e.g. DanglingModelSelection) the
-                // daemon attached to this GetConversation result.
-                if (payload.last_model_selection) {
-                    rememberModelSelectionFor(requestId, payload.last_model_selection)
-                    applyRememberedModelSelection()
-                }
-                if (payload.warnings && payload.warnings.length > 0) {
-                    maybeShowConversationWarnings(payload.warnings)
-                }
-
-                const allMessages = payload.messages || []
-                const payloadCount = Number(payload.message_count || allMessages.length)
-                const newEntries = []
-                for (let i = 0; i < allMessages.length; i++) {
-                    const message = allMessages[i]
-                    const entry = buildMessageEntry(message.role, clipLoadedMessageText(message.content), {
-                        historicalLoad: true,
-                    })
-                    if (entry) {
-                        newEntries.push(entry)
-                    }
-                }
-
-                if (useIncrementalLoad) {
-                    if (payloadCount < baselineCount) {
-                        currentMessageCount = payloadCount
-                        return
-                    }
-                    // Atomically strip the optimistic entry (if any) and append
-                    // the server-confirmed messages in a single transcriptEntries
-                    // assignment to avoid a jump/flash between the two steps.
-                    const shouldRemoveOptimistic = hasConfirmedOptimisticUserEntry(newEntries)
-                    const removeIds = shouldRemoveOptimistic ? [_optimisticUserMsgId] : []
-                    if (shouldRemoveOptimistic) {
-                        resetOptimisticUserTracking(false)
-                    }
-                    appendTranscriptEntries(newEntries, true, removeIds)
-                    currentMessageCount = payloadCount
-                    applyInitialLoadAutoScrollIfNeeded()
-                    return
-                }
-
-                // Bootstrap path: populate visible history once from tail.
-                // transcriptEntries = [] clears any optimistic entry, so just
-                // reset the tracking id.
-                resetOptimisticUserTracking(false)
-                expandedToolEntries = ({})
-                transcriptEntryIdSeq = 0
-                transcriptEntries = []
-                appendTranscriptEntries(newEntries, false)
-                currentMessageCount = payloadCount
-                if (payload.truncated) {
-                    appendStatus("Showing latest " + allMessages.length + " of " + currentMessageCount + " messages")
-                }
-                if (currentMessageCount === 0) {
-                    appendStatus("No messages yet")
-                }
-                applyInitialLoadAutoScrollIfNeeded()
-            },
-            function(stderr) {
-                if (sequence !== conversationLoadSequence) {
-                    return
-                }
-                conversationLoadTimeoutTimer.stop()
-                loadingConversation = false
-                loadingConversationStartedAtMs = 0
-                appendStatus(stderr)
-            }
-        )
-    }
-
-    function clearTranscriptView() {
-        expandedToolEntries = ({})
-        transcriptEntries = [
-            {
-                kind: "status",
-                role: "status",
-                text: "View cleared",
-            }
-        ]
-    }
-
-    function sendPrompt(textValue) {
-        const sourceText = (textValue === undefined || textValue === null) ? promptText : textValue
-        const prompt = sourceText.trim()
-        if (prompt.length === 0 || busy) {
-            return
-        }
-
-        ensureConversation(function() {
-            busy = true
-            lateResponsePollTimer.stop()
-            lateResponsePollRemaining = 0
-            promptText = ""
-
-            // Optimistically render the user's message immediately so the UI
-            // feels responsive without waiting for the network round-trip.
-            transcriptEntryIdSeq = transcriptEntryIdSeq + 1
-            const optimisticId = transcriptEntryIdSeq
-            const optimisticRaw = buildMessageEntry("user", prompt)
-            if (optimisticRaw) {
-                appendTranscriptEntries([Object.assign({ entryId: optimisticId }, optimisticRaw)], true)
-                _optimisticUserMsgId = optimisticId
-                _optimisticUserMsgText = String(optimisticRaw.text || prompt)
-            } else {
-                resetOptimisticUserTracking(false)
-            }
-
-            // Attach a per-send override when the user has explicitly picked
-            // a model; when no selection is made the daemon falls back to the
-            // conversation's previous selection (if any) or the `interactive`
-            // purpose — that's exactly what we want for mutable-sticky per
-            // conversation.
-            let sendArgs = "send " + shellEscape(conversationId) + " " + shellEscape(prompt)
-            const activeSelection = currentModelSelection()
-            if (activeSelection) {
-                sendArgs += " --override-connection " + shellEscape(activeSelection.connection_id)
-                    + " --override-model " + shellEscape(activeSelection.model_id)
-                if (activeSelection.effort) {
-                    sendArgs += " --override-effort " + shellEscape(activeSelection.effort)
-                }
-                rememberModelSelectionFor(conversationId, activeSelection)
-            }
-            const sendCommand = helperCommand(sendArgs)
-            runCommand(
-                sendCommand,
-                function(sendOut) {
-                    const payload = JSON.parse(sendOut)
-                    if (payload.error) {
-                        busy = false
-                        resetOptimisticUserTracking(true)
-                        appendStatus(payload.error)
-                        return
-                    }
-                    // Leave the optimistic entry visible; refreshConversation
-                    // will strip it atomically when it appends the server-
-                    // confirmed messages (avoids jump + vanish flash).
-                    refreshConversation()
-                    reloadConversationList()
-                    const startAwait = function(initialCount) {
-                        const awaitCommand = helperCommand(
-                            "await "
-                            + shellEscape(conversationId)
-                            + " --initial-count "
-                            + initialCount
-                            + " --timeout "
-                            + awaitTimeoutSeconds
-                        )
-                        runCommand(
-                            awaitCommand,
-                            function(awaitOut) {
-                                busy = false
-                                const awaitPayload = JSON.parse(awaitOut)
-                                if (awaitPayload.error) {
-                                    appendStatus(awaitPayload.error)
-                                }
-                                refreshConversation()
-                                reloadConversationList()
-                                lateResponsePollRemaining = panelMode ? 6 : 12
-                                lateResponsePollTimer.start()
-                            },
-                            function(awaitErr) {
-                                busy = false
-                                appendStatus(awaitErr)
-                                refreshConversation()
-                                reloadConversationList()
-                                lateResponsePollRemaining = panelMode ? 6 : 12
-                                lateResponsePollTimer.start()
-                            }
-                        )
-                    }
-
-                    const countCommand = helperCommand("get " + shellEscape(conversationId) + " --after-count 2147483647")
-                    runCommand(
-                        countCommand,
-                        function(countOut) {
-                            const countPayload = JSON.parse(countOut)
-                            if (countPayload.error) {
-                                startAwait(currentMessageCount)
-                                return
-                            }
-                            const candidateInitialCount = Number(countPayload.message_count)
-                            if (!Number.isFinite(candidateInitialCount) || candidateInitialCount < 0) {
-                                startAwait(currentMessageCount)
-                                return
-                            }
-                            // Await from the freshest server count without moving the
-                            // local incremental baseline ahead of rendered entries.
-                            startAwait(Math.floor(candidateInitialCount))
-                        },
-                        function(_countErr) {
-                            startAwait(currentMessageCount)
-                        }
-                    )
-                },
-                function(sendErr) {
-                    busy = false
-                    resetOptimisticUserTracking(true)
-                    appendStatus(sendErr)
-                }
-            )
-        })
-    }
-
-    Plasma5Support.DataSource {
-        id: executable
-        engine: "executable"
-        connectedSources: []
-
-        onNewData: function(sourceName, data) {
-            // Plasma5Support keys a DataSource connection by its source string,
-            // so two in-flight runCommand() calls with an IDENTICAL command
-            // collapse into ONE connection and fire onNewData only once. The
-            // first matching pending entry used to be spliced and served while
-            // every later duplicate was stranded forever (its callbacks never
-            // ran — a wedged refresh/poll). Drain ALL pending entries that share
-            // this source so every caller's callback resolves (KDE-12).
-            //
-            // Collect matching slot values first (the indices shift as we
-            // splice), staying on the GC-safe parallel-array / primitive-array
-            // pattern documented near the _pendingCmds declaration — no
-            // dynamic-keyed object literals. drainPending splices the four
-            // parallel arrays in place and returns the collected callbacks.
-            const drained = HelperRunner.drainPending(
-                _pendingCmds, _pendingSuccess, _pendingError, _pendingDebug, sourceName)
-            const successCbs = drained.successCbs
-            const errorCbs = drained.errorCbs
-            const debugFlags = drained.debugFlags
-
-            if (successCbs.length === 0) {
-                disconnectSource(sourceName)
-                return
-            }
-
-            const exitCode = data["exit code"]
-            const stdout = (data.stdout || "").trim()
-            const stderr = (data.stderr || "").trim()
-            const ok = exitCode === 0
-            const errorText = stderr.length > 0 ? stderr : stdout
-
-            try {
-                if (debugFlags.some(function(flag) { return flag })) {
-                    appendToolExecutionDebug(ok ? "ok" : "error", sourceName, ok ? stdout : errorText)
-                }
-                for (let j = 0; j < successCbs.length; j++) {
-                    if (ok) {
-                        successCbs[j](stdout)
-                    } else {
-                        errorCbs[j](errorText)
-                    }
-                }
-            } catch (callbackError) {
-                appendStatus("Widget callback error: " + callbackError)
-                busy = false
-            } finally {
-                disconnectSource(sourceName)
-            }
-        }
-    }
-
-    Timer {
-        id: conversationLoadTimeoutTimer
-        interval: root.conversationLoadTimeoutMs
-        repeat: false
-        running: false
-        onTriggered: {
-            if (!loadingConversation) {
-                return
-            }
-            loadingConversation = false
-            loadingConversationStartedAtMs = 0
-            appendStatus("Loading timed out. Please try Refresh.")
-        }
-    }
-
-    Timer {
-        id: startupTimer
-        interval: 250
-        repeat: false
-        running: false
-        onTriggered: {
-            if (!root.hideWidget) {
-                reloadConversationList(function(conversations) {
-                    if (conversations.length > 0) {
-                        conversationId = conversations[0].id
-                        conversationPicker.currentIndex = 0
-                        appendStatus("Conversation selected. Click Load to open history.")
-                        return
-                    }
-                    appendStatus("No conversations yet. Send a message to start.")
-                })
-            }
-        }
-    }
-
-    Timer {
-        id: servicePollTimer
-        interval: 5000
-        repeat: true
-        running: true
-        onTriggered: {
-            if (root.loadingConversation && root.loadingConversationStartedAtMs > 0) {
-                const elapsedMs = Date.now() - root.loadingConversationStartedAtMs
-                if (elapsedMs >= root.conversationLoadTimeoutMs + 1000) {
-                    root.loadingConversation = false
-                    root.loadingConversationStartedAtMs = 0
-                    root.appendStatus("Loading timed out. Please try Refresh.")
-                }
-            }
-            refreshServiceStatus(undefined, {
-                silent: true,
-            })
-        }
-    }
-
-    Timer {
-        id: tasksPollTimer
-        interval: 5000
-        repeat: true
-        // Only the WS transport actually returns background tasks; on D-Bus the
-        // helper's list_background_tasks() is a hardcoded [] until the daemon
-        // D-Bus task interface (#116) lands. Polling there spawns a python3
-        // subprocess every 5s for a guaranteed-empty answer, so gate the timer
-        // on the transport (KDE-12).
-        running: root.usingWsTransport
-        onTriggered: root.refreshBackgroundTasks()
-    }
-
-    // Poll the voice service for availability + pipeline state. The helper is
-    // one-shot (no persistent StateChanged subscription), so polling is how the
-    // Idle/Listening/Processing/Speaking indicator stays current. A faster
-    // 1.5s cadence keeps the mic button feeling live during a dictation turn
-    // without a second long-running subprocess.
-    Timer {
-        id: voicePollTimer
-        interval: 1500
-        repeat: true
-        running: true
-        onTriggered: root.refreshVoiceStatus()
-    }
-
-    Timer {
-        id: lateResponsePollTimer
-        interval: 5000
-        repeat: true
-        running: false
-        onTriggered: {
-            if (busy || conversationId.length === 0) {
-                return
-            }
-            refreshConversation()
-            reloadConversationList()
-            lateResponsePollRemaining = Math.max(0, lateResponsePollRemaining - 1)
-            if (lateResponsePollRemaining <= 0) {
-                stop()
-            }
-        }
-    }
-
-    Shortcut {
-        sequence: "Ctrl++"
-        context: Qt.WindowShortcut
-        onActivated: root.zoomInUi()
-    }
-
-    Shortcut {
-        sequence: "Ctrl+="
-        context: Qt.WindowShortcut
-        onActivated: root.zoomInUi()
-    }
-
-    Shortcut {
-        sequence: "Ctrl+-"
-        context: Qt.WindowShortcut
-        onActivated: root.zoomOutUi()
-    }
-
-    Shortcut {
-        sequence: "Ctrl+_"
-        context: Qt.WindowShortcut
-        onActivated: root.zoomOutUi()
-    }
-
-    Shortcut {
-        sequence: "Ctrl+0"
-        context: Qt.WindowShortcut
-        onActivated: root.resetZoomUi()
-    }
-
+    // ======================================================================
+    //  visual tree
+    // ======================================================================
     Rectangle {
         anchors.fill: parent
-        visible: !root.hideWidget
         color: root.themeBackgroundColor
         border.width: 1
         border.color: root.themeDisabledTextColor
@@ -2029,7 +496,6 @@ Item {
     }
 
     ColumnLayout {
-        visible: !root.hideWidget
         anchors.fill: parent
         anchors.margins: 8
         spacing: 8
@@ -2039,9 +505,8 @@ Item {
             spacing: 6
 
             Image {
-                // Show the "thinking" avatar whenever Adele is working — a text
-                // turn is in flight (busy) OR the voice pipeline is Processing
-                // (adele-kde#38) — so the header reflects state for both paths.
+                // "Thinking" avatar whenever Adele is working — a text turn is in
+                // flight (busy) OR the voice pipeline is Processing.
                 source: (root.busy || root.voiceProcessing)
                     ? Qt.resolvedUrl("../images/adele_thinking.png")
                     : Qt.resolvedUrl("../images/adele.png")
@@ -2053,17 +518,12 @@ Item {
             }
 
             QQC2.Label {
-                text: root.usingWsTransport
-                    ? (root.activeConnectionName.length > 0 ? "Adele (" + root.activeConnectionName + ")" : "Adele (WS)")
-                    : (root.activeService === root.developmentService ? "Adele (Dev)" : "Adele")
+                text: "Adele"
                 font.bold: true
                 color: root.themeTextColor
                 Layout.fillWidth: true
             }
 
-            // Tasks badge (adele-kde#7). Hidden when no running tasks; the
-            // click signal is bubbled up to the plasmoid root so the
-            // separate process-manager Window can toggle visible.
             TasksBadge {
                 id: headerTasksBadge
                 backend: root.tasksBackend
@@ -2079,14 +539,11 @@ Item {
 
             QQC2.ComboBox {
                 id: conversationPicker
-                visible: true
                 width: {
-                    const buttonWidths = loadButton.implicitWidth
-                        + refreshListButton.implicitWidth + conversationControls.spacing
-                        + (settingsButton.visible ? (settingsButton.implicitWidth + conversationControls.spacing) : 0)
-                    return Math.max(root.ultraNarrow ? 140 : 180, conversationControls.width - buttonWidths - conversationControls.spacing)
+                    const buttonWidths = newButton.implicitWidth + conversationControls.spacing
+                    return Math.max(root.ultraNarrow ? 160 : 200, conversationControls.width - buttonWidths - conversationControls.spacing)
                 }
-                enabled: !root.busy && !root.loadingConversation
+                enabled: !root.busy
                 model: root.conversationChoices
                 textRole: "title"
                 delegate: QQC2.ItemDelegate {
@@ -2096,66 +553,44 @@ Item {
                     width: conversationPicker.width
                     highlighted: conversationPicker.highlightedIndex === index
                     background: Rectangle {
-                        color: conversationDelegate.highlighted
-                            ? root.themeHighlightColor
-                            : "transparent"
+                        color: conversationDelegate.highlighted ? root.themeHighlightColor : "transparent"
                     }
-
                     contentItem: RowLayout {
                         spacing: 6
-
                         QQC2.Label {
                             Layout.fillWidth: true
-                            text: modelData.title
-                            color: conversationDelegate.highlighted
-                                ? root.themeHighlightedTextColor
-                                : root.themeTextColor
+                            text: conversationDelegate.modelData.title
+                            color: conversationDelegate.highlighted ? root.themeHighlightedTextColor : root.themeTextColor
                             elide: Text.ElideRight
                         }
-
                         QQC2.ToolButton {
                             icon.name: "edit-delete"
                             display: QQC2.AbstractButton.IconOnly
                             enabled: !root.busy
                             onClicked: {
-                                root.deleteConversation(modelData.id)
+                                core.deleteConversation(conversationDelegate.modelData.id)
                                 conversationPicker.popup.close()
                             }
                         }
                     }
-
                     onClicked: {
-                        const idx = root.conversationIndexById(modelData.id)
-                        conversationPicker.currentIndex = idx
+                        conversationPicker.currentIndex = conversationDelegate.index
                         conversationPicker.popup.close()
-                        switchConversation(idx)
+                        root.selectConversationById(conversationDelegate.modelData.id)
                     }
                 }
                 onActivated: function(index) {
-                    switchConversation(index)
+                    if (index >= 0 && index < root.conversationChoices.length) {
+                        root.selectConversationById(root.conversationChoices[index].id)
+                    }
                 }
             }
 
             QQC2.Button {
-                id: loadButton
-                text: loadingConversation ? "Loading…" : "Load"
-                enabled: !busy && !loadingConversation
-                onClicked: panelMode ? refreshServiceStatus() : loadSelectedConversation()
-            }
-
-            QQC2.Button {
-                id: refreshListButton
-                text: "Refresh List"
-                enabled: !busy && !loadingConversation
-                onClicked: reloadConversationList()
-            }
-
-            QQC2.Button {
-                id: settingsButton
-                visible: panelMode && !root.ultraNarrow
-                text: "Settings"
-                enabled: !busy
-                onClicked: openSettingsDialog()
+                id: newButton
+                text: "New"
+                enabled: !root.busy
+                onClicked: core.newConversation()
             }
         }
 
@@ -2165,13 +600,13 @@ Item {
 
             ListView {
                 id: transcript
-                model: root.transcriptEntries
+                model: transcriptModel
                 spacing: 6
                 clip: true
 
                 header: Column {
                     width: transcript.width
-                    visible: !root.hasRealMessages
+                    visible: transcriptModel.count === 0
                     spacing: 8
                     topPadding: 40
 
@@ -2184,37 +619,28 @@ Item {
                         fillMode: Image.PreserveAspectFit
                         anchors.horizontalCenter: parent.horizontalCenter
                     }
-
                     QQC2.Label {
-                        text: "Hi! I'm Adele! Ask me anything..."
+                        text: "Hi! I'm Adele! Ask me anything…"
                         font.pointSize: root.baseFontPointSize * root.uiScale
                         color: root.themeDisabledTextColor
                         anchors.horizontalCenter: parent.horizontalCenter
                     }
                 }
 
-                onCountChanged: {
-                    // Intentionally no auto-scroll.
-                }
-
                 delegate: Item {
-                    required property var modelData
-                    readonly property bool isStatus: modelData.kind === "status"
-                    readonly property bool isTool: modelData.role === "tool"
-                    readonly property string toolName: String(modelData.toolName || "Tool")
-                    readonly property bool isAssistant: modelData.role === "assistant"
-                    readonly property string messageBodyText: String(modelData.text || "")
-                    readonly property bool renderAssistantAsMarkdown: root.shouldRenderAssistantAsMarkdown(messageBodyText)
-                    readonly property bool toolExpanded: root.isToolEntryExpanded(modelData.entryId)
+                    id: messageEntry
+                    required property string kind
+                    required property string role
+                    required property string body
+                    readonly property bool isNote: kind === "note"
+                    readonly property bool isAssistant: role === "assistant"
+                    readonly property bool renderAssistantAsMarkdown: isAssistant && !isNote && root.shouldRenderAssistantAsMarkdown(body)
                     readonly property real avatarSize: root.transcriptAvatarSize
-                    readonly property real bubbleWidth: (isStatus || isTool)
-                        ? root.transcriptWideBubbleWidth
-                        : root.transcriptMessageBubbleWidth
+                    readonly property real bubbleWidth: isNote ? root.transcriptWideBubbleWidth : root.transcriptMessageBubbleWidth
                     readonly property var avatarSources: isAssistant ? [root.adeleAvatarSource] : root.userAvatarCandidates()
 
-                    visible: !(isStatus || isTool) || root.debugEnabled
                     width: ListView.view.width
-                    implicitHeight: visible ? rowContainer.implicitHeight + 2 : 0
+                    implicitHeight: rowContainer.implicitHeight + 2
 
                     RowLayout {
                         id: rowContainer
@@ -2222,13 +648,13 @@ Item {
                         anchors.right: parent.right
                         anchors.top: parent.top
                         spacing: 6
-                        layoutDirection: (isStatus || isTool) ? Qt.LeftToRight : (isAssistant ? Qt.RightToLeft : Qt.LeftToRight)
+                        layoutDirection: messageEntry.isNote ? Qt.LeftToRight : (messageEntry.isAssistant ? Qt.RightToLeft : Qt.LeftToRight)
 
                         Item {
-                            Layout.preferredWidth: (isStatus || isTool) ? 0 : avatarSize
-                            Layout.preferredHeight: (isStatus || isTool) ? 0 : avatarSize
+                            Layout.preferredWidth: messageEntry.isNote ? 0 : messageEntry.avatarSize
+                            Layout.preferredHeight: messageEntry.isNote ? 0 : messageEntry.avatarSize
                             Layout.alignment: Qt.AlignTop
-                            visible: !(isStatus || isTool)
+                            visible: !messageEntry.isNote
 
                             Rectangle {
                                 anchors.fill: parent
@@ -2243,24 +669,24 @@ Item {
                                     property int candidateIndex: 0
                                     anchors.horizontalCenter: parent.horizontalCenter
                                     anchors.top: parent.top
-                                    width: isAssistant ? parent.width * 1.9 : parent.width
-                                    height: isAssistant ? parent.height * 1.9 : parent.height
+                                    width: messageEntry.isAssistant ? parent.width * 1.9 : parent.width
+                                    height: messageEntry.isAssistant ? parent.height * 1.9 : parent.height
                                     fillMode: Image.PreserveAspectCrop
                                     horizontalAlignment: Image.AlignHCenter
-                                    verticalAlignment: isAssistant ? Image.AlignTop : Image.AlignVCenter
-                                    source: avatarSources.length > 0 ? avatarSources[Math.min(candidateIndex, avatarSources.length - 1)] : ""
+                                    verticalAlignment: messageEntry.isAssistant ? Image.AlignTop : Image.AlignVCenter
+                                    source: messageEntry.avatarSources.length > 0
+                                        ? messageEntry.avatarSources[Math.min(candidateIndex, messageEntry.avatarSources.length - 1)]
+                                        : ""
                                     visible: status === Image.Ready
-
                                     onStatusChanged: {
-                                        if (status === Image.Error && candidateIndex < avatarSources.length - 1) {
+                                        if (status === Image.Error && candidateIndex < messageEntry.avatarSources.length - 1) {
                                             candidateIndex += 1
                                         }
                                     }
                                 }
-
                                 Kirigami.Icon {
                                     anchors.fill: parent
-                                    source: isAssistant ? "preferences-desktop-user" : "user-identity"
+                                    source: messageEntry.isAssistant ? "preferences-desktop-user" : "user-identity"
                                     visible: !avatarImage.visible
                                 }
                             }
@@ -2269,19 +695,17 @@ Item {
                         Rectangle {
                             id: bubble
                             Layout.fillWidth: true
-                            Layout.maximumWidth: bubbleWidth
+                            Layout.maximumWidth: messageEntry.bubbleWidth
                             Layout.alignment: Qt.AlignTop
-                            Layout.preferredWidth: bubbleWidth
+                            Layout.preferredWidth: messageEntry.bubbleWidth
                             implicitWidth: Layout.preferredWidth
                             implicitHeight: bubbleContent.implicitHeight + 12
                             height: implicitHeight
-                            radius: isStatus ? 0 : 8
-                            color: isStatus
+                            radius: messageEntry.isNote ? 0 : 8
+                            color: messageEntry.isNote
                                 ? "transparent"
-                                : (isTool
-                                    ? root.themeBackgroundColor
-                                    : (isAssistant ? root.themeBackgroundColor : root.themeHighlightColor))
-                            border.width: isStatus ? 0 : 1
+                                : (messageEntry.isAssistant ? root.themeBackgroundColor : root.themeHighlightColor)
+                            border.width: messageEntry.isNote ? 0 : 1
                             border.color: root.themeDisabledTextColor
 
                             ColumnLayout {
@@ -2292,50 +716,32 @@ Item {
                                 anchors.margins: 6
                                 spacing: 4
 
-                                QQC2.Button {
-                                    visible: isTool
+                                TextEdit {
+                                    id: messageText
                                     Layout.fillWidth: true
-                                    text: (toolExpanded ? "▾" : "▸") + " " + toolName
-                                    onClicked: root.toggleToolEntryExpanded(modelData.entryId)
+                                    Layout.preferredHeight: contentHeight
+                                    readOnly: true
+                                    selectByMouse: true
+                                    selectByKeyboard: true
+                                    wrapMode: TextEdit.Wrap
+                                    textFormat: (messageEntry.isAssistant && messageEntry.renderAssistantAsMarkdown)
+                                        ? Text.MarkdownText
+                                        : Text.PlainText
+                                    text: messageEntry.body
+                                    color: messageEntry.isNote
+                                        ? root.themeDisabledTextColor
+                                        : (messageEntry.isAssistant ? root.themeTextColor : root.themeHighlightedTextColor)
+                                    font.pointSize: root.baseFontPointSize * root.uiScale
+                                    font.italic: messageEntry.isNote
+                                    activeFocusOnPress: true
+                                    selectedTextColor: messageEntry.isAssistant ? root.themeHighlightedTextColor : root.themeTextColor
+                                    selectionColor: messageEntry.isAssistant ? root.themeHighlightColor : root.themeBackgroundColor
+                                    onLinkActivated: function(link) {
+                                        // #11: assistant text is MarkdownText; gate URLs on a
+                                        // scheme allowlist before handing them to the system.
+                                        LinkSafety.openLinkSafely(link, Qt.openUrlExternally)
+                                    }
                                 }
-
-                            TextEdit {
-                                id: messageText
-                                Layout.fillWidth: true
-                                Layout.preferredHeight: visible ? contentHeight : 0
-                                visible: !isTool || toolExpanded
-                                readOnly: true
-                                selectByMouse: true
-                                selectByKeyboard: true
-                                wrapMode: TextEdit.Wrap
-                                textFormat: (modelData.kind === "message" && isAssistant && renderAssistantAsMarkdown)
-                                    ? Text.MarkdownText
-                                    : Text.PlainText
-                                text: isStatus
-                                    ? "[status] " + messageBodyText
-                                    : messageBodyText
-                                color: isStatus
-                                    ? root.themeDisabledTextColor
-                                    : (isTool
-                                        ? root.themeTextColor
-                                        : (isAssistant
-                                        ? root.themeTextColor
-                                        : root.themeHighlightedTextColor))
-                                font.pointSize: root.baseFontPointSize * root.uiScale
-                                font.italic: isStatus
-                                font.bold: false
-                                activeFocusOnPress: true
-                                selectedTextColor: (isAssistant || isTool) ? root.themeHighlightedTextColor : root.themeTextColor
-                                selectionColor: (isAssistant || isTool) ? root.themeHighlightColor : root.themeBackgroundColor
-                                onLinkActivated: function(link) {
-                                    // #11: assistant messages are MarkdownText and
-                                    // a hostile daemon/LLM could embed
-                                    // javascript:, magnet:, file:, ... — gate on
-                                    // a scheme allowlist before handing the URL
-                                    // to the user's system handler.
-                                    LinkSafety.openLinkSafely(link, Qt.openUrlExternally)
-                                }
-                            }
                             }
                         }
                     }
@@ -2343,69 +749,23 @@ Item {
             }
         }
 
-        // Per-conversation model selector. The combo's flattened list pairs
-        // every healthy connection with every model the connector exposes.
-        // Index 0 is the disabled "Auto (coming soon)" sentinel — kept pinned
-        // top so the UX doesn't shift when auto-routing lands.
-        RowLayout {
-            id: modelSelectorRow
+        // Transient chat status ("Thinking…") — collapses to nothing at idle.
+        QQC2.Label {
             Layout.fillWidth: true
-            visible: !root.ultraNarrow && (root.usingWsTransport || modelChoices.length > 0)
-            spacing: 6
-
-            QQC2.Label {
-                text: "Model:"
-                color: root.themeDisabledTextColor
-                Layout.alignment: Qt.AlignVCenter
-            }
-
-            QQC2.ComboBox {
-                id: modelSelectorCombo
-                Layout.fillWidth: true
-                enabled: !busy && modelChoices.length > 0
-                model: {
-                    const labels = [root.autoLabel]
-                    for (let i = 0; i < modelChoices.length; i++) {
-                        labels.push(modelChoices[i].label)
-                    }
-                    return labels
-                }
-                currentIndex: selectedModelIndex < 0 ? 0 : (selectedModelIndex + 1)
-                onActivated: function(index) {
-                    onModelSelectorActivated(index)
-                }
-
-                delegate: QQC2.ItemDelegate {
-                    width: parent ? parent.width : implicitWidth
-                    enabled: index !== 0
-                    text: modelText.text
-                    contentItem: QQC2.Label {
-                        id: modelText
-                        text: modelSelectorCombo.model[index]
-                        color: index === 0 ? root.themeDisabledTextColor : root.themeTextColor
-                        elide: Text.ElideRight
-                    }
-                    highlighted: modelSelectorCombo.highlightedIndex === index
-                }
-            }
-
-            QQC2.ToolButton {
-                text: "⟳"
-                QQC2.ToolTip.text: "Refresh model list"
-                QQC2.ToolTip.visible: hovered
-                enabled: !modelListLoading
-                onClicked: reloadModelList()
-            }
+            visible: root.chatStatusText.length > 0
+            text: root.chatStatusText
+            font.italic: true
+            color: root.themeDisabledTextColor
+            elide: Text.ElideRight
         }
 
-        // TTS voice switcher (adele-kde#29). Hidden entirely unless the voice
-        // service is up AND at least one voice is installed, so it never shows
-        // an empty/dead control. The speaker picker only appears for
-        // multi-speaker voices (num_speakers > 1).
+        // TTS voice switcher. Hidden unless the voice daemon is up AND at least
+        // one voice is installed, so it never shows a dead control. The speaker
+        // picker only appears for multi-speaker voices.
         RowLayout {
             id: voiceSwitcherRow
             Layout.fillWidth: true
-            visible: root.voiceAvailable && root.voiceChoices.length > 0 && !root.ultraNarrow
+            visible: voice.available && voice.voices.length > 0 && !root.ultraNarrow
             spacing: 6
 
             QQC2.Label {
@@ -2417,56 +777,35 @@ Item {
             QQC2.ComboBox {
                 id: voiceSelectorCombo
                 Layout.fillWidth: true
-                enabled: !root.busy && root.voiceChoices.length > 0
-                model: {
-                    const labels = []
-                    for (let i = 0; i < root.voiceChoices.length; i++) {
-                        labels.push(root.voiceChoices[i].label)
-                    }
-                    return labels
-                }
-                currentIndex: Math.max(0, root.voiceIndexById(root.voiceId))
+                enabled: !root.busy && voice.voices.length > 0
+                model: voice.voices
+                textRole: "label"
+                currentIndex: Math.max(0, root.voiceIndexById(voice.voiceId))
                 onActivated: function(index) {
-                    if (index < 0 || index >= root.voiceChoices.length) {
+                    if (index < 0 || index >= voice.voices.length) {
                         return
                     }
-                    const entry = root.voiceChoices[index]
-                    // Switching voice resets the speaker to default (-1); a
-                    // multi-speaker voice then lets the user pick a speaker.
-                    root.selectVoice(entry.voice_id, -1)
-                }
-
-                delegate: QQC2.ItemDelegate {
-                    width: parent ? parent.width : implicitWidth
-                    text: voiceText.text
-                    contentItem: QQC2.Label {
-                        id: voiceText
-                        text: voiceSelectorCombo.model[index]
-                        color: root.themeTextColor
-                        elide: Text.ElideRight
-                    }
-                    highlighted: voiceSelectorCombo.highlightedIndex === index
+                    // Switching voice resets the speaker to default (-1).
+                    voice.setVoice(voice.voices[index].voice_id, -1)
                 }
             }
 
-            // Multi-speaker selector — only meaningful for voices that ship
-            // more than one speaker (e.g. VCTK). Speaker ids are 0-based.
             QQC2.ComboBox {
                 id: voiceSpeakerCombo
-                visible: root.voiceSpeakerCount(root.voiceId) > 1
+                visible: root.voiceSpeakerCount(voice.voiceId) > 1
                 Layout.preferredWidth: 110
                 enabled: !root.busy
                 model: {
-                    const count = root.voiceSpeakerCount(root.voiceId)
+                    const count = root.voiceSpeakerCount(voice.voiceId)
                     const labels = []
                     for (let i = 0; i < count; i++) {
                         labels.push("Speaker " + i)
                     }
                     return labels
                 }
-                currentIndex: root.voiceSpeakerId >= 0 ? root.voiceSpeakerId : 0
+                currentIndex: voice.speakerId >= 0 ? voice.speakerId : 0
                 onActivated: function(index) {
-                    root.selectVoice(root.voiceId, index)
+                    voice.setVoice(voice.voiceId, index)
                 }
             }
         }
@@ -2474,30 +813,22 @@ Item {
         RowLayout {
             Layout.fillWidth: true
 
-            // Push-to-talk / record button (adele-kde#29). Acts as a TOGGLE:
-            // starts a dictation turn from Idle (PushToTalk, works even with the
-            // wake word off) and STOPS the active turn otherwise (StopListening,
-            // or StopSpeaking while the assistant is talking). A coloured,
-            // breathing ring makes "the mic is open / recording" unmissable.
-            // Hidden when the voice service isn't available so it never dangles.
+            // Push-to-talk toggle: starts a dictation turn from Idle (works even
+            // with the wake word off) and stops the active turn otherwise. A
+            // coloured, breathing ring makes an open mic unmissable. Hidden when
+            // the voice daemon isn't available so it never dangles.
             QQC2.ToolButton {
                 id: micButton
-                visible: root.voiceAvailable
-                enabled: root.voiceAvailable && !root.busy
+                visible: voice.available
+                enabled: voice.available && !root.busy
                 Layout.alignment: Qt.AlignTop
                 icon.name: root.voiceStateIcon
-                // Highlight while a turn is in flight so the toggle reads as
-                // "active" (and the icon flips to the stop affordance).
                 highlighted: root.voiceActive
                 display: QQC2.AbstractButton.IconOnly
                 QQC2.ToolTip.text: root.micButtonTooltip()
                 QQC2.ToolTip.visible: hovered
                 onClicked: root.voiceMicToggle()
 
-                // Coloured state ring drawn over the button. Visible only while a
-                // turn is active; its colour tracks the pipeline state (red while
-                // Listening, blue while Speaking). While Listening it "breathes"
-                // (opacity pulse) so a recording mic is obvious at a glance.
                 Rectangle {
                     id: micStateRing
                     anchors.fill: parent
@@ -2507,10 +838,6 @@ Item {
                     visible: root.voiceActive
                     border.width: Math.max(2, Math.round(2 * root.uiScale))
                     border.color: root.voiceStateColor
-                    // The "breathing" pulse: a smooth opacity cycle. Listening
-                    // breathes briskly (an open mic is the thing to notice);
-                    // Processing breathes slower (a calm "still thinking" hint
-                    // so a busy turn never looks frozen). Speaking holds steady.
                     opacity: (root.voiceListening || root.voiceProcessing) ? 1.0 : 0.9
                     SequentialAnimation on opacity {
                         running: micStateRing.visible && root.voiceListening
@@ -2529,11 +856,8 @@ Item {
                 }
             }
 
-            // Dedicated "cancel this turn" button (adele-kde#38). Distinct from
-            // the mic toggle: it only ever STOPS — aborting whatever the
-            // assistant is doing (Listening/Processing/Speaking) and returning
-            // the pipeline to Idle/wake-listening. Visible only while a turn is
-            // in flight so it never dangles as a dead control at Idle.
+            // Dedicated "cancel this turn" affordance — only ever stops. Visible
+            // only while a turn is in flight so it never dangles at Idle.
             QQC2.ToolButton {
                 id: voiceCancelButton
                 visible: root.voiceActive
@@ -2546,13 +870,8 @@ Item {
                 onClicked: root.voiceCancelTurn()
             }
 
-            // Prominent conversational-state chip (adele-kde voice-state). Sits
-            // right beside the mic button and spells out the state in words
-            // ("Listening…/Thinking…/Speaking…"), with a state-coloured dot, so
-            // the widget is unambiguous about what it's doing — not just an icon
-            // swap. Shown only while a turn is active; collapses to nothing at
-            // Idle so the input row keeps its full width when there's no voice
-            // activity.
+            // Conversational-state chip: spells the state in words with a
+            // state-coloured, pulsing dot. Shown only while a turn is active.
             Rectangle {
                 id: voiceStateChip
                 visible: root.voiceActive
@@ -2576,9 +895,6 @@ Item {
                         radius: implicitWidth / 2
                         color: root.voiceStateColor
                         Layout.alignment: Qt.AlignVCenter
-                        // Pulse the dot in sympathy with the mic ring: brisk
-                        // while Listening, slower while Processing, so the chip
-                        // and the button always read as one.
                         SequentialAnimation on opacity {
                             running: voiceStateChip.visible && root.voiceListening
                             loops: Animation.Infinite
@@ -2619,32 +935,25 @@ Item {
                     width: promptInputScroll.availableWidth
                     placeholderText: "Ask Adele…"
                     wrapMode: TextEdit.Wrap
-                    text: root.promptText
-                    enabled: !busy
-                    onTextChanged: {
-                        root.promptText = text
-                        Qt.callLater(root.keepPromptCursorVisible)
-                    }
+                    enabled: !root.busy
+                    onTextChanged: Qt.callLater(root.keepPromptCursorVisible)
                     onCursorPositionChanged: Qt.callLater(root.keepPromptCursorVisible)
                     onActiveFocusChanged: {
                         if (activeFocus) {
                             Qt.callLater(root.keepPromptCursorVisible)
                         }
                     }
-
                     Keys.onPressed: function(event) {
                         const isEnterKey = event.key === Qt.Key_Return || event.key === Qt.Key_Enter
                         if (!isEnterKey) {
                             return
                         }
-
                         if (event.modifiers & Qt.MetaModifier) {
                             insert(cursorPosition, "\n")
                             event.accepted = true
                             return
                         }
-
-                        sendPrompt(text)
+                        root.submitPrompt()
                         event.accepted = true
                     }
                 }
@@ -2658,91 +967,32 @@ Item {
 
             QQC2.Button {
                 id: sendButton
-                text: busy ? "…" : "Send"
-                enabled: !busy
-                onClicked: sendPrompt(root.promptText)
-            }
-
-            QQC2.Button {
-                text: "New"
-                enabled: !busy
-                onClicked: newConversation()
+                text: root.busy ? "…" : "Send"
+                enabled: !root.busy
+                onClicked: root.submitPrompt()
             }
 
             QQC2.Button {
                 text: "Refresh"
                 visible: !panelMode
-                enabled: !busy
-                onClicked: refreshConversation()
+                enabled: !root.busy && root.conversationId.length > 0
+                onClicked: root.selectConversationById(root.conversationId)
             }
 
-            QQC2.Button {
-                text: "Clear"
-                enabled: !busy
-                onClicked: clearTranscriptView()
-            }
-
-            QQC2.ComboBox {
-                id: servicePicker
-                visible: !root.usingWsTransport && root.devServiceRunning && !root.ultraNarrow
-                width: 170
-                model: root.serviceChoices
-                textRole: "label"
-                onActivated: function(index) {
-                    switchService(index)
-                }
-            }
-
-            QQC2.CheckBox {
-                id: debugCheckBox
-                visible: !root.ultraNarrow
-                text: "Debug"
-                checked: root.debugEnabled
-                contentItem: QQC2.Label {
-                    text: debugCheckBox.text
-                    color: root.themeTextColor
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: debugCheckBox.indicator && debugCheckBox.indicator.visible
-                        ? debugCheckBox.indicator.width + debugCheckBox.spacing
-                        : 0
-                }
-                onToggled: {
-                    root.debugEnabled = checked
-                    if (root.debugEnabled && root.conversationId.length > 0 && !root.loadingConversation) {
-                        root.refreshConversation()
-                    }
-                }
+            QQC2.Label {
+                Layout.fillWidth: true
+                Layout.alignment: Qt.AlignVCenter
+                visible: root.statusText.length > 0
+                text: root.statusText
+                color: root.themeDisabledTextColor
+                elide: Text.ElideRight
+                font.pointSize: root.baseFontPointSize * 0.9
             }
         }
     }
 
     Component.onCompleted: {
-        expandedToolEntries = ({})
-        transcriptEntries = [
-            {
-                kind: "status",
-                role: "status",
-                text: "Ready",
-            }
-        ]
-        appendDebugStatus("Widget loaded")
-        refreshServiceStatus(function() {
-            if (panelMode) {
-                ensureConversation()
-            } else {
-                startupTimer.start()
-            }
-            // Fetch the daemon's flattened connection·model list once the
-            // service is up; the selector stays empty on daemons that don't
-            // ship multi-connection yet (which is fine).
-            reloadModelList()
-            // Subscribe + pull the initial task page so the header badge
-            // appears on first paint when work is already in flight.
-            subscribeBackgroundTasksHint()
-            refreshBackgroundTasks()
-            // Probe the voice service so the mic button + voice switcher paint
-            // correctly (or stay hidden) on first show.
-            refreshVoiceStatus()
-        })
+        core.connectToDaemon("dbus")
+        voice.start()
     }
 }
