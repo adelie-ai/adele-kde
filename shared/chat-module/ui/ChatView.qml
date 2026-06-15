@@ -77,6 +77,18 @@ Item {
     property var conversationChoices: []
     // Index of the in-progress assistant bubble in transcriptModel, or -1.
     property int streamingIndex: -1
+    // Context-window fill (#76): the `context_usage` event payload (or null).
+    property var contextUsage: null
+    // Per-conversation You/Adele voice settings (#80), kept in QML-local maps:
+    // the QML is the source of user-driven changes (sent via the reducer's
+    // setVoiceIn/setAdeleOutput intents), and the model-driven Adele level
+    // arrives via the `adele_output_dropdown` event. Mutated with the QV4-safe
+    // assign-then-key pattern (Object.assign to the GC root, then write the key)
+    // to avoid the insertMember GC hazard.
+    property var voiceInByConv: ({})
+    property var adeleOutByConv: ({})
+    readonly property bool voiceInEnabled: voiceInByConv[conversationId] === true
+    readonly property string adeleOutputLevel: String(adeleOutByConv[conversationId] || "disabled")
 
     // --- view configuration (preserved styling) ----------------------------
     property real uiScale: 1.0
@@ -203,11 +215,17 @@ Item {
             // Route the model's say_this through the voice daemon's TTS.
             voice.sayText(String(data.text || ""))
             break
+        case "context_usage":
+            root.contextUsage = data.usage || null
+            break
+        case "adele_output_dropdown":
+            // The model drove the Adele level (request_voice / stop_voice).
+            root.applyAdeleLevelFromCore(String(data.level || "disabled"))
+            break
         // Ignored in this view (no KDE UI yet — all were D-Bus no-ops before, so
         // there is no regression; each lands with its own FFI intent later):
-        //   context_usage, models, model_selection, default_model,
-        //   model_picker_visible, tasks_replace_all/task_*, scratchpad,
-        //   refresh_side_pane_tasks, adele_output_dropdown
+        //   models, model_selection, default_model, model_picker_visible,
+        //   tasks_replace_all/task_*, scratchpad, refresh_side_pane_tasks
         default:
             break
         }
@@ -226,6 +244,7 @@ Item {
             })
         }
         root.syncConversationPicker()
+        root.syncVoiceModeControls()
         Qt.callLater(function() {
             if (transcript && transcript.count > 0) {
                 transcript.positionViewAtEnd()
@@ -376,6 +395,62 @@ Item {
     }
 
     // ======================================================================
+    //  per-conversation voice mode (You / Adele, #80)
+    // ======================================================================
+    function setVoiceInForCurrent(enabled) {
+        if (conversationId.length === 0) {
+            return
+        }
+        // QV4-safe: assign the new object to the GC-rooted property first, then
+        // write the key (never mutate-then-store).
+        voiceInByConv = Object.assign({}, voiceInByConv)
+        voiceInByConv[conversationId] = enabled
+        core.setVoiceIn(conversationId, enabled)
+    }
+    function setAdeleOutputForCurrent(level) {
+        if (conversationId.length === 0) {
+            return
+        }
+        adeleOutByConv = Object.assign({}, adeleOutByConv)
+        adeleOutByConv[conversationId] = level
+        core.setAdeleOutput(conversationId, level)
+    }
+    // The model drove the Adele level (request_voice / stop_voice). Record it for
+    // the active conversation and reflect it on the dropdown — but do NOT call
+    // setAdeleOutput, which would echo the model's own change back to the core.
+    function applyAdeleLevelFromCore(level) {
+        if (conversationId.length === 0) {
+            return
+        }
+        adeleOutByConv = Object.assign({}, adeleOutByConv)
+        adeleOutByConv[conversationId] = level
+        adeleCombo.currentIndex = adeleLevelToIndex(level)
+    }
+    function adeleLevelToIndex(level) {
+        return level === "always" ? 2 : (level === "on_demand" ? 1 : 0)
+    }
+    function adeleIndexToLevel(index) {
+        return index === 2 ? "always" : (index === 1 ? "on_demand" : "disabled")
+    }
+    // Reflect the active conversation's stored You/Adele settings on the
+    // dropdowns. Called on load; currentIndex is set imperatively (not bound) so
+    // a user pick doesn't break a declarative binding.
+    function syncVoiceModeControls() {
+        youCombo.currentIndex = voiceInEnabled ? 1 : 0
+        adeleCombo.currentIndex = adeleLevelToIndex(adeleOutputLevel)
+    }
+
+    // Context-window fill colour (#76): KDE semantic hues per fill level.
+    function contextLevelColor(level) {
+        switch (level) {
+            case "red": return Kirigami.Theme.negativeTextColor
+            case "amber": return Kirigami.Theme.neutralTextColor
+            case "green": return Kirigami.Theme.positiveTextColor
+            default: return themeDisabledTextColor
+        }
+    }
+
+    // ======================================================================
     //  pure view helpers (no daemon / no transport)
     // ======================================================================
     function toImageSource(pathValue) {
@@ -522,6 +597,19 @@ Item {
                 font.bold: true
                 color: root.themeTextColor
                 Layout.fillWidth: true
+            }
+
+            // Context-window fill indicator (#76): a glanceable "12k / 32k (38%)"
+            // readout, coloured green/amber/red by the level the core computed.
+            QQC2.Label {
+                visible: root.contextUsage !== null && !root.ultraNarrow
+                text: root.contextUsage ? String(root.contextUsage.readout || "") : ""
+                color: root.contextLevelColor(root.contextUsage ? String(root.contextUsage.level || "") : "")
+                font.pointSize: root.baseFontPointSize * 0.85
+                Layout.alignment: Qt.AlignVCenter
+                QQC2.ToolTip.text: "Context window" + (root.contextUsage && root.contextUsage.compaction_active ? " — compaction active" : "")
+                QQC2.ToolTip.visible: contextHover.hovered
+                HoverHandler { id: contextHover }
             }
 
             TasksBadge {
@@ -807,6 +895,42 @@ Item {
                 onActivated: function(index) {
                     voice.setVoice(voice.voiceId, index)
                 }
+            }
+        }
+
+        // Per-conversation voice mode (#80). You = speak to Adele (push-to-talk +
+        // reply narration); Adele = how often she narrates back. Shown when the
+        // voice daemon is up. The model can also drive Adele via
+        // request_voice / stop_voice — the adele_output_dropdown event reflects it.
+        RowLayout {
+            id: voiceModeRow
+            Layout.fillWidth: true
+            visible: voice.available && !root.ultraNarrow
+            spacing: 6
+
+            QQC2.Label {
+                text: "You:"
+                color: root.themeDisabledTextColor
+                Layout.alignment: Qt.AlignVCenter
+            }
+            QQC2.ComboBox {
+                id: youCombo
+                Layout.fillWidth: true
+                enabled: !root.busy && root.conversationId.length > 0
+                model: ["Off", "On"]
+                onActivated: function(index) { root.setVoiceInForCurrent(index === 1) }
+            }
+            QQC2.Label {
+                text: "Adele:"
+                color: root.themeDisabledTextColor
+                Layout.alignment: Qt.AlignVCenter
+            }
+            QQC2.ComboBox {
+                id: adeleCombo
+                Layout.fillWidth: true
+                enabled: !root.busy && root.conversationId.length > 0
+                model: ["Off", "On demand", "Always"]
+                onActivated: function(index) { root.setAdeleOutputForCurrent(root.adeleIndexToLevel(index)) }
             }
         }
 
