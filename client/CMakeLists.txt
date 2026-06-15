@@ -93,7 +93,14 @@ target_compile_options(adelecore PRIVATE -Werror)
 # AdeleCore/VoiceController never register → blank popup. Force the `lib` prefix
 # to match Qt's resolver (and the KDE plugin convention, e.g. libkcmutilsqmlplugin.so).
 # INSTALL_RPATH "$ORIGIN" finds the co-installed core cdylib at runtime.
-set_target_properties(adelecore PROPERTIES INSTALL_RPATH "$ORIGIN" PREFIX "lib")
+# LINK_DEPENDS relinks the plugin whenever the cdylib changes — otherwise CMake
+# doesn't treat the imported-from-custom-target .so as a link input, so a cdylib
+# rebuild (e.g. gaining a SONAME) leaves the plugin's DT_NEEDED stale (it would
+# keep an absolute build-tree path instead of the bare soname $ORIGIN resolves).
+set_target_properties(adelecore PROPERTIES
+    INSTALL_RPATH "$ORIGIN"
+    PREFIX "lib"
+    LINK_DEPENDS "${CORE_CDYLIB}")
 
 # --- Install ------------------------------------------------------------------
 set(CLIENT_QML_INSTALL_DIR "${KDE_INSTALL_QMLDIR}/org/desktopassistant/client")
