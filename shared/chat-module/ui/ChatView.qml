@@ -51,17 +51,16 @@ Item {
         voice.setEnabled(enabled)
     }
     signal tasksBadgeClicked()
-    // Background tasks now arrive over D-Bus via the core, but the tasks panel +
-    // its actions (cancel/logs) need new FFI intents — a focused follow-up. Until
-    // then this backend is inert, so the badge stays hidden (count 0) and the
-    // shell wiring keeps working unchanged.
+    // Background-tasks backend for the header badge + the process-manager window
+    // (the Tasks*.qml read this interface). Driven by the core's Task* events;
+    // the getters read reactive root properties so the views rebind on change.
     readonly property var tasksBackend: ({
-        get tasks() { return [] },
-        get runningTaskCount() { return 0 },
-        cancelTask: function(_id) {},
-        openConversation: function(id) { root.selectConversationById(id) },
-        refreshLogs: function(_id) {},
-        taskLogs: function(_id) { return "" }
+        get tasks() { return root.tasksList },
+        get runningTaskCount() { return root.runningTaskCount },
+        cancelTask: function(id) { core.cancelTask(String(id || "")) },
+        openConversation: function(id) { root.openTaskConversation(String(id || "")) },
+        refreshLogs: function(id) { core.fetchTaskLogs(String(id || "")) },
+        taskLogs: function(id) { return root.taskLogsById[String(id || "")] || "" }
     })
 
     // --- view state (driven by the core's viewEvent deltas) ----------------
@@ -77,6 +76,31 @@ Item {
     property var conversationChoices: []
     // Index of the in-progress assistant bubble in transcriptModel, or -1.
     property int streamingIndex: -1
+    // Context-window fill (#76): the `context_usage` event payload (or null).
+    property var contextUsage: null
+    // Per-conversation You/Adele voice settings (#80), kept in QML-local maps:
+    // the QML is the source of user-driven changes (sent via the reducer's
+    // setVoiceIn/setAdeleOutput intents), and the model-driven Adele level
+    // arrives via the `adele_output_dropdown` event. Mutated with the QV4-safe
+    // assign-then-key pattern (Object.assign to the GC root, then write the key)
+    // to avoid the insertMember GC hazard.
+    property var voiceInByConv: ({})
+    property var adeleOutByConv: ({})
+    readonly property bool voiceInEnabled: voiceInByConv[conversationId] === true
+    readonly property string adeleOutputLevel: String(adeleOutByConv[conversationId] || "disabled")
+    // Model picker: available (connection·model) listings, the conversation's
+    // stored selection, the interactive-purpose default, and whether the picker
+    // should show — all from the core's events. A pick is applied via the
+    // selectModel intent (the override is staged in the core).
+    property var modelChoices: []
+    property var currentSelection: null
+    property var defaultModel: null
+    property bool modelPickerVisible: false
+    // Background tasks: the list + running count (from the Task* events) and a
+    // per-task formatted log buffer (fetched via fetchTaskLogs / appended live).
+    property var tasksList: []
+    property int runningTaskCount: 0
+    property var taskLogsById: ({})
 
     // --- view configuration (preserved styling) ----------------------------
     property real uiScale: 1.0
@@ -203,11 +227,51 @@ Item {
             // Route the model's say_this through the voice daemon's TTS.
             voice.sayText(String(data.text || ""))
             break
-        // Ignored in this view (no KDE UI yet — all were D-Bus no-ops before, so
-        // there is no regression; each lands with its own FFI intent later):
-        //   context_usage, models, model_selection, default_model,
-        //   model_picker_visible, tasks_replace_all/task_*, scratchpad,
-        //   refresh_side_pane_tasks, adele_output_dropdown
+        case "context_usage":
+            root.contextUsage = data.usage || null
+            break
+        case "adele_output_dropdown":
+            // The model drove the Adele level (request_voice / stop_voice).
+            root.applyAdeleLevelFromCore(String(data.level || "disabled"))
+            break
+        case "models":
+            root.modelChoices = data.items || []
+            root.syncModelPicker()
+            break
+        case "model_selection":
+            root.currentSelection = data.selection || null
+            root.syncModelPicker()
+            break
+        case "default_model":
+            root.defaultModel = data.model || null
+            root.syncModelPicker()
+            break
+        case "model_picker_visible":
+            root.modelPickerVisible = data.value === true
+            break
+        case "tasks_replace_all":
+            root.applyTasksReplaceAll(data.items || [])
+            break
+        case "task_started":
+            root.applyTaskStarted(data.task || null)
+            break
+        case "task_progress":
+            root.applyTaskProgress(String(data.id || ""), data.progress_hint)
+            break
+        case "task_log_appended":
+            root.applyTaskLogAppended(String(data.id || ""), data.entry || null)
+            break
+        case "task_completed":
+            root.applyTaskCompleted(String(data.id || ""))
+            break
+        case "task_logs":
+            root.applyTaskLogs(String(data.id || ""), data.entries || [])
+            break
+        case "refresh_side_pane_tasks":
+            // KDE has no per-conversation side pane; the badge + window already
+            // reflect the full task list, so there's nothing to recompute.
+            break
+        // Ignored: scratchpad (no KDE side pane).
         default:
             break
         }
@@ -226,6 +290,7 @@ Item {
             })
         }
         root.syncConversationPicker()
+        root.syncVoiceModeControls()
         Qt.callLater(function() {
             if (transcript && transcript.count > 0) {
                 transcript.positionViewAtEnd()
@@ -376,6 +441,198 @@ Item {
     }
 
     // ======================================================================
+    //  per-conversation voice mode (You / Adele, #80)
+    // ======================================================================
+    function setVoiceInForCurrent(enabled) {
+        if (conversationId.length === 0) {
+            return
+        }
+        // QV4-safe: assign the new object to the GC-rooted property first, then
+        // write the key (never mutate-then-store).
+        voiceInByConv = Object.assign({}, voiceInByConv)
+        voiceInByConv[conversationId] = enabled
+        core.setVoiceIn(conversationId, enabled)
+    }
+    function setAdeleOutputForCurrent(level) {
+        if (conversationId.length === 0) {
+            return
+        }
+        adeleOutByConv = Object.assign({}, adeleOutByConv)
+        adeleOutByConv[conversationId] = level
+        core.setAdeleOutput(conversationId, level)
+    }
+    // The model drove the Adele level (request_voice / stop_voice). Record it for
+    // the active conversation and reflect it on the dropdown — but do NOT call
+    // setAdeleOutput, which would echo the model's own change back to the core.
+    function applyAdeleLevelFromCore(level) {
+        if (conversationId.length === 0) {
+            return
+        }
+        adeleOutByConv = Object.assign({}, adeleOutByConv)
+        adeleOutByConv[conversationId] = level
+        adeleCombo.currentIndex = adeleLevelToIndex(level)
+    }
+    function adeleLevelToIndex(level) {
+        return level === "always" ? 2 : (level === "on_demand" ? 1 : 0)
+    }
+    function adeleIndexToLevel(index) {
+        return index === 2 ? "always" : (index === 1 ? "on_demand" : "disabled")
+    }
+    // Reflect the active conversation's stored You/Adele settings on the
+    // dropdowns. Called on load; currentIndex is set imperatively (not bound) so
+    // a user pick doesn't break a declarative binding.
+    function syncVoiceModeControls() {
+        youCombo.currentIndex = voiceInEnabled ? 1 : 0
+        adeleCombo.currentIndex = adeleLevelToIndex(adeleOutputLevel)
+    }
+
+    // Context-window fill colour (#76): KDE semantic hues per fill level.
+    function contextLevelColor(level) {
+        switch (level) {
+            case "red": return Kirigami.Theme.negativeTextColor
+            case "amber": return Kirigami.Theme.neutralTextColor
+            case "green": return Kirigami.Theme.positiveTextColor
+            default: return themeDisabledTextColor
+        }
+    }
+
+    // ======================================================================
+    //  model picker + background tasks
+    // ======================================================================
+    function modelLabel(item) {
+        const conn = String(item.connection_label || item.connection_id || "")
+        const m = item.model || {}
+        const name = String(m.display_name || m.id || "")
+        return conn.length > 0 ? (conn + " · " + name) : name
+    }
+    function activeSelection() {
+        // The conversation's stored selection wins; otherwise the purpose default.
+        if (currentSelection && currentSelection.connection_id) {
+            return currentSelection
+        }
+        if (defaultModel && defaultModel.connection_id) {
+            return defaultModel
+        }
+        return null
+    }
+    function modelChoiceIndex(sel) {
+        if (!sel) {
+            return -1
+        }
+        for (let i = 0; i < modelChoices.length; i++) {
+            const it = modelChoices[i]
+            const m = it.model || {}
+            if (String(it.connection_id) === String(sel.connection_id)
+                    && String(m.id) === String(sel.model_id)) {
+                return i
+            }
+        }
+        return -1
+    }
+    // Index 0 is the "(default)" sentinel (inherit); models follow at +1.
+    function syncModelPicker() {
+        const idx = modelChoiceIndex(activeSelection())
+        modelSelectorCombo.currentIndex = idx >= 0 ? idx + 1 : 0
+    }
+
+    function countRunning(list) {
+        let n = 0
+        for (let i = 0; i < list.length; i++) {
+            const s = String(list[i].status || "")
+            if (s === "pending" || s === "running") {
+                n += 1
+            }
+        }
+        return n
+    }
+    function applyTasksReplaceAll(items) {
+        tasksList = items
+        runningTaskCount = countRunning(items)
+    }
+    function applyTaskStarted(task) {
+        if (!task || !task.id) {
+            return
+        }
+        const next = tasksList.filter(function(t) { return t.id !== task.id })
+        next.push(task)
+        tasksList = next
+        runningTaskCount = countRunning(next)
+    }
+    function applyTaskProgress(id, hint) {
+        if (id.length === 0) {
+            return
+        }
+        tasksList = tasksList.map(function(t) {
+            return t.id === id ? Object.assign({}, t, { progress_hint: hint }) : t
+        })
+    }
+    function applyTaskCompleted(id) {
+        if (id.length === 0) {
+            return
+        }
+        tasksList = tasksList.map(function(t) {
+            if (t.id !== id) {
+                return t
+            }
+            const stillRunning = t.status === "running" || t.status === "pending"
+            return Object.assign({}, t, { status: stillRunning ? "completed" : t.status })
+        })
+        runningTaskCount = countRunning(tasksList)
+    }
+    function formatLogEntry(entry) {
+        if (!entry) {
+            return ""
+        }
+        return "[" + String(entry.level || "info") + "] " + String(entry.message || "")
+    }
+    function applyTaskLogAppended(id, entry) {
+        if (id.length === 0 || !entry) {
+            return
+        }
+        const prev = taskLogsById[id] || ""
+        const line = formatLogEntry(entry)
+        // QV4-safe: assign to the GC root first, then write the key.
+        taskLogsById = Object.assign({}, taskLogsById)
+        taskLogsById[id] = prev.length > 0 ? (prev + "\n" + line) : line
+    }
+    function applyTaskLogs(id, entries) {
+        if (id.length === 0) {
+            return
+        }
+        const lines = []
+        for (let i = 0; i < entries.length; i++) {
+            lines.push(formatLogEntry(entries[i]))
+        }
+        taskLogsById = Object.assign({}, taskLogsById)
+        taskLogsById[id] = lines.join("\n")
+    }
+    function findConversationIdForTask(taskId) {
+        for (let i = 0; i < tasksList.length; i++) {
+            const task = tasksList[i]
+            if (!task || task.id !== taskId) {
+                continue
+            }
+            const kind = task.kind || {}
+            if (kind.conversation && kind.conversation.conversation_id) {
+                return String(kind.conversation.conversation_id)
+            }
+            if (kind.subagent && kind.subagent.conversation_id) {
+                return String(kind.subagent.conversation_id)
+            }
+            if (kind.standalone && kind.standalone.conversation_id) {
+                return String(kind.standalone.conversation_id)
+            }
+        }
+        return ""
+    }
+    function openTaskConversation(taskId) {
+        const target = findConversationIdForTask(taskId)
+        if (target.length > 0) {
+            selectConversationById(target)
+        }
+    }
+
+    // ======================================================================
     //  pure view helpers (no daemon / no transport)
     // ======================================================================
     function toImageSource(pathValue) {
@@ -522,6 +779,19 @@ Item {
                 font.bold: true
                 color: root.themeTextColor
                 Layout.fillWidth: true
+            }
+
+            // Context-window fill indicator (#76): a glanceable "12k / 32k (38%)"
+            // readout, coloured green/amber/red by the level the core computed.
+            QQC2.Label {
+                visible: root.contextUsage !== null && !root.ultraNarrow
+                text: root.contextUsage ? String(root.contextUsage.readout || "") : ""
+                color: root.contextLevelColor(root.contextUsage ? String(root.contextUsage.level || "") : "")
+                font.pointSize: root.baseFontPointSize * 0.85
+                Layout.alignment: Qt.AlignVCenter
+                QQC2.ToolTip.text: "Context window" + (root.contextUsage && root.contextUsage.compaction_active ? " — compaction active" : "")
+                QQC2.ToolTip.visible: contextHover.hovered
+                HoverHandler { id: contextHover }
             }
 
             TasksBadge {
@@ -806,6 +1076,78 @@ Item {
                 currentIndex: voice.speakerId >= 0 ? voice.speakerId : 0
                 onActivated: function(index) {
                     voice.setVoice(voice.voiceId, index)
+                }
+            }
+        }
+
+        // Per-conversation voice mode (#80). You = speak to Adele (push-to-talk +
+        // reply narration); Adele = how often she narrates back. Shown when the
+        // voice daemon is up. The model can also drive Adele via
+        // request_voice / stop_voice — the adele_output_dropdown event reflects it.
+        RowLayout {
+            id: voiceModeRow
+            Layout.fillWidth: true
+            visible: voice.available && !root.ultraNarrow
+            spacing: 6
+
+            QQC2.Label {
+                text: "You:"
+                color: root.themeDisabledTextColor
+                Layout.alignment: Qt.AlignVCenter
+            }
+            QQC2.ComboBox {
+                id: youCombo
+                Layout.fillWidth: true
+                enabled: !root.busy && root.conversationId.length > 0
+                model: ["Off", "On"]
+                onActivated: function(index) { root.setVoiceInForCurrent(index === 1) }
+            }
+            QQC2.Label {
+                text: "Adele:"
+                color: root.themeDisabledTextColor
+                Layout.alignment: Qt.AlignVCenter
+            }
+            QQC2.ComboBox {
+                id: adeleCombo
+                Layout.fillWidth: true
+                enabled: !root.busy && root.conversationId.length > 0
+                model: ["Off", "On demand", "Always"]
+                onActivated: function(index) { root.setAdeleOutputForCurrent(root.adeleIndexToLevel(index)) }
+            }
+        }
+
+        // Per-conversation model picker. Index 0 is the "(default)" sentinel
+        // (inherit the conversation / interactive-purpose default); the
+        // connection·model listings follow. Shown when the core advertises models.
+        RowLayout {
+            id: modelSelectorRow
+            Layout.fillWidth: true
+            visible: (root.modelPickerVisible || root.modelChoices.length > 0) && !root.ultraNarrow
+            spacing: 6
+
+            QQC2.Label {
+                text: "Model:"
+                color: root.themeDisabledTextColor
+                Layout.alignment: Qt.AlignVCenter
+            }
+            QQC2.ComboBox {
+                id: modelSelectorCombo
+                Layout.fillWidth: true
+                enabled: !root.busy && root.conversationId.length > 0 && root.modelChoices.length > 0
+                model: {
+                    const labels = ["(default)"]
+                    for (let i = 0; i < root.modelChoices.length; i++) {
+                        labels.push(root.modelLabel(root.modelChoices[i]))
+                    }
+                    return labels
+                }
+                onActivated: function(index) {
+                    if (index <= 0) {
+                        core.selectModel("", "", "")
+                    } else {
+                        const it = root.modelChoices[index - 1]
+                        core.selectModel(String(it.connection_id), String((it.model || {}).id || ""), "")
+                    }
                 }
             }
         }

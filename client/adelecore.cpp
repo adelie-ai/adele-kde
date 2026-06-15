@@ -96,6 +96,35 @@ void AdeleCore::setAdeleOutput(const QString &conversationId, const QString &lev
     adele_core_set_adele_output(m_handle, c.constData(), l.constData());
 }
 
+void AdeleCore::selectModel(const QString &connectionId, const QString &modelId, const QString &effort)
+{
+    if (!m_handle) {
+        return;
+    }
+    const QByteArray c = connectionId.toUtf8();
+    const QByteArray m = modelId.toUtf8();
+    const QByteArray e = effort.toUtf8();
+    adele_core_select_model(m_handle, c.constData(), m.constData(), e.constData());
+}
+
+void AdeleCore::cancelTask(const QString &taskId)
+{
+    if (!m_handle) {
+        return;
+    }
+    const QByteArray t = taskId.toUtf8();
+    adele_core_cancel_task(m_handle, t.constData());
+}
+
+void AdeleCore::fetchTaskLogs(const QString &taskId)
+{
+    if (!m_handle) {
+        return;
+    }
+    const QByteArray t = taskId.toUtf8();
+    adele_core_fetch_task_logs(m_handle, t.constData());
+}
+
 void AdeleCore::onViewEvent(void *userData, const char *json)
 {
     // Worker-thread context. Copy the JSON into a QString and hop to the GUI

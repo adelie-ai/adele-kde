@@ -69,6 +69,14 @@ public:
     Q_INVOKABLE void setVoiceIn(const QString &conversationId, bool enabled);
     /** Set the `Adele:` (voice output) level: "disabled" | "on_demand" | "always". */
     Q_INVOKABLE void setAdeleOutput(const QString &conversationId, const QString &level);
+    /** Stage (or clear) a per-message model override. Empty connectionId/modelId
+     *  clears it; effort is "low" | "medium" | "high" or empty. */
+    Q_INVOKABLE void selectModel(const QString &connectionId, const QString &modelId,
+                                 const QString &effort = QString());
+    /** Request cancellation of a background task by id. */
+    Q_INVOKABLE void cancelTask(const QString &taskId);
+    /** Fetch a background task's log page (arrives later as a `task_logs` viewEvent). */
+    Q_INVOKABLE void fetchTaskLogs(const QString &taskId);
 
 Q_SIGNALS:
     void connectedChanged(bool connected);
