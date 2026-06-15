@@ -12,7 +12,7 @@ include(KDEInstallDirs)
 include(KDECMakeSettings)
 include(KDECompilerSettings NO_POLICY_SCOPE)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Qml)
+find_package(Qt6 REQUIRED COMPONENTS Core Qml DBus)
 find_package(Threads REQUIRED)
 
 qt_standard_project_setup(REQUIRES 6.5)
@@ -81,12 +81,26 @@ qt_add_qml_module(adelecore
     SOURCES
         adelecore.cpp
         adelecore.h
+        voicecontroller.cpp
+        voicecontroller.h
 )
 add_dependencies(adelecore adele_core_build)
-target_link_libraries(adelecore PRIVATE Qt6::Core Qt6::Qml adele_core)
+target_link_libraries(adelecore PRIVATE Qt6::Core Qt6::Qml Qt6::DBus adele_core)
 target_compile_options(adelecore PRIVATE -Werror)
-# Find the co-installed core cdylib at runtime.
-set_target_properties(adelecore PROPERTIES INSTALL_RPATH "$ORIGIN")
+# Qt resolves the qmldir's `plugin adelecore` to a file named `libadelecore.so`,
+# but qt_add_qml_module leaves this merged plugin target prefix-less
+# (`adelecore.so`), so plasmashell can't find the plugin → it never loads →
+# AdeleCore/VoiceController never register → blank popup. Force the `lib` prefix
+# to match Qt's resolver (and the KDE plugin convention, e.g. libkcmutilsqmlplugin.so).
+# INSTALL_RPATH "$ORIGIN" finds the co-installed core cdylib at runtime.
+# LINK_DEPENDS relinks the plugin whenever the cdylib changes — otherwise CMake
+# doesn't treat the imported-from-custom-target .so as a link input, so a cdylib
+# rebuild (e.g. gaining a SONAME) leaves the plugin's DT_NEEDED stale (it would
+# keep an absolute build-tree path instead of the bare soname $ORIGIN resolves).
+set_target_properties(adelecore PROPERTIES
+    INSTALL_RPATH "$ORIGIN"
+    PREFIX "lib"
+    LINK_DEPENDS "${CORE_CDYLIB}")
 
 # --- Install ------------------------------------------------------------------
 set(CLIENT_QML_INSTALL_DIR "${KDE_INSTALL_QMLDIR}/org/desktopassistant/client")
@@ -120,4 +134,15 @@ if(BUILD_CLIENT_TESTS)
     set_target_properties(tst_adelecore PROPERTIES
         BUILD_RPATH "${CLIENT_UI_COMMON_DIR}/target/${CARGO_PROFILE_DIR}")
     add_test(NAME tst_adelecore COMMAND tst_adelecore)
+
+    # VoiceController is pure QtDBus glue (no Rust core), so its test links
+    # neither the cdylib nor needs the cargo BUILD_RPATH.
+    add_executable(tst_voicecontroller
+        tst_voicecontroller.cpp
+        voicecontroller.cpp
+        voicecontroller.h
+    )
+    target_link_libraries(tst_voicecontroller PRIVATE Qt6::Core Qt6::Qml Qt6::DBus Qt6::Test)
+    target_compile_options(tst_voicecontroller PRIVATE -Werror)
+    add_test(NAME tst_voicecontroller COMMAND tst_voicecontroller)
 endif()

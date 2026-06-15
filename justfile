@@ -16,17 +16,10 @@ shared_tasks_view_src := "shared/chat-module/ui/TasksView.qml"
 shared_tasks_window_src := "shared/chat-module/ui/TasksWindow.qml"
 shared_tasks_badge_src := "shared/chat-module/ui/TasksBadge.qml"
 shared_link_safety_src := "shared/chat-module/ui/LinkSafety.js"
-shared_helper_runner_src := "shared/chat-module/ui/HelperRunner.js"
 desktop_tasks_view_fallback := "plasmoid/org.desktopassistant.desktopchat/contents/ui/TasksView.qml"
 desktop_tasks_window_fallback := "plasmoid/org.desktopassistant.desktopchat/contents/ui/TasksWindow.qml"
 desktop_tasks_badge_fallback := "plasmoid/org.desktopassistant.desktopchat/contents/ui/TasksBadge.qml"
 desktop_link_safety_fallback := "plasmoid/org.desktopassistant.desktopchat/contents/ui/LinkSafety.js"
-desktop_helper_runner_fallback := "plasmoid/org.desktopassistant.desktopchat/contents/ui/HelperRunner.js"
-shared_helper_src := "shared/chat-module/code/dbus_client.py"
-desktop_helper_fallback := "plasmoid/org.desktopassistant.desktopchat/contents/code/dbus_client_impl.py"
-panel_helper_fallback := "plasmoid/org.desktopassistant.panelchat/contents/code/dbus_client_impl.py"
-desktop_helper_shim := "plasmoid/org.desktopassistant.desktopchat/contents/code/dbus_client.py"
-panel_helper_shim := "plasmoid/org.desktopassistant.panelchat/contents/code/dbus_client.py"
 
 # List available commands
 default: list
@@ -50,9 +43,6 @@ chatview-sync:
     cp -a "{{shared_tasks_window_src}}" "{{desktop_tasks_window_fallback}}"
     cp -a "{{shared_tasks_badge_src}}" "{{desktop_tasks_badge_fallback}}"
     cp -a "{{shared_link_safety_src}}" "{{desktop_link_safety_fallback}}"
-    cp -a "{{shared_helper_runner_src}}" "{{desktop_helper_runner_fallback}}"
-    cp -a "{{shared_helper_src}}" "{{desktop_helper_fallback}}"
-    cp -a "{{shared_helper_src}}" "{{panel_helper_fallback}}"
 
 # Verify desktop plasmoid fallback copies match shared sources
 chatview-verify:
@@ -63,13 +53,10 @@ chatview-verify:
     cmp -s "{{shared_tasks_window_src}}" "{{desktop_tasks_window_fallback}}" || (echo "TasksWindow drift detected: run 'just chatview-sync'" >&2; exit 1)
     cmp -s "{{shared_tasks_badge_src}}" "{{desktop_tasks_badge_fallback}}" || (echo "TasksBadge drift detected: run 'just chatview-sync'" >&2; exit 1)
     cmp -s "{{shared_link_safety_src}}" "{{desktop_link_safety_fallback}}" || (echo "LinkSafety.js drift detected: run 'just chatview-sync'" >&2; exit 1)
-    cmp -s "{{shared_helper_runner_src}}" "{{desktop_helper_runner_fallback}}" || (echo "HelperRunner.js drift detected: run 'just chatview-sync'" >&2; exit 1)
-    cmp -s "{{shared_helper_src}}" "{{desktop_helper_fallback}}" || (echo "desktopchat dbus_client_impl.py drift detected: run 'just chatview-sync'" >&2; exit 1)
-    cmp -s "{{shared_helper_src}}" "{{panel_helper_fallback}}" || (echo "panelchat dbus_client_impl.py drift detected: run 'just chatview-sync'" >&2; exit 1)
-    cmp -s "{{desktop_helper_shim}}" "{{panel_helper_shim}}" || (echo "dbus_client.py launcher shims diverged: keep them identical" >&2; exit 1)
 
 # Install all KDE Plasma widgets for the current user
 widget-install:
+    just client-install
     just chatview-sync
     just chat-module-sync
     kpackagetool6 --type Plasma/Applet --install {{panel_widget}}
@@ -77,6 +64,7 @@ widget-install:
 
 # Upgrade all KDE Plasma widgets after local changes
 widget-upgrade:
+    just client-install
     just chatview-sync
     just chat-module-sync
     kpackagetool6 --type Plasma/Applet --upgrade {{panel_widget}}
@@ -84,6 +72,7 @@ widget-upgrade:
 
 # Reinstall all KDE Plasma widgets (remove + install)
 widget-reinstall:
+    just client-install
     just chatview-sync
     just chat-module-sync
     kpackagetool6 --type Plasma/Applet --remove {{panel_widget_id}} || true
@@ -139,6 +128,28 @@ client-build:
     cmake -S {{client_dir}} -B {{client_build_dir}} -G Ninja -DCMAKE_BUILD_TYPE=Debug
     cmake --build {{client_build_dir}}
     ctest --test-dir {{client_build_dir}} --output-on-failure
+
+# Build + install the native client QML plugin into the system Qt QML import path
+# (sudo). Plasmashell's QML engine always includes Qt's QML dir, so the plasmoids'
+# `import org.desktopassistant.client` resolves there. Installs the plugin
+# (adelecore.so), its qmldir, and the co-located Rust core cdylib (release build).
+client-install:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v cargo >/dev/null 2>&1; then
+        echo "client-install: cargo not found — cannot build the native client core" >&2
+        exit 1
+    fi
+    qml_dir="$(qtpaths6 --query QT_INSTALL_QML 2>/dev/null || qtpaths --query QT_INSTALL_QML 2>/dev/null || echo /usr/lib/qt6/qml)"
+    echo "client-install: installing into ${qml_dir}/org/desktopassistant/client"
+    cmake -S {{client_dir}} -B build/kde-client-system -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
+        -DKDE_INSTALL_QMLDIR="$qml_dir" -DBUILD_CLIENT_TESTS=OFF
+    cmake --build build/kde-client-system
+    sudo cmake --install build/kde-client-system
+    # Remove a stray pre-lib-prefix plugin from an earlier install (Qt loads
+    # libadelecore.so; a leftover adelecore.so is dead but confusing).
+    sudo rm -f "$qml_dir/org/desktopassistant/client/adelecore.so"
 
 # System is the only supported install — there is no user-local mode: a ~/.local
 # copy is invisible to a normally launched System Settings yet still shadows the
@@ -225,17 +236,12 @@ uninstall:
     just kcm-cleanup
     just kcm-uninstall
 
-# Run Python unit tests
-test-python:
-    ./tests/run_python_tests.sh
-
 # Run QML autotests via qmltestrunner
 test-qml:
     ./tests/run_qml_tests.sh
 
 # Run all tests
 test:
-    just test-python
     just test-qml
 
 # Smoke test to run after a change: widgets load (QML) + the widget client
@@ -246,7 +252,7 @@ smoke:
 
 # Clean build artifacts
 clean:
-    rm -rf {{kcm_build_dir}} {{client_build_dir}} build/kde-kcm-system
+    rm -rf {{kcm_build_dir}} {{client_build_dir}} build/kde-kcm-system build/kde-client-system
 
 # --- Local verification ("local CI") -----------------------------------------
 # Run locally instead of GitHub Actions. `install-hooks` wires `check` into a
@@ -255,11 +261,25 @@ clean:
 
 # Full local gate: shared-QML drift, qmllint, KCM C++ build, native client
 # plugin (Rust core + C++ tests), Python + QML tests
-check: chatview-verify lint kcm-build client-build test
+check: chatview-verify kcm-build client-build lint test
 
-# Lint every QML file (production + tests) with qmllint; excludes build artifacts
+# Lint every QML file (production + tests) with qmllint; excludes build artifacts.
+# ChatView imports the native client plugin (org.desktopassistant.client); when the
+# plugin is built we add its module dir to the import path so qmllint resolves the
+# AdeleCore/VoiceController types and statically validates ChatView's load (the
+# #18-class "non-existent attached object" check). Without it built (client-build
+# skipped), ChatView is skipped — it's linted once the plugin is present.
 lint:
-    find . -name '*.qml' -not -path './build/*' -print0 | xargs -0 -r qmllint
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -d "{{client_build_dir}}/qml" ]; then
+        find . -name '*.qml' -not -path './build/*' -print0 \
+            | xargs -0 -r qmllint -I "{{client_build_dir}}/qml"
+    else
+        echo "lint: native client plugin not built — skipping ChatView (run 'just client-build' to lint it)" >&2
+        find . -name '*.qml' -not -path './build/*' -not -name 'ChatView.qml' -print0 \
+            | xargs -0 -r qmllint
+    fi
 
 # Smoke / integration test — needs the daemon running for the D-Bus leg
 test-integration:

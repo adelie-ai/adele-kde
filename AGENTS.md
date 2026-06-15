@@ -6,11 +6,11 @@ Repo-specific conventions for the KDE Plasma plasmoids and System Settings KCM. 
 
 Three pieces that all talk to `desktop-assistant-daemon`:
 
-- **Two Plasma 6 plasmoids** under `plasmoid/` — `org.desktopassistant.panelchat` (popup) and `org.desktopassistant.desktopchat` (always-visible). QML UI; transport via the shared chat module.
-- **Shared chat module** under `shared/chat-module/` — Python D-Bus/WS client (`code/dbus_client.py`) plus shared QML, deployed to `$XDG_DATA_HOME/desktop-assistant/chat-module/`.
+- **Two Plasma 6 plasmoids** under `plasmoid/` — `org.desktopassistant.panelchat` (popup) and `org.desktopassistant.desktopchat` (always-visible). QML UI loaded from the shared chat module; chat runs on the native `client/` plugin.
+- **Shared chat module** under `shared/chat-module/` — shared QML (`ui/`, incl. `ChatView.qml`) consumed by both plasmoids, deployed to `$XDG_DATA_HOME/desktop-assistant/chat-module/`. Chat runs on the native Rust core via the `client/` plugin — there is no transport helper.
 - **KCM (System Settings module)** under `kcm/desktop-assistant-settings/` — C++/CMake/Qt6/KF6 module with QML pages for connections, purposes, knowledge.
 
-This is a mixed-language repo (QML / Python / C++) — the per-piece conventions below matter more than usual.
+This is a mixed-language repo (QML / C++ / Rust) — the per-piece conventions below matter more than usual.
 
 ## Transport: D-Bus to the bridge; shared Rust core for chat
 
@@ -53,10 +53,9 @@ status/context/title/warning/scratchpad signals), `Commands` (generic
 
 - `plasmoid/<name>/contents/` — per-plasmoid QML and metadata.
 - `plasmoid/<name>/metadata.json` — plasmoid manifest. Update version here when changing behavior.
-- `shared/chat-module/code/dbus_client.py` — the Python transport. Both plasmoids and any tooling that needs to talk to the daemon should go through this rather than re-implementing transport.
-- `shared/chat-module/ui/` — QML shared across plasmoids.
+- `shared/chat-module/ui/` — QML shared across plasmoids (incl. `ChatView.qml`, the thin view over the `client/` plugin).
 - `kcm/desktop-assistant-settings/` — `CMakeLists.txt`, C++ source (`desktopassistantkcm.cpp/h`), JSON metadata, and `ui/*.qml`.
-- `client/` — the native C++/QML plugin (`org.desktopassistant.client`, element `AdeleCore`) that loads the Rust core cdylib (`libadele_client_core`, built from `client-ui-common/ffi`) and turns its pushed view-events into a Qt `viewEvent(type, data)` signal; intents go out via `Q_INVOKABLE`s. This is the FFI **glue** the Transport section describes — model/controller/transport stay in Rust. Built + unit-tested via `just client-build` (cargo-builds the core; degrades to a skip without cargo or the `../client-ui-common` checkout). The plasmoids' rewire onto it — retiring the Python helper — is in progress.
+- `client/` — the native C++/QML plugin (`org.desktopassistant.client`). Two QML elements: `AdeleCore` loads the Rust core cdylib (`libadele_client_core`, built from `client-ui-common/ffi`) and turns its pushed view-events into a Qt `viewEvent(type, data)` signal (intents go out via `Q_INVOKABLE`s); `VoiceController` is native QtDBus glue for the separate voice daemon (`org.desktopAssistant.Voice`). This is the FFI **glue** the Transport section describes — model/controller/transport stay in Rust. Built + unit-tested via `just client-build`; installed into the system Qt QML import path via `just client-install` (sudo) so the plasmoids' `import org.desktopassistant.client` resolves. `ChatView.qml` consumes both — the Python helper is gone.
 
 ## Plasmoid (QML) conventions
 
@@ -64,11 +63,11 @@ status/context/title/warning/scratchpad signals), `Commands` (generic
 - **`Kirigami` over raw QtQuick.** Stick to Kirigami / `PlasmaComponents3` widgets so the plasmoids inherit Plasma theming. Hard-coded colors or sizes break under accent-color / scaling changes.
 - **Settings via `Plasma.Configuration`.** Per-plasmoid settings go through the standard config schema (XML), not ad-hoc JSON. Widget transport settings that span both plasmoids live in `~/.config/desktop-assistant/widget_settings.json`.
 
-## Shared chat module (Python) conventions
+## Shared chat module (QML) conventions
 
-- **The D-Bus / WS client is the contract.** Plasmoid QML calls into Python via the established `dbus_client.py` interface. When that interface needs a new method, change it in one place and bump the deployed module — both plasmoids pick it up.
-- **No secrets in QML or in the module.** Credentials live in the daemon and are surfaced through transport calls; the chat module should not be reading API keys.
-- **Subprocess hygiene.** When shelling out to `python3` or `gdbus` from QML, quote arguments and avoid string concatenation with untrusted input. Assistant message content is untrusted from a shell-injection perspective.
+- **Chat logic lives in the Rust core, not QML.** `ChatView.qml` is a thin view over the `org.desktopassistant.client` plugin: render the core's `viewEvent(type, data)` deltas and forward user actions through the intent `Q_INVOKABLE`s. Don't reintroduce transport, polling, or a daemon parser in QML — extend the reducer (`client-ui-common`) or the FFI instead.
+- **No secrets in QML.** Credentials live in the daemon and are reached through the core's transport; QML never reads API keys.
+- **Voice is a separate service.** The voice pipeline (mic, wake word, TTS) is reached via `VoiceController` (native QtDBus to `org.desktopAssistant.Voice`), independent of the chat connection. `ChatView` routes the core's `speak` event there and reflects its `StateChanged` signal.
 
 ## KCM (C++/Qt/KF6) conventions
 
@@ -88,14 +87,14 @@ When adding a new install behavior, extend these recipes rather than adding a ne
 
 ## Cross-client coordination
 
-When the daemon's D-Bus / WS protocol changes, the corresponding update to the shared chat module and KCM transport code needs to land in lockstep with the TUI and GTK clients. Mention the corresponding daemon PR in the commit message so the cross-repo coordination is reconstructable later.
+When the daemon's D-Bus / WS protocol changes, the chat side updates through the shared reducer (`client-ui-common`) + its FFI (shared with the TUI and GTK clients), and the KCM's QtDBus transport code updates directly — all in lockstep. Mention the corresponding daemon PR in the commit message so the cross-repo coordination is reconstructable later.
 
 ## Dependency safety
 
 The user-memory security-review rule covers the posture. Repo-specific notes:
 
 - The KCM links against Qt6 / KF6 system libraries — CVE scans against the build environment matter as much as against in-repo deps.
-- The Python chat module's transitive Python deps (if any get pulled in) need the same scan; the current `dbus_client.py` is intentionally narrow to keep that surface small.
+- The chat plugin links the Rust core cdylib (built from `client-ui-common/ffi`); its Cargo dependency tree gets the same `cargo audit` / `cve-mcp` scan as any Rust change — and scan before the first build, since build scripts run then.
 
 ## Cross-project engineering standards
 
@@ -105,7 +104,7 @@ These apply to every repo under `github.com/adelie-ai`. They're embedded in each
 - `main` is the release: at any commit it must build, test, and run.
 - Merge a green change as soon as it's independently shippable — additive, behavior-preserving, or behind a default that preserves the old path. Don't hold green work hostage to a coordinated release.
 - Co-dependent changes land together; name the interlock ("blocked-by #X" / "must merge with #Y") so it's visible without reading the diff.
-- "Green" is more than CI: review passed, tests cover the new behavior (not just "no panic"), warnings clean, security pass done, change stands on its own. With no active CI in these repos, "green" rests on the repo's local gates — the KCM CMake build, `qmllint`, and the QML/Python tests — run by the author (via `just check`).
+- "Green" is more than CI: review passed, tests cover the new behavior (not just "no panic"), warnings clean, security pass done, change stands on its own. With no active CI in these repos, "green" rests on the repo's local gates — the KCM CMake build, the native client build (`cargo` core + C++ tests), `qmllint`, and the QML tests — run by the author (via `just check`).
 - When in doubt, hold. A half-coupled "fix-forward" merge breaks `main` for everyone.
 
 ### Tests are spec-driven (TDD)
@@ -117,7 +116,7 @@ These apply to every repo under `github.com/adelie-ai`. They're embedded in each
 
 ### Warnings are failures
 - Compiler warnings, clippy lints, formatter diffs, and advisories all count — fix the root cause. If a lint truly doesn't apply, suppress at the narrowest scope with a one-line justification; never crate-wide.
-- This repo enforces warnings-as-errors **mechanically** where the compiler allows it: the KCM CMake build sets `CMAKE_COMPILE_WARNING_AS_ERROR`. QML and Python have no compiler hard-fail, so they're gated by `qmllint` and the test suite (run via `just check`) — keep both green.
+- This repo enforces warnings-as-errors **mechanically** where the compiler allows it: the KCM and native client (`client/`) builds set `-Werror` / `CMAKE_COMPILE_WARNING_AS_ERROR`, and the Rust core builds under `warnings = "deny"`. QML has no compiler hard-fail, so it's gated by `qmllint` and the test suite (run via `just check`) — keep green.
 - Never `--no-verify` past hooks. If a hook is genuinely broken, fix it in its own commit and explain why.
 - Don't `#[ignore]` a test you broke; fix it, or open a tracking issue and reference it from the attribute.
 - Pre-existing warnings in a file you touch are yours to address (in-change or a small follow-up) — don't pile new code on an ignored signal.
