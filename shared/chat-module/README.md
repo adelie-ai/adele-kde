@@ -1,11 +1,15 @@
 # Adele AI Shared Chat Module
 
-This module contains shared chat UI and transport helper logic intended for reuse across multiple shells/frontends.
+This module contains the shared chat UI (QML) reused across the KDE plasmoids.
+Transport and the conversation reducer live in the native client plugin
+(`client/`, the `org.desktopassistant.client` QML module) — `ChatView.qml` is a
+thin view over it, not a transport layer.
 
 ## Layout
 
-- `ui/ChatView.qml` — reusable chat view
-- `code/dbus_client.py` — reusable widget helper with named connection support (`local` D-Bus + named WebSocket remotes)
+- `ui/ChatView.qml` — reusable chat view over the native client plugin
+- `ui/TasksView.qml`, `ui/TasksWindow.qml`, `ui/TasksBadge.qml` — background-tasks UI
+- `ui/LinkSafety.js` — link sanitization helpers
 - `images/` — shared avatar assets
 
 ## Install location

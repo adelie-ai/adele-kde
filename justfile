@@ -259,9 +259,31 @@ clean:
 # git pre-push hook so it runs automatically before every push. (Not Rust, so
 # there's no cargo gate — this runs the QML/C++/Python checks that apply here.)
 
-# Full local gate: shared-QML drift, qmllint, KCM C++ build, native client
-# plugin (Rust core + C++ tests), Python + QML tests
-check: chatview-verify kcm-build client-build lint test
+# Guard the Python-helper retirement (CC-7, #90/#92): chat + voice run on the
+# native Rust core (client/) now. No runtime QML/JS may shell out to the deleted
+# dbus_client.py voice helper, and no Python source/bytecode may be tracked under
+# the shared chat module — reintroducing the Python path is a regression.
+python-retired:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    matches="$(grep -RInE 'dbus_client\.py|python3[[:space:]].*voice' \
+        {{panel_widget}}/contents {{desktop_widget}}/contents {{shared_chat_module_src}}/ui || true)"
+    if [ -n "$matches" ]; then
+        echo "python-retired: runtime QML still references the retired Python voice helper:" >&2
+        echo "$matches" >&2
+        exit 1
+    fi
+    stray="$(git ls-files '{{shared_chat_module_src}}/*.py' '{{shared_chat_module_src}}/*.pyc')"
+    if [ -n "$stray" ]; then
+        echo "python-retired: Python source/bytecode tracked under {{shared_chat_module_src}}:" >&2
+        echo "$stray" >&2
+        exit 1
+    fi
+    echo "python-retired: OK — Python voice helper fully retired"
+
+# Full local gate: shared-QML drift, Python-helper retirement, qmllint, KCM C++
+# build, native client plugin (Rust core + C++ tests), QML tests
+check: chatview-verify python-retired kcm-build client-build lint test
 
 # Lint every QML file (production + tests) with qmllint; excludes build artifacts.
 # ChatView imports the native client plugin (org.desktopassistant.client); when the

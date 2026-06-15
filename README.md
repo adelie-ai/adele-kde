@@ -4,7 +4,7 @@ KDE Plasma 6 widgets and System Settings module for the
 [Adelie AI Platform](https://github.com/adelie-ai/desktop-assistant).
 
 Provides two Plasma 6 plasmoids plus a KCM (KDE Control Module) that talk to
-the `desktop-assistant-daemon` over D-Bus or WebSocket.
+the `desktop-assistant-daemon` over D-Bus.
 
 ## Components
 
@@ -14,22 +14,27 @@ the `desktop-assistant-daemon` over D-Bus or WebSocket.
   chat card on the desktop.
 - **Tasks window** (`TasksWindow.qml`) — separate window listing background
   tasks, opened from the badge to escape the popup's height constraint.
-- **Shared chat module** (`shared/chat-module/`) — Python D-Bus/WS client and
-  shared QML, deployed to `$XDG_DATA_HOME/desktop-assistant/chat-module/`.
+- **Native client plugin** (`client/`) — the `org.desktopassistant.client` QML
+  plugin: `AdeleCore` loads the Rust core cdylib (`libadele_client_core`, built
+  from `client-ui-common/ffi`) that runs the shared reducer over a D-Bus
+  `Connector`; `VoiceController` is native QtDBus glue for the voice daemon.
+- **Shared chat module** (`shared/chat-module/`) — shared QML (`ui/`, incl.
+  `ChatView.qml`, a thin view over the native client plugin), deployed to
+  `$XDG_DATA_HOME/desktop-assistant/chat-module/`.
 - **System Settings KCM** (`kcm/desktop-assistant-settings/`) — multi-connection
   LLM configuration, API keys, MCP servers, and a knowledge base
   browser/editor tab, with immediate-save UX.
 
-> **Transport note.** Background tasks are WebSocket-only for now. The
-> daemon's D-Bus task interface is in flight; once it lands, the widgets
-> will pick it up on D-Bus too.
+> **Transport note.** Chat runs on the native Rust core over D-Bus (the
+> `org.desktopAssistant` bridge); background tasks arrive over that same D-Bus
+> connection. Voice is reached separately via `org.desktopAssistant.Voice`.
 
 ## Requirements
 
 - KDE Plasma 6.0+
-- Python 3, `gdbus` (glib2 tools)
+- Rust toolchain (`cargo`) — to build the native client plugin (Rust core)
 - A running `desktop-assistant-daemon` instance
-- For KCM: CMake, Ninja, KDE Frameworks 6 development packages
+- For the native client plugin + KCM: CMake, Ninja, KDE Frameworks 6 development packages
 
 ## Widgets
 
@@ -42,8 +47,8 @@ just widget-remove
 
 Both widgets include a Production/Development service selector visible when
 both daemon instances are running. Widget transport and connection settings
-live in `~/.config/desktop-assistant/widget_settings.json`. Widgets shell out
-to `python3` + `gdbus` for D-Bus, or use a raw WebSocket client for WS.
+live in `~/.config/desktop-assistant/widget_settings.json`. Chat runs on the
+native Rust core (`client/` plugin) over D-Bus — no `python3`/`gdbus` shell-outs.
 
 ## KCM
 

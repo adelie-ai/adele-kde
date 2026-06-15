@@ -5,7 +5,7 @@ import org.kde.kirigami as Kirigami
 import org.kde.plasma.plasmoid
 import org.kde.plasma.core as PlasmaCore
 import org.kde.plasma.components as PlasmaComponents
-import org.kde.plasma.plasma5support as Plasma5Support
+import org.desktopassistant.client
 
 PlasmoidItem {
     id: root
@@ -26,32 +26,23 @@ PlasmoidItem {
     property Item chatView: null
 
     // --- Panel voice state (so the taskbar icon overlay works while collapsed)
-    // The full ChatView polls `voice-status` itself, but it only EXISTS while
-    // the popup is expanded. For the compact (taskbar) icon to show a "mic is
-    // listening" badge while collapsed, a lightweight status poll has to live at
-    // the plasmoid root. We shell out to the same one-shot helper the chat view
-    // uses (`voice-status`, which folds availability + pipeline state into one
-    // JSON line) on a calm 2s cadence. When the popup is open we defer to the
-    // chat view's own (faster) state so the two never disagree.
-    // Qt.resolvedUrl returns a percent-encoded file URL; decodeURIComponent
-    // turns "%20" etc. back into the real on-disk path so python3 can find the
-    // helper when the install dir contains spaces (KDE-11).
-    readonly property string voiceHelperPath: decodeURIComponent(Qt.resolvedUrl("../code/dbus_client.py").toString().replace("file://", ""))
-
-    // Single-quote a value for a POSIX shell. Mirrors ChatView.shellEscape; kept
-    // here because main.qml has no access to the chat view's helpers when the
-    // popup is collapsed. Every shelled-out command argument must go through this
-    // (KDE-11 — the path can contain spaces or quotes).
-    function shellEscape(value) {
-        return "'" + String(value).replace(/'/g, "'\\''") + "'"
+    // The full ChatView owns a VoiceController, but it only EXISTS while the
+    // popup is expanded. For the compact (taskbar) icon to show a "mic is
+    // listening" badge while collapsed, a root-level controller lives here. It is
+    // signal-driven (subscribes to the voice daemon's StateChanged and watches
+    // the service name's ownership), so the badge reflects Listening/Processing/
+    // Speaking live with no polling and no subprocess, and degrades cleanly
+    // (available == false ⇒ controls hidden) whenever the daemon isn't on the bus.
+    VoiceController {
+        id: rootVoice
+        Component.onCompleted: start()
     }
-    property bool rootVoiceAvailable: false
-    property string rootVoiceState: "Idle"   // Idle | Listening | Processing | Speaking
 
-    // Effective state the badge renders from: prefer the live chat view when
-    // it's loaded (it polls faster), else the root poll.
-    readonly property bool voiceAvailable: chatView ? chatView.voiceAvailable : rootVoiceAvailable
-    readonly property string voiceState: chatView ? chatView.voiceState : rootVoiceState
+    // Effective state the badge renders from: prefer the live chat view when it
+    // is loaded (its controller and ours track the same daemon, so they agree),
+    // else the root controller.
+    readonly property bool voiceAvailable: chatView ? chatView.voiceAvailable : rootVoice.available
+    readonly property string voiceState: chatView ? chatView.voiceState : rootVoice.state
     readonly property bool voiceListening: voiceAvailable && voiceState === "Listening"
     readonly property bool voiceSpeaking: voiceAvailable && voiceState === "Speaking"
     // The daemon is thinking (STT/LLM working). Its own badge state so the
@@ -72,8 +63,9 @@ PlasmoidItem {
 
     // Abort the current turn back to Idle/wake-listening. When the popup is open
     // the chat view owns the voice plumbing, so defer to it; while collapsed
-    // (chatView is null) shell out to the same one-shot helper directly so the
-    // panel's cancel action works without expanding the widget.
+    // (chatView is null) drive the root controller directly so the panel's cancel
+    // action works without expanding the widget. State clears itself when the
+    // daemon's StateChanged lands — no optimistic flip needed.
     function cancelVoiceTurn() {
         if (!voiceActive) {
             return
@@ -82,11 +74,11 @@ PlasmoidItem {
             chatView.voiceCancelTurn()
             return
         }
-        const helperCmd = voiceState === "Speaking" ? "voice-stop-speaking" : "voice-stop-listening"
-        voiceStopSource.connectSource("python3 " + shellEscape(voiceHelperPath) + " " + helperCmd)
-        // Optimistically flip the root state so the badge clears immediately;
-        // the next status poll reconciles the real pipeline state.
-        rootVoiceState = "Idle"
+        if (voiceState === "Speaking") {
+            rootVoice.stopSpeaking()
+        } else {
+            rootVoice.stopListening()
+        }
     }
 
     // "Enable 'Hey Adele'" lives in the plasmoid's right-click menu
@@ -116,68 +108,6 @@ PlasmoidItem {
             onTriggered: root.cancelVoiceTurn()
         }
     ]
-
-    // One-shot helper runner for the root-level voice poll. Mirrors the chat
-    // view's Plasma5Support usage: each `voice-status` call is a short-lived
-    // subprocess whose stdout we JSON.parse. Voice always talks over D-Bus and
-    // `voice-status` ignores the chat connection/transport, so no --service /
-    // --connection-name flags are needed here.
-    Plasma5Support.DataSource {
-        id: voiceStatusSource
-        engine: "executable"
-        connectedSources: []
-        onNewData: function(sourceName, data) {
-            disconnectSource(sourceName)
-            const stdout = data["stdout"] ? String(data["stdout"]) : ""
-            let payload
-            try {
-                payload = JSON.parse(stdout)
-            } catch (e) {
-                return
-            }
-            if (!payload || payload.error) {
-                root.rootVoiceAvailable = false
-                return
-            }
-            const nowAvailable = payload.available === true
-            root.rootVoiceAvailable = nowAvailable
-            if (nowAvailable && typeof payload.state === "string") {
-                root.rootVoiceState = payload.state
-            }
-        }
-    }
-
-    // Fire-and-forget runner for the root-level cancel action (adele-kde#38).
-    // Like voiceStatusSource, each call is a short-lived subprocess; we don't
-    // care about its stdout (the next status poll reconciles state), we just
-    // disconnect when it returns so the source doesn't leak connections.
-    Plasma5Support.DataSource {
-        id: voiceStopSource
-        engine: "executable"
-        connectedSources: []
-        onNewData: function(sourceName, data) {
-            disconnectSource(sourceName)
-            root.refreshRootVoiceStatus()
-        }
-    }
-
-    function refreshRootVoiceStatus() {
-        // Skip the extra subprocess while the popup is open — the chat view is
-        // already polling and we read its state directly.
-        if (root.chatView) {
-            return
-        }
-        voiceStatusSource.connectSource("python3 " + shellEscape(voiceHelperPath) + " voice-status")
-    }
-
-    Timer {
-        id: rootVoicePollTimer
-        interval: 2000
-        repeat: true
-        running: true
-        triggeredOnStart: true
-        onTriggered: root.refreshRootVoiceStatus()
-    }
 
     compactRepresentation: PlasmaComponents.ToolButton {
         id: compactRoot
