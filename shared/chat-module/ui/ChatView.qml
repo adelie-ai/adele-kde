@@ -51,17 +51,16 @@ Item {
         voice.setEnabled(enabled)
     }
     signal tasksBadgeClicked()
-    // Background tasks now arrive over D-Bus via the core, but the tasks panel +
-    // its actions (cancel/logs) need new FFI intents — a focused follow-up. Until
-    // then this backend is inert, so the badge stays hidden (count 0) and the
-    // shell wiring keeps working unchanged.
+    // Background-tasks backend for the header badge + the process-manager window
+    // (the Tasks*.qml read this interface). Driven by the core's Task* events;
+    // the getters read reactive root properties so the views rebind on change.
     readonly property var tasksBackend: ({
-        get tasks() { return [] },
-        get runningTaskCount() { return 0 },
-        cancelTask: function(_id) {},
-        openConversation: function(id) { root.selectConversationById(id) },
-        refreshLogs: function(_id) {},
-        taskLogs: function(_id) { return "" }
+        get tasks() { return root.tasksList },
+        get runningTaskCount() { return root.runningTaskCount },
+        cancelTask: function(id) { core.cancelTask(String(id || "")) },
+        openConversation: function(id) { root.openTaskConversation(String(id || "")) },
+        refreshLogs: function(id) { core.fetchTaskLogs(String(id || "")) },
+        taskLogs: function(id) { return root.taskLogsById[String(id || "")] || "" }
     })
 
     // --- view state (driven by the core's viewEvent deltas) ----------------
@@ -89,6 +88,19 @@ Item {
     property var adeleOutByConv: ({})
     readonly property bool voiceInEnabled: voiceInByConv[conversationId] === true
     readonly property string adeleOutputLevel: String(adeleOutByConv[conversationId] || "disabled")
+    // Model picker: available (connection·model) listings, the conversation's
+    // stored selection, the interactive-purpose default, and whether the picker
+    // should show — all from the core's events. A pick is applied via the
+    // selectModel intent (the override is staged in the core).
+    property var modelChoices: []
+    property var currentSelection: null
+    property var defaultModel: null
+    property bool modelPickerVisible: false
+    // Background tasks: the list + running count (from the Task* events) and a
+    // per-task formatted log buffer (fetched via fetchTaskLogs / appended live).
+    property var tasksList: []
+    property int runningTaskCount: 0
+    property var taskLogsById: ({})
 
     // --- view configuration (preserved styling) ----------------------------
     property real uiScale: 1.0
@@ -222,10 +234,44 @@ Item {
             // The model drove the Adele level (request_voice / stop_voice).
             root.applyAdeleLevelFromCore(String(data.level || "disabled"))
             break
-        // Ignored in this view (no KDE UI yet — all were D-Bus no-ops before, so
-        // there is no regression; each lands with its own FFI intent later):
-        //   models, model_selection, default_model, model_picker_visible,
-        //   tasks_replace_all/task_*, scratchpad, refresh_side_pane_tasks
+        case "models":
+            root.modelChoices = data.items || []
+            root.syncModelPicker()
+            break
+        case "model_selection":
+            root.currentSelection = data.selection || null
+            root.syncModelPicker()
+            break
+        case "default_model":
+            root.defaultModel = data.model || null
+            root.syncModelPicker()
+            break
+        case "model_picker_visible":
+            root.modelPickerVisible = data.value === true
+            break
+        case "tasks_replace_all":
+            root.applyTasksReplaceAll(data.items || [])
+            break
+        case "task_started":
+            root.applyTaskStarted(data.task || null)
+            break
+        case "task_progress":
+            root.applyTaskProgress(String(data.id || ""), data.progress_hint)
+            break
+        case "task_log_appended":
+            root.applyTaskLogAppended(String(data.id || ""), data.entry || null)
+            break
+        case "task_completed":
+            root.applyTaskCompleted(String(data.id || ""))
+            break
+        case "task_logs":
+            root.applyTaskLogs(String(data.id || ""), data.entries || [])
+            break
+        case "refresh_side_pane_tasks":
+            // KDE has no per-conversation side pane; the badge + window already
+            // reflect the full task list, so there's nothing to recompute.
+            break
+        // Ignored: scratchpad (no KDE side pane).
         default:
             break
         }
@@ -447,6 +493,142 @@ Item {
             case "amber": return Kirigami.Theme.neutralTextColor
             case "green": return Kirigami.Theme.positiveTextColor
             default: return themeDisabledTextColor
+        }
+    }
+
+    // ======================================================================
+    //  model picker + background tasks
+    // ======================================================================
+    function modelLabel(item) {
+        const conn = String(item.connection_label || item.connection_id || "")
+        const m = item.model || {}
+        const name = String(m.display_name || m.id || "")
+        return conn.length > 0 ? (conn + " · " + name) : name
+    }
+    function activeSelection() {
+        // The conversation's stored selection wins; otherwise the purpose default.
+        if (currentSelection && currentSelection.connection_id) {
+            return currentSelection
+        }
+        if (defaultModel && defaultModel.connection_id) {
+            return defaultModel
+        }
+        return null
+    }
+    function modelChoiceIndex(sel) {
+        if (!sel) {
+            return -1
+        }
+        for (let i = 0; i < modelChoices.length; i++) {
+            const it = modelChoices[i]
+            const m = it.model || {}
+            if (String(it.connection_id) === String(sel.connection_id)
+                    && String(m.id) === String(sel.model_id)) {
+                return i
+            }
+        }
+        return -1
+    }
+    // Index 0 is the "(default)" sentinel (inherit); models follow at +1.
+    function syncModelPicker() {
+        const idx = modelChoiceIndex(activeSelection())
+        modelSelectorCombo.currentIndex = idx >= 0 ? idx + 1 : 0
+    }
+
+    function countRunning(list) {
+        let n = 0
+        for (let i = 0; i < list.length; i++) {
+            const s = String(list[i].status || "")
+            if (s === "pending" || s === "running") {
+                n += 1
+            }
+        }
+        return n
+    }
+    function applyTasksReplaceAll(items) {
+        tasksList = items
+        runningTaskCount = countRunning(items)
+    }
+    function applyTaskStarted(task) {
+        if (!task || !task.id) {
+            return
+        }
+        const next = tasksList.filter(function(t) { return t.id !== task.id })
+        next.push(task)
+        tasksList = next
+        runningTaskCount = countRunning(next)
+    }
+    function applyTaskProgress(id, hint) {
+        if (id.length === 0) {
+            return
+        }
+        tasksList = tasksList.map(function(t) {
+            return t.id === id ? Object.assign({}, t, { progress_hint: hint }) : t
+        })
+    }
+    function applyTaskCompleted(id) {
+        if (id.length === 0) {
+            return
+        }
+        tasksList = tasksList.map(function(t) {
+            if (t.id !== id) {
+                return t
+            }
+            const stillRunning = t.status === "running" || t.status === "pending"
+            return Object.assign({}, t, { status: stillRunning ? "completed" : t.status })
+        })
+        runningTaskCount = countRunning(tasksList)
+    }
+    function formatLogEntry(entry) {
+        if (!entry) {
+            return ""
+        }
+        return "[" + String(entry.level || "info") + "] " + String(entry.message || "")
+    }
+    function applyTaskLogAppended(id, entry) {
+        if (id.length === 0 || !entry) {
+            return
+        }
+        const prev = taskLogsById[id] || ""
+        const line = formatLogEntry(entry)
+        // QV4-safe: assign to the GC root first, then write the key.
+        taskLogsById = Object.assign({}, taskLogsById)
+        taskLogsById[id] = prev.length > 0 ? (prev + "\n" + line) : line
+    }
+    function applyTaskLogs(id, entries) {
+        if (id.length === 0) {
+            return
+        }
+        const lines = []
+        for (let i = 0; i < entries.length; i++) {
+            lines.push(formatLogEntry(entries[i]))
+        }
+        taskLogsById = Object.assign({}, taskLogsById)
+        taskLogsById[id] = lines.join("\n")
+    }
+    function findConversationIdForTask(taskId) {
+        for (let i = 0; i < tasksList.length; i++) {
+            const task = tasksList[i]
+            if (!task || task.id !== taskId) {
+                continue
+            }
+            const kind = task.kind || {}
+            if (kind.conversation && kind.conversation.conversation_id) {
+                return String(kind.conversation.conversation_id)
+            }
+            if (kind.subagent && kind.subagent.conversation_id) {
+                return String(kind.subagent.conversation_id)
+            }
+            if (kind.standalone && kind.standalone.conversation_id) {
+                return String(kind.standalone.conversation_id)
+            }
+        }
+        return ""
+    }
+    function openTaskConversation(taskId) {
+        const target = findConversationIdForTask(taskId)
+        if (target.length > 0) {
+            selectConversationById(target)
         }
     }
 
@@ -931,6 +1113,42 @@ Item {
                 enabled: !root.busy && root.conversationId.length > 0
                 model: ["Off", "On demand", "Always"]
                 onActivated: function(index) { root.setAdeleOutputForCurrent(root.adeleIndexToLevel(index)) }
+            }
+        }
+
+        // Per-conversation model picker. Index 0 is the "(default)" sentinel
+        // (inherit the conversation / interactive-purpose default); the
+        // connection·model listings follow. Shown when the core advertises models.
+        RowLayout {
+            id: modelSelectorRow
+            Layout.fillWidth: true
+            visible: (root.modelPickerVisible || root.modelChoices.length > 0) && !root.ultraNarrow
+            spacing: 6
+
+            QQC2.Label {
+                text: "Model:"
+                color: root.themeDisabledTextColor
+                Layout.alignment: Qt.AlignVCenter
+            }
+            QQC2.ComboBox {
+                id: modelSelectorCombo
+                Layout.fillWidth: true
+                enabled: !root.busy && root.conversationId.length > 0 && root.modelChoices.length > 0
+                model: {
+                    const labels = ["(default)"]
+                    for (let i = 0; i < root.modelChoices.length; i++) {
+                        labels.push(root.modelLabel(root.modelChoices[i]))
+                    }
+                    return labels
+                }
+                onActivated: function(index) {
+                    if (index <= 0) {
+                        core.selectModel("", "", "")
+                    } else {
+                        const it = root.modelChoices[index - 1]
+                        core.selectModel(String(it.connection_id), String((it.model || {}).id || ""), "")
+                    }
+                }
             }
         }
 

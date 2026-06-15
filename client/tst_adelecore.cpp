@@ -62,6 +62,9 @@ void TestAdeleCore::intentsBeforeConnectDoNotCrash()
     core.deleteConversation(QStringLiteral("c1"));
     core.setVoiceIn(QStringLiteral("c1"), true);
     core.setAdeleOutput(QStringLiteral("c1"), QStringLiteral("on_demand"));
+    core.selectModel(QStringLiteral("conn"), QStringLiteral("model"), QStringLiteral("high"));
+    core.cancelTask(QStringLiteral("t1"));
+    core.fetchTaskLogs(QStringLiteral("t1"));
     core.connectToDaemon(QStringLiteral("uds"), QStringLiteral("/nonexistent/adele-test.sock"));
     // Let any queued work run; the object must remain alive and disconnected.
     QTest::qWait(50);
