@@ -87,7 +87,7 @@ widget-hard-refresh:
     sleep 0.5
     pgrep -x plasmashell >/dev/null && pkill -KILL -x plasmashell || true
     sleep 0.2
-    nohup plasmashell --replace >/tmp/plasmashell-desktop-assistant.log 2>&1 &
+    nohup plasmashell --replace >"${XDG_RUNTIME_DIR:-/tmp}/plasmashell-desktop-assistant.log" 2>&1 &
 
 # Restore Plasma shell config files from a backup directory created by plasma-shell-reset
 plasma-shell-restore backup_dir:
