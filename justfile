@@ -56,6 +56,7 @@ chatview-verify:
 
 # Install all KDE Plasma widgets for the current user
 widget-install:
+    just client-install
     just chatview-sync
     just chat-module-sync
     kpackagetool6 --type Plasma/Applet --install {{panel_widget}}
@@ -63,6 +64,7 @@ widget-install:
 
 # Upgrade all KDE Plasma widgets after local changes
 widget-upgrade:
+    just client-install
     just chatview-sync
     just chat-module-sync
     kpackagetool6 --type Plasma/Applet --upgrade {{panel_widget}}
@@ -70,6 +72,7 @@ widget-upgrade:
 
 # Reinstall all KDE Plasma widgets (remove + install)
 widget-reinstall:
+    just client-install
     just chatview-sync
     just chat-module-sync
     kpackagetool6 --type Plasma/Applet --remove {{panel_widget_id}} || true
@@ -144,6 +147,9 @@ client-install:
         -DKDE_INSTALL_QMLDIR="$qml_dir" -DBUILD_CLIENT_TESTS=OFF
     cmake --build build/kde-client-system
     sudo cmake --install build/kde-client-system
+    # Remove a stray pre-lib-prefix plugin from an earlier install (Qt loads
+    # libadelecore.so; a leftover adelecore.so is dead but confusing).
+    sudo rm -f "$qml_dir/org/desktopassistant/client/adelecore.so"
 
 # System is the only supported install — there is no user-local mode: a ~/.local
 # copy is invisible to a normally launched System Settings yet still shadows the

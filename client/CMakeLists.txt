@@ -87,8 +87,13 @@ qt_add_qml_module(adelecore
 add_dependencies(adelecore adele_core_build)
 target_link_libraries(adelecore PRIVATE Qt6::Core Qt6::Qml Qt6::DBus adele_core)
 target_compile_options(adelecore PRIVATE -Werror)
-# Find the co-installed core cdylib at runtime.
-set_target_properties(adelecore PROPERTIES INSTALL_RPATH "$ORIGIN")
+# Qt resolves the qmldir's `plugin adelecore` to a file named `libadelecore.so`,
+# but qt_add_qml_module leaves this merged plugin target prefix-less
+# (`adelecore.so`), so plasmashell can't find the plugin → it never loads →
+# AdeleCore/VoiceController never register → blank popup. Force the `lib` prefix
+# to match Qt's resolver (and the KDE plugin convention, e.g. libkcmutilsqmlplugin.so).
+# INSTALL_RPATH "$ORIGIN" finds the co-installed core cdylib at runtime.
+set_target_properties(adelecore PROPERTIES INSTALL_RPATH "$ORIGIN" PREFIX "lib")
 
 # --- Install ------------------------------------------------------------------
 set(CLIENT_QML_INSTALL_DIR "${KDE_INSTALL_QMLDIR}/org/desktopassistant/client")
