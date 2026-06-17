@@ -247,7 +247,7 @@ ColumnLayout {
             Layout.fillWidth: true
             from: 0.0
             to: 1.0
-            stepSize: 0.05
+            stepSize: 0.01
             value: kcm.wakeSensitivity
             // Commit on release, not per drag-tick (KDE-7 / #62): the label
             // below binds to `value` for live feedback while dragging, but the
@@ -376,7 +376,7 @@ ColumnLayout {
             Layout.fillWidth: true
             from: 0.0
             to: 1.0
-            stepSize: 0.05
+            stepSize: 0.01
             value: kcm.vadSpeechThreshold
             // Commit on release, live label during drag (KDE-7 / #62) — see the
             // wake-sensitivity slider above for the rationale.
