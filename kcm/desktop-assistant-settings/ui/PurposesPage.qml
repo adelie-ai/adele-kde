@@ -92,24 +92,23 @@ ColumnLayout {
                 return
             }
             const view = result && result.purposes ? result.purposes : {}
-            // The daemon protocol still understands the "primary" sentinel
-            // for inheritance, but the UI now shows everything as explicit
-            // values. Resolve any inherited entries to interactive's actual
-            // connection/model on load so the dropdowns render real ids and
-            // saving back rewrites them as explicit (no more "primary" on
-            // the wire from this client).
-            const interactive = view["interactive"] || {}
-            const interactiveConn = String(interactive.connection || "")
-            const interactiveModel = String(interactive.model || "")
+            // A purpose that is ABSENT from GetPurposes (or set to the
+            // "primary" sentinel) is not explicitly bound. Represent that as
+            // an explicit "inherit" state ("primary") rather than copying the
+            // interactive purpose's concrete connection/model — otherwise an
+            // unconfigured purpose renders as though it were set to a model it
+            // isn't actually bound to (and the daemon's real fallback for an
+            // absent purpose isn't even interactive). The interactive purpose
+            // itself can't inherit, so it always shows its own value.
             const out = []
             for (let i = 0; i < purposeOrder.length; i++) {
                 const entry = purposeOrder[i]
-                const cfg = view[entry.key] || {}
-                let conn = String(cfg.connection || "")
-                let model = String(cfg.model || "")
-                if (entry.key !== "interactive") {
-                    if (conn === "primary" || conn === "") conn = interactiveConn
-                    if (model === "primary" || model === "") model = interactiveModel
+                const cfg = view[entry.key]
+                let conn = cfg ? String(cfg.connection || "") : ""
+                let model = cfg ? String(cfg.model || "") : ""
+                if (entry.key !== "interactive" && (conn === "" || conn === "primary")) {
+                    conn = "primary"
+                    model = "primary"
                 }
                 out.push({
                     key: entry.key,
@@ -117,7 +116,7 @@ ColumnLayout {
                     description: entry.description || "",
                     connection: conn,
                     model: model,
-                    effort: cfg.effort ? String(cfg.effort) : "",
+                    effort: (cfg && cfg.effort) ? String(cfg.effort) : "",
                 })
             }
             purposes = out
@@ -254,11 +253,19 @@ ColumnLayout {
                                 model: items
                                 function rebuild() {
                                     const base = []
+                                    // Non-interactive purposes can inherit the
+                                    // interactive binding; surface that as an
+                                    // explicit option so an unset purpose reads
+                                    // as "inherit", never a concrete model it
+                                    // isn't actually bound to.
+                                    if (purposeCard.rowData.key !== "interactive") {
+                                        base.push({ value: "primary", label: "— Inherit from Interactive —" })
+                                    }
                                     for (let i = 0; i < connections.length; i++) {
                                         base.push({ value: connections[i].id, label: connections[i].label })
                                     }
                                     const cur = purposeCard.rowData.connection
-                                    if (cur
+                                    if (cur && cur !== "primary"
                                         && !base.some(function(m) { return m.value === cur })) {
                                         base.push({ value: cur, label: cur })
                                     }
@@ -281,12 +288,20 @@ ColumnLayout {
                                         const value = connectionBox.currentValue
                                         if (!value) return
                                         const newItem = Object.assign({}, purposeCard.rowData, { connection: value })
-                                        const modelsForConn = modelsByConnection[value] || []
-                                        const wantsEmbedding = purposeCard.rowData.key === "embedding"
-                                        const still = modelsForConn.find(function(m) { return m.id === purposeCard.rowData.model })
-                                        if (!still) {
-                                            const fallback = modelsForConn.find(function(m) { return Boolean(m.embedding) === wantsEmbedding })
-                                            if (fallback) newItem.model = fallback.id
+                                        if (value === "primary") {
+                                            // Inheriting the connection means
+                                            // inheriting the model too — a
+                                            // concrete model under "primary" is
+                                            // meaningless.
+                                            newItem.model = "primary"
+                                        } else {
+                                            const modelsForConn = modelsByConnection[value] || []
+                                            const wantsEmbedding = purposeCard.rowData.key === "embedding"
+                                            const still = modelsForConn.find(function(m) { return m.id === purposeCard.rowData.model })
+                                            if (!still || purposeCard.rowData.model === "primary") {
+                                                const fallback = modelsForConn.find(function(m) { return Boolean(m.embedding) === wantsEmbedding })
+                                                if (fallback) newItem.model = fallback.id
+                                            }
                                         }
                                         const rowIdx = purposeCard.rowIndex
                                         persist(newItem)
@@ -315,7 +330,14 @@ ColumnLayout {
                                 function rebuild() {
                                     const base = []
                                     const sourceConn = purposeCard.rowData.connection
-                                    if (sourceConn) {
+                                    // When the connection inherits ("primary"
+                                    // or unset on a non-interactive purpose),
+                                    // the model inherits too — offer only the
+                                    // inherit sentinel, not a concrete list.
+                                    if (purposeCard.rowData.key !== "interactive"
+                                        && (sourceConn === "primary" || sourceConn === "")) {
+                                        base.push({ value: "primary", label: "— Inherit from Interactive —" })
+                                    } else if (sourceConn) {
                                         const models = modelsByConnection[sourceConn] || []
                                         // The embedding purpose only accepts
                                         // embedding-capable models; every
@@ -329,7 +351,7 @@ ColumnLayout {
                                         }
                                     }
                                     const cur = purposeCard.rowData.model
-                                    if (cur
+                                    if (cur && cur !== "primary"
                                         && !base.some(function(m) { return m.value === cur })) {
                                         base.push({ value: cur, label: cur })
                                     }
