@@ -91,6 +91,20 @@ DesktopAssistantKcm::DesktopAssistantKcm(QObject *parent, const KPluginMetaData 
     // (or daemon restart) is needed.
     setButtons(NoAdditionalButton);
     load();
+
+    // Live refresh (#dream-cycle): relay the daemon's
+    // `org.desktopAssistant.Knowledge.EntriesChanged` D-Bus signal — emitted
+    // when an entry is created/updated/deleted on any client or a maintenance
+    // pass rewrites entries — to the `knowledgeEntriesChanged()` Qt signal the
+    // QML Knowledge page connects to, so its list refreshes in place. The signal
+    // carries no args, so we relay straight to the Qt signal (no slot needed).
+    QDBusConnection::sessionBus().connect(
+        QString::fromUtf8(SERVICE),
+        QStringLiteral("/org/desktopAssistant/Knowledge"),
+        QStringLiteral("org.desktopAssistant.Knowledge"),
+        QStringLiteral("EntriesChanged"),
+        this,
+        SIGNAL(knowledgeEntriesChanged()));
 }
 
 QString DesktopAssistantKcm::buildStamp() const
@@ -3027,7 +3041,8 @@ void DesktopAssistantKcm::daemonCall(const QString &command, const QJSValue &pay
         || snake.startsWith(QLatin1String("search_knowledge_"))
         || snake.startsWith(QLatin1String("create_knowledge_"))
         || snake.startsWith(QLatin1String("update_knowledge_"))
-        || snake.startsWith(QLatin1String("delete_knowledge_"));
+        || snake.startsWith(QLatin1String("delete_knowledge_"))
+        || snake == QLatin1String("start_maintenance");
 
     const QByteArray objectPath = isKnowledge
         ? QByteArrayLiteral("/org/desktopAssistant/Knowledge")
@@ -3138,6 +3153,15 @@ void DesktopAssistantKcm::daemonCall(const QString &command, const QJSValue &pay
         const QString id = payloadObj.value(QStringLiteral("id")).toString();
         method = QStringLiteral("DeleteEntry");
         callArgs << id;
+    } else if (snake == QLatin1String("start_maintenance")) {
+        // Dream-cycle controls: trigger an extraction / consolidation /
+        // embedding-recompute pass. Returns immediately with a JSON envelope
+        // carrying the background task id; progress arrives via Task* signals
+        // and the pass emits Knowledge.EntriesChanged as entries land.
+        const QString op = payloadObj.value(QStringLiteral("op")).toString();
+        method = QStringLiteral("StartMaintenance");
+        callArgs << op;
+        returnsJson = true;
     } else {
         fail(QStringLiteral("daemonCall: unsupported command '%1'").arg(snake));
         return;

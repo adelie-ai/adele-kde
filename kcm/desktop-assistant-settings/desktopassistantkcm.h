@@ -332,6 +332,10 @@ public:
 
 Q_SIGNALS:
     void statusTextChanged();
+    /// Relays the daemon's `Knowledge.EntriesChanged` D-Bus signal so the QML
+    /// Knowledge page refreshes its list when entries change on any client or a
+    /// maintenance pass (dream cycle) rewrites them.
+    void knowledgeEntriesChanged();
     void gitEnabledChanged();
     void gitRemoteUrlChanged();
     void gitRemoteNameChanged();
