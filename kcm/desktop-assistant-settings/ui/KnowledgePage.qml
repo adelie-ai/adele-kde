@@ -192,7 +192,31 @@ ColumnLayout {
         })
     }
 
+    // Dream-cycle controls (#knowledge maintenance): kick off a background pass.
+    // The daemon returns immediately with a task id; the list refreshes live as
+    // entries land (via the EntriesChanged signal relayed by the KCM).
+    function startMaintenance(op, label) {
+        statusText = label + " started…"
+        kcm.daemonCall("start_maintenance", { op: op }, function(result, error) {
+            if (error) {
+                statusText = label + " failed: " + error
+                return
+            }
+            statusText = label + " started — running in the background."
+        })
+    }
+
     Component.onCompleted: refresh()
+
+    // Live refresh: the KCM relays the daemon's Knowledge.EntriesChanged D-Bus
+    // signal here, so an edit on another client or a maintenance pass repaints
+    // the list in place.
+    Connections {
+        target: kcm
+        function onKnowledgeEntriesChanged() {
+            root.refresh()
+        }
+    }
 
     // --- Layout ----------------------------------------------------------
 
@@ -201,6 +225,40 @@ ColumnLayout {
         visible: statusText.length > 0
         text: statusText
         type: Kirigami.MessageType.Information
+    }
+
+    // --- Dream-cycle controls -------------------------------------------
+    // On-demand knowledge maintenance. Extraction/consolidation run a pass over
+    // conversations / the whole KB; Recalculate Embeddings force-re-embeds every
+    // entry (expensive — gated by a confirm dialog).
+    RowLayout {
+        Layout.fillWidth: true
+        spacing: 6
+
+        QQC2.Label {
+            text: "Dream cycle:"
+            opacity: 0.7
+        }
+
+        QQC2.Button {
+            text: "Run Extraction"
+            icon.name: "media-playback-start"
+            onClicked: root.startMaintenance("extraction", "Extraction")
+        }
+
+        QQC2.Button {
+            text: "Run Consolidation"
+            icon.name: "merge"
+            onClicked: root.startMaintenance("consolidation", "Consolidation")
+        }
+
+        QQC2.Button {
+            text: "Recalculate Embeddings"
+            icon.name: "view-refresh"
+            onClicked: confirmRecalcDialog.open()
+        }
+
+        Item { Layout.fillWidth: true }
     }
 
     // Resizable split: drag the handle to widen the list or the editor. The
@@ -443,5 +501,23 @@ ColumnLayout {
         }
 
         onAccepted: root.deleteSelected()
+    }
+
+    // --- Confirm recalculate-embeddings dialog --------------------------
+
+    QQC2.Dialog {
+        id: confirmRecalcDialog
+        title: "Recalculate all embeddings?"
+        modal: true
+        anchors.centerIn: parent
+        standardButtons: QQC2.Dialog.Cancel | QQC2.Dialog.Ok
+
+        QQC2.Label {
+            text: "Re-embed every knowledge entry from scratch? This runs in the "
+                + "background and can take a while on a large knowledge base."
+            wrapMode: Text.WordWrap
+        }
+
+        onAccepted: root.startMaintenance("recalculate_embeddings", "Recalculate embeddings")
     }
 }
