@@ -105,6 +105,18 @@ DesktopAssistantKcm::DesktopAssistantKcm(QObject *parent, const KPluginMetaData 
         QStringLiteral("EntriesChanged"),
         this,
         SIGNAL(knowledgeEntriesChanged()));
+
+    // Live calibration progress (#121): relay the daemon's
+    // org.desktopAssistant.Voice.CalibrationProgress signal to a slot that builds
+    // the user-facing status/prompt while a wake-word calibration runs. The match
+    // rule is installed regardless of whether the daemon is up yet.
+    QDBusConnection::sessionBus().connect(
+        QString::fromUtf8(VOICE_SERVICE),
+        QString::fromUtf8(VOICE_PATH),
+        QString::fromUtf8(VOICE_IFACE),
+        QStringLiteral("CalibrationProgress"),
+        this,
+        SLOT(onCalibrationProgress(uint, uint, double)));
 }
 
 QString DesktopAssistantKcm::buildStamp() const
@@ -2182,6 +2194,81 @@ void DesktopAssistantKcm::setWakeSensitivity(double value)
     m_wakeSensitivity = clamped;
     Q_EMIT voiceConfigChanged();
     scheduleVoiceConfigWrite();
+}
+
+bool DesktopAssistantKcm::calibrationActive() const
+{
+    return m_calibrationActive;
+}
+
+QString DesktopAssistantKcm::calibrationStatus() const
+{
+    return m_calibrationStatus;
+}
+
+void DesktopAssistantKcm::calibrateWake()
+{
+    if (m_calibrationActive) {
+        return;
+    }
+    m_calibrationActive = true;
+    m_calibrationStatus = QStringLiteral("Starting calibration…");
+    Q_EMIT calibrationChanged();
+
+    // Pass 0 so the daemon picks its default utterance count. Generous timeout:
+    // the daemon prompts for several utterances, each with its own listen window
+    // plus retries, so the whole call can take a minute or more.
+    asyncSettingsCall(
+        QStringLiteral("CalibrateWake"),
+        {QVariant::fromValue<uint>(0)},
+        300000,
+        [this](const QDBusMessage &reply) {
+            m_calibrationActive = false;
+            if (reply.type() == QDBusMessage::ErrorMessage) {
+                m_calibrationStatus =
+                    QStringLiteral("Calibration failed: %1").arg(dbusErrorMessage(reply));
+            } else {
+                // Reply args: (double sensitivity, uint samples, double min,
+                // double max, double mean) — see CalibrateWake in the voice repo.
+                const QVariantList a = reply.arguments();
+                const double sensitivity = a.value(0).toDouble();
+                const uint samples = a.value(1).toUInt();
+                const double mean = a.value(4).toDouble();
+                // Move the slider to the calibrated value WITHOUT scheduling a
+                // config write — the daemon already applied and persisted it.
+                const double clamped = std::clamp(sensitivity, 0.0, 1.0);
+                if (!qFuzzyCompare(m_wakeSensitivity + 1.0, clamped + 1.0)) {
+                    m_wakeSensitivity = clamped;
+                    Q_EMIT voiceConfigChanged();
+                }
+                m_calibrationStatus =
+                    QStringLiteral("Calibrated: sensitivity %1 from %2 samples (avg score %3)")
+                        .arg(sensitivity, 0, 'f', 2)
+                        .arg(samples)
+                        .arg(mean, 0, 'f', 2);
+            }
+            Q_EMIT calibrationChanged();
+        },
+        VOICE_SERVICE, VOICE_PATH, VOICE_IFACE);
+}
+
+void DesktopAssistantKcm::onCalibrationProgress(uint captured, uint total, double score)
+{
+    if (!m_calibrationActive) {
+        return;
+    }
+    if (score < -1.5) {
+        m_calibrationStatus = QStringLiteral("Didn't catch that — try again.");
+    } else if (score < 0.0) {
+        m_calibrationStatus =
+            QStringLiteral("Say \"Hey Adele\" now (%1 of %2)").arg(captured + 1).arg(total);
+    } else {
+        m_calibrationStatus = QStringLiteral("Got it (%1 of %2), score %3")
+                                  .arg(captured)
+                                  .arg(total)
+                                  .arg(score, 0, 'f', 2);
+    }
+    Q_EMIT calibrationChanged();
 }
 
 QString DesktopAssistantKcm::inputDevice() const

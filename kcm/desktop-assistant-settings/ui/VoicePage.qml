@@ -283,6 +283,42 @@ ColumnLayout {
               + "being missed."
     }
 
+    // Auto-calibration (#121): let the daemon measure the user's real "Hey
+    // Adele" scores and set the threshold, instead of hand-tuning the slider.
+    // Needs the service actually running (it takes over the mic), so gate on the
+    // live `voiceServiceAvailable`, not `voicePresent`.
+    RowLayout {
+        Layout.fillWidth: true
+        QQC2.Button {
+            text: kcm.calibrationActive ? "Calibrating…" : "Calibrate automatically…"
+            icon.name: "audio-input-microphone"
+            enabled: kcm.voiceServiceAvailable && !kcm.calibrationActive
+            onClicked: kcm.calibrateWake()
+        }
+        QQC2.BusyIndicator {
+            running: kcm.calibrationActive
+            visible: kcm.calibrationActive
+            Layout.preferredHeight: parent.height
+        }
+        QQC2.Label {
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+            opacity: 0.8
+            visible: kcm.calibrationStatus.length > 0
+            text: kcm.calibrationStatus
+        }
+    }
+
+    QQC2.Label {
+        Layout.fillWidth: true
+        wrapMode: Text.Wrap
+        opacity: 0.7
+        text: "Calibrate picks the threshold for you: the assistant asks you to "
+              + "say “Hey Adele” a few times and sets a value that matches your "
+              + "voice and microphone. The result is applied immediately and "
+              + "saved. Requires the voice service to be running."
+    }
+
     // Wake-word forward-compat (voice#50/#51): eager mode + a listening cue.
     // These map to real config keys (wake_word.eager / wake_word.listening_cue)
     // so it's safe to write them now even though the daemon may not consume them
