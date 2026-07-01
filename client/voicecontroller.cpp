@@ -8,6 +8,7 @@
 #include <QDBusPendingCall>
 #include <QDBusPendingCallWatcher>
 #include <QDBusServiceWatcher>
+#include <QTimer>
 #include <QVariant>
 #include <QVariantMap>
 
@@ -73,6 +74,12 @@ void VoiceController::start()
     bus.connect(kService, kPath, kIface, QStringLiteral("StateChanged"), this,
                 SLOT(handleStateChanged(QString)));
 
+    // Mute state (voice#124): the daemon emits EnabledChanged on SetEnabled,
+    // MuteFor, or a timed mute auto-unmuting — so the UI reflects the automatic
+    // un-mute (and cross-client changes) without polling GetEnabled.
+    bus.connect(kService, kPath, kIface, QStringLiteral("EnabledChanged"), this,
+                SLOT(handleEnabledChanged(bool)));
+
     // Seed from the current owner, if any. isServiceRegistered is a quick local
     // bus-daemon round-trip done once at startup (the watcher covers changes).
     QDBusConnectionInterface *iface = bus.interface();
@@ -106,6 +113,70 @@ void VoiceController::handleStateChanged(const QString &state)
     setState(state);
 }
 
+void VoiceController::handleEnabledChanged(bool enabled)
+{
+    if (m_enabled != enabled) {
+        m_enabled = enabled;
+        Q_EMIT enabledChanged(m_enabled);
+    }
+    if (enabled) {
+        // Re-enabled — manually or because a timed mute elapsed. Clear any
+        // running countdown so the UI drops the "muted" state immediately.
+        setMuteSecondsRemaining(0);
+    } else {
+        // Freshly muted (possibly by another client): learn the deadline so a
+        // countdown reads correctly even though we didn't initiate the mute.
+        fetchMuteRemaining();
+    }
+}
+
+void VoiceController::setMuteSecondsRemaining(int seconds)
+{
+    if (seconds < 0) {
+        seconds = 0;
+    }
+    if (m_muteSecondsRemaining != seconds) {
+        m_muteSecondsRemaining = seconds;
+        Q_EMIT muteSecondsRemainingChanged(m_muteSecondsRemaining);
+    }
+    // A once-a-second display countdown runs only while a timed mute is pending;
+    // the authoritative unmute still arrives via EnabledChanged.
+    if (m_muteSecondsRemaining > 0) {
+        if (!m_muteCountdown) {
+            m_muteCountdown = new QTimer(this);
+            m_muteCountdown->setInterval(1000);
+            connect(m_muteCountdown, &QTimer::timeout, this, [this] {
+                if (m_muteSecondsRemaining > 0) {
+                    setMuteSecondsRemaining(m_muteSecondsRemaining - 1);
+                }
+            });
+        }
+        if (!m_muteCountdown->isActive()) {
+            m_muteCountdown->start();
+        }
+    } else if (m_muteCountdown) {
+        m_muteCountdown->stop();
+    }
+}
+
+void VoiceController::fetchMuteRemaining()
+{
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    if (!bus.isConnected()) {
+        return;
+    }
+    // GetMuteSecondsRemaining -> u
+    auto *watcher =
+        new QDBusPendingCallWatcher(bus.asyncCall(voiceCall(QStringLiteral("GetMuteSecondsRemaining"))), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *call) {
+        call->deleteLater();
+        const QDBusMessage reply = call->reply();
+        if (reply.type() == QDBusMessage::ReplyMessage) {
+            setMuteSecondsRemaining(reply.arguments().value(0).toInt());
+        }
+    });
+}
+
 void VoiceController::seedState()
 {
     QDBusConnection bus = QDBusConnection::sessionBus();
@@ -137,6 +208,9 @@ void VoiceController::seedState()
         }
     });
 
+    // Learn any in-progress timed mute (voice#124) so a client that attaches
+    // mid-mute shows the right countdown.
+    fetchMuteRemaining();
     fetchVoice();
     refreshVoices();
 }
@@ -261,6 +335,32 @@ void VoiceController::setEnabled(bool enabled)
         m_enabled = enabled;
         Q_EMIT enabledChanged(m_enabled);
     }
+}
+
+void VoiceController::muteFor(int seconds)
+{
+    if (!m_available) {
+        return;
+    }
+    if (seconds < 0) {
+        seconds = 0;
+    }
+    QDBusMessage msg = voiceCall(QStringLiteral("MuteFor"));
+    msg.setArguments({static_cast<uint>(seconds)});
+    QDBusConnection::sessionBus().asyncCall(msg);
+    // Optimistically reflect muted + the countdown; EnabledChanged reconciles.
+    if (m_enabled) {
+        m_enabled = false;
+        Q_EMIT enabledChanged(m_enabled);
+    }
+    setMuteSecondsRemaining(seconds);
+}
+
+void VoiceController::unmute()
+{
+    setEnabled(true);
+    // Drop the countdown immediately; the daemon confirms via EnabledChanged.
+    setMuteSecondsRemaining(0);
 }
 
 void VoiceController::setVoice(const QString &voiceId, int speaker)
