@@ -2228,21 +2228,34 @@ void DesktopAssistantKcm::calibrateWake()
                 m_calibrationStatus =
                     QStringLiteral("Calibration failed: %1").arg(dbusErrorMessage(reply));
             } else {
-                // Reply args: (double sensitivity, uint samples, double min,
-                // double max, double mean) — see CalibrateWake in the voice repo.
+                // Reply args (see CalibrateWake in the voice repo):
+                // (double sensitivity, bool eager, uint samples, double mean_peak,
+                //  double noise_floor, double eager_cutoff, double non_eager_cutoff).
                 const QVariantList a = reply.arguments();
                 const double sensitivity = a.value(0).toDouble();
-                const uint samples = a.value(1).toUInt();
-                const double mean = a.value(4).toDouble();
-                // Move the slider to the calibrated value WITHOUT scheduling a
-                // config write — the daemon already applied and persisted it.
+                const bool eager = a.value(1).toBool();
+                const uint samples = a.value(2).toUInt();
+                const double mean = a.value(3).toDouble();
+                // Reflect the calibrated value AND the chosen mode WITHOUT
+                // scheduling a config write — the daemon already applied both live
+                // and persisted them (a low per-voice cutoff pairs with a wake
+                // mode, so calibration may have switched eager on/off).
                 const double clamped = std::clamp(sensitivity, 0.0, 1.0);
+                bool changed = false;
                 if (!qFuzzyCompare(m_wakeSensitivity + 1.0, clamped + 1.0)) {
                     m_wakeSensitivity = clamped;
+                    changed = true;
+                }
+                if (m_wakeEager != eager) {
+                    m_wakeEager = eager;
+                    changed = true;
+                }
+                if (changed) {
                     Q_EMIT voiceConfigChanged();
                 }
                 m_calibrationStatus =
-                    QStringLiteral("Calibrated: sensitivity %1 from %2 samples (avg score %3)")
+                    QStringLiteral("Calibrated: %1 mode, sensitivity %2 (%3 samples, avg %4)")
+                        .arg(eager ? QStringLiteral("eager") : QStringLiteral("standard"))
                         .arg(sensitivity, 0, 'f', 2)
                         .arg(samples)
                         .arg(mean, 0, 'f', 2);
@@ -2257,7 +2270,9 @@ void DesktopAssistantKcm::onCalibrationProgress(uint captured, uint total, doubl
     if (!m_calibrationActive) {
         return;
     }
-    if (score < -1.5) {
+    if (score < -2.5) {
+        m_calibrationStatus = QStringLiteral("Measuring background noise — please stay quiet…");
+    } else if (score < -1.5) {
         m_calibrationStatus = QStringLiteral("Didn't catch that — try again.");
     } else if (score < 0.0) {
         m_calibrationStatus =
