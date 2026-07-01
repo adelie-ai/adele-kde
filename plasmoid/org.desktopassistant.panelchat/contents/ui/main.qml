@@ -52,6 +52,18 @@ PlasmoidItem {
     // Any in-flight turn (mic open, thinking, or talking back).
     readonly property bool voiceActive: voiceAvailable && voiceState !== "Idle"
 
+    // Mute / inhibit state (voice#124, adele-kde#99). "Muted" == the voice
+    // service is up but wake-word listening is OFF (the mic is closed) — the
+    // "don't answer other people on this call" control. The chat view and the
+    // root controller both track the same daemon (they agree), so prefer the
+    // live chat view when expanded and fall back to the root controller while
+    // collapsed — mirroring voiceState above.
+    readonly property bool voiceEnabled: chatView ? chatView.voiceEnabled : rootVoice.enabled
+    readonly property bool voiceMuted: voiceAvailable && !voiceEnabled
+    // Seconds left on a timed mute (0 when enabled or muted indefinitely). The
+    // root controller always tracks it; both controllers see the same daemon.
+    readonly property int voiceMuteRemaining: rootVoice.muteSecondsRemaining
+
     // Badge accent per state, mirroring the chat view's voiceStateColor so the
     // collapsed panel dot and the expanded in-widget chip always agree:
     //   Listening → negative/red, Processing → neutral/amber, Speaking → blue.
@@ -81,22 +93,73 @@ PlasmoidItem {
         }
     }
 
-    // "Enable 'Hey Adele'" lives in the plasmoid's right-click menu
-    // (adele-kde#29). Visible only once the popup has been opened and the voice
-    // daemon is on the bus, so it never dangles as a dead toggle. The chat view
-    // owns the D-Bus plumbing; this action just reflects/forwards it.
+    // Mute / un-mute helpers (voice#124, adele-kde#99). Driven through the
+    // always-alive root controller so they work from the COLLAPSED panel icon,
+    // not only once the popup has been opened. The expanded chat view's own
+    // controller stays in sync because both subscribe to the daemon's
+    // EnabledChanged signal.
+    function muteVoiceFor(seconds) {
+        rootVoice.muteFor(seconds)
+    }
+    function unmuteVoice() {
+        rootVoice.unmute()
+    }
+    function toggleMute() {
+        if (!voiceAvailable) {
+            return
+        }
+        if (root.voiceMuted) {
+            rootVoice.unmute()
+        } else {
+            rootVoice.muteFor(0)
+        }
+    }
+    // "24 min" / "1 h 5 min" for a mute-countdown label; "" when not counting.
+    function formatMuteRemaining(secs) {
+        if (secs <= 0) {
+            return ""
+        }
+        var mins = Math.ceil(secs / 60)
+        if (mins < 60) {
+            return mins + " min"
+        }
+        var h = Math.floor(mins / 60)
+        var m = mins % 60
+        return m > 0 ? (h + " h " + m + " min") : (h + " h")
+    }
+
+    // Voice mute controls (voice#124, adele-kde#99). Unlike the old "Enable Hey
+    // Adele" toggle (which only appeared once the popup had been opened), these
+    // drive the always-alive root controller, so you can silence Adele straight
+    // from the COLLAPSED panel icon mid-call. A timed mute auto-restores, so you
+    // can't forget you muted her. Each action hides when it wouldn't apply so
+    // none dangles as a dead control.
     Plasmoid.contextualActions: [
         PlasmaCore.Action {
-            text: "Enable “Hey Adele”"
+            text: "Mute Adele"
+            icon.name: "microphone-sensitivity-muted"
+            visible: root.voiceAvailable && !root.voiceMuted
+            onTriggered: root.muteVoiceFor(0)
+        },
+        PlasmaCore.Action {
+            text: "Mute for 30 minutes"
+            icon.name: "chronometer"
+            visible: root.voiceAvailable && !root.voiceMuted
+            onTriggered: root.muteVoiceFor(30 * 60)
+        },
+        PlasmaCore.Action {
+            text: "Mute for 1 hour"
+            icon.name: "chronometer"
+            visible: root.voiceAvailable && !root.voiceMuted
+            onTriggered: root.muteVoiceFor(60 * 60)
+        },
+        PlasmaCore.Action {
+            text: root.voiceMuteRemaining > 0
+                ? "Un-mute Adele (" + root.formatMuteRemaining(root.voiceMuteRemaining) + " left)"
+                : "Un-mute Adele"
             icon.name: "audio-input-microphone"
-            checkable: true
-            visible: root.chatView ? root.chatView.voiceAvailable : false
-            checked: root.chatView ? root.chatView.voiceEnabled : false
-            onTriggered: {
-                if (root.chatView) {
-                    root.chatView.setVoiceEnabled(checked)
-                }
-            }
+            visible: root.voiceMuted
+            onTriggered: root.unmuteVoice()
         },
         // Abort the active turn straight from the panel's right-click menu
         // (adele-kde#38) without expanding the widget. Shown only while a turn
@@ -121,6 +184,31 @@ PlasmoidItem {
         icon.width: Kirigami.Units.iconSizes.smallMedium
         icon.height: Kirigami.Units.iconSizes.smallMedium
         onClicked: root.expanded = !root.expanded
+
+        // Middle-click the panel icon to mute / un-mute Adele (voice#124) — a
+        // fast gesture to silence her mid-call. This MouseArea only claims the
+        // middle button, so left/right clicks pass through to the ToolButton
+        // (left still expands the popup; right still opens the context menu).
+        MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.MiddleButton
+            onClicked: root.toggleMute()
+        }
+
+        // Muted indicator (voice#124): a muted-mic glyph in the icon's corner so
+        // "Adele is muted" is unmistakable even while the popup is collapsed.
+        // Shown only when muted AND idle — during a push-to-talk turn the
+        // activity badge below takes over so an active reply isn't mislabelled.
+        Kirigami.Icon {
+            id: mutedOverlay
+            visible: root.voiceMuted && !root.voiceActive
+            source: "microphone-sensitivity-muted"
+            readonly property real iconBox: Math.min(compactRoot.width, compactRoot.height)
+            width: Math.max(9, Math.round(iconBox * 0.5))
+            height: width
+            x: compactRoot.width / 2 + iconBox / 2 - width
+            y: compactRoot.height / 2 + iconBox / 2 - height
+        }
 
         // Voice-state badge overlaid on the taskbar icon (adele-kde voice-state).
         // A small coloured dot in the corner makes the pipeline state obvious

@@ -40,6 +40,7 @@ void TestVoiceController::defaultsAreIdleAndUnavailable()
     QVERIFY(!vc.isAvailable());
     QCOMPARE(vc.state(), QStringLiteral("Idle"));
     QVERIFY(!vc.isEnabled());
+    QCOMPARE(vc.muteSecondsRemaining(), 0);
     QVERIFY(vc.voiceId().isEmpty());
     QCOMPARE(vc.speakerId(), -1);
     QVERIFY(vc.voices().isEmpty());
@@ -60,22 +61,27 @@ void TestVoiceController::intentsWhileUnavailableAreNoOps()
     VoiceController vc;
     QSignalSpy stateSpy(&vc, &VoiceController::stateChanged);
     QSignalSpy enabledSpy(&vc, &VoiceController::enabledChanged);
+    QSignalSpy muteSpy(&vc, &VoiceController::muteSecondsRemainingChanged);
     QSignalSpy voiceSpy(&vc, &VoiceController::voiceChanged);
 
     vc.pushToTalk(QStringLiteral("c1"));
     vc.stopListening();
     vc.stopSpeaking();
     vc.setEnabled(true);
+    vc.muteFor(1800);
+    vc.unmute();
     vc.setVoice(QStringLiteral("amy"), 2);
     vc.sayText(QStringLiteral("hello"));
     vc.refreshVoices();
 
     QCOMPARE(vc.state(), QStringLiteral("Idle"));
     QVERIFY(!vc.isEnabled());
+    QCOMPARE(vc.muteSecondsRemaining(), 0);
     QVERIFY(vc.voiceId().isEmpty());
     QCOMPARE(vc.speakerId(), -1);
     QCOMPARE(stateSpy.count(), 0);
     QCOMPARE(enabledSpy.count(), 0);
+    QCOMPARE(muteSpy.count(), 0);
     QCOMPARE(voiceSpy.count(), 0);
 }
 

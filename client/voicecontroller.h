@@ -8,6 +8,7 @@
 #include <qqmlregistration.h>
 
 class QDBusServiceWatcher;
+class QTimer;
 
 namespace adele {
 
@@ -38,8 +39,11 @@ class VoiceController : public QObject
     Q_PROPERTY(bool available READ isAvailable NOTIFY availableChanged)
     // Pipeline state: "Idle" | "Listening" | "Processing" | "Speaking".
     Q_PROPERTY(QString state READ state NOTIFY stateChanged)
-    // Resident "Hey Adele" wake-word listening.
+    // Resident "Hey Adele" wake-word listening. False == muted (mic closed).
     Q_PROPERTY(bool enabled READ isEnabled NOTIFY enabledChanged)
+    // Seconds left on a timed mute (voice#124); 0 when enabled or muted
+    // indefinitely. Drives a "muted — N min left" countdown in the UI.
+    Q_PROPERTY(int muteSecondsRemaining READ muteSecondsRemaining NOTIFY muteSecondsRemainingChanged)
     Q_PROPERTY(QString voiceId READ voiceId NOTIFY voiceChanged)
     // Active speaker index for multi-speaker voices; -1 = default/unset.
     Q_PROPERTY(int speakerId READ speakerId NOTIFY voiceChanged)
@@ -64,6 +68,10 @@ public:
     [[nodiscard]] bool isEnabled() const
     {
         return m_enabled;
+    }
+    [[nodiscard]] int muteSecondsRemaining() const
+    {
+        return m_muteSecondsRemaining;
     }
     [[nodiscard]] QString voiceId() const
     {
@@ -99,6 +107,16 @@ public:
     Q_INVOKABLE void stopSpeaking();
     /** Toggle the resident "Hey Adele" wake word. Optimistic + reconciled. */
     Q_INVOKABLE void setEnabled(bool enabled);
+    /**
+     * Temporarily inhibit voice (voice#124): close the mic now, auto-unmuting
+     * after `seconds` (`0` = indefinite, until `unmute()`). The "mute for this
+     * meeting" control — silences passive wake-listening so Adele won't answer
+     * other people on a call, while push-to-talk still works. Optimistic +
+     * reconciled via the daemon's `EnabledChanged` signal.
+     */
+    Q_INVOKABLE void muteFor(int seconds);
+    /** Un-mute: re-enable wake-word listening and cancel any pending mute timer. */
+    Q_INVOKABLE void unmute();
     /** Change the active TTS voice; `speaker` < 0 means default/single-speaker. */
     Q_INVOKABLE void setVoice(const QString &voiceId, int speaker);
     /** Speak `text` via the daemon's TTS engine (routes the core's Speak event). */
@@ -116,6 +134,7 @@ Q_SIGNALS:
     void availableChanged(bool available);
     void stateChanged(const QString &state);
     void enabledChanged(bool enabled);
+    void muteSecondsRemainingChanged(int seconds);
     void voiceChanged();
     void voicesChanged();
 
@@ -123,10 +142,17 @@ private Q_SLOTS:
     // Wired to the daemon's `StateChanged(s)` D-Bus signal (string-based connect
     // needs a real slot). Runs on the GUI thread.
     void handleStateChanged(const QString &state);
+    // Wired to the daemon's `EnabledChanged(b)` signal (voice#124) so mute state
+    // — including a timed mute's *automatic* unmute — is authoritative, not just
+    // the optimistic local flip.
+    void handleEnabledChanged(bool enabled);
 
 private:
     void setAvailable(bool available);
     void setState(const QString &state);
+    void setMuteSecondsRemaining(int seconds);
+    // Query GetMuteSecondsRemaining and restart the display countdown from it.
+    void fetchMuteRemaining();
     // Pull GetState/GetEnabled/GetVoice + the voice list once the service is up.
     void seedState();
     void fetchVoice();
@@ -138,6 +164,10 @@ private:
     int m_speakerId = -1;
     QVariantList m_voices;
 
+    int m_muteSecondsRemaining = 0;
+    // Ticks once a second while a timed mute is counting down, for display only;
+    // the authoritative unmute arrives via the daemon's EnabledChanged signal.
+    QTimer *m_muteCountdown = nullptr;
     QDBusServiceWatcher *m_watcher = nullptr;
     bool m_started = false;
 };
