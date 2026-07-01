@@ -68,6 +68,12 @@ class DesktopAssistantKcm : public KQuickConfigModule {
     Q_PROPERTY(QString sttDownloadError READ sttDownloadError NOTIFY sttDownloadChanged)
     Q_PROPERTY(QString sttDownloadingFile READ sttDownloadingFile NOTIFY sttDownloadChanged)
     Q_PROPERTY(double wakeSensitivity READ wakeSensitivity WRITE setWakeSensitivity NOTIFY voiceConfigChanged)
+    // Wake-word calibration (#121): the daemon takes over the mic, has the user
+    // say "Hey Adele" a few times, and sets the sensitivity from the measured
+    // scores. `calibrationActive` gates the button; `calibrationStatus` carries
+    // the live prompt and the final result for the UI to show.
+    Q_PROPERTY(bool calibrationActive READ calibrationActive NOTIFY calibrationChanged)
+    Q_PROPERTY(QString calibrationStatus READ calibrationStatus NOTIFY calibrationChanged)
     Q_PROPERTY(QString inputDevice READ inputDevice WRITE setInputDevice NOTIFY voiceConfigChanged)
     Q_PROPERTY(QString outputDevice READ outputDevice WRITE setOutputDevice NOTIFY voiceConfigChanged)
     // Voice tuning knobs (adele-kde#37): endpointing + wake-word forward-compat.
@@ -300,6 +306,16 @@ public:
     /// While a measurement is in flight statusText shows "Measuring…".
     Q_INVOKABLE void measureInputLevel();
 
+    /// Start wake-word calibration on the running daemon (#121). The daemon takes
+    /// over the mic, prompts the user to say the wake word several times, sets the
+    /// sensitivity a margin below the weakest score, applies it live, and persists
+    /// it. Progress + result surface via `calibrationStatus` / `calibrationActive`
+    /// (and the sensitivity slider updates to the calibrated value on success).
+    /// A no-op if a calibration is already running or the daemon isn't available.
+    Q_INVOKABLE void calibrateWake();
+    bool calibrationActive() const;
+    QString calibrationStatus() const;
+
     /// Reset the wake-word knobs (sensitivity, eager, listening cue) to the
     /// documented defaults and persist them.
     Q_INVOKABLE void resetWakeDefaults();
@@ -377,6 +393,13 @@ Q_SIGNALS:
     // 0..1 peak, or -1 when none could be measured. The Voice page binds its
     // micLevel from this (measureInputLevel() is now void/non-blocking).
     void inputLevelMeasured(double level);
+    // Wake-word calibration state changed (#121): active flag and/or status text.
+    void calibrationChanged();
+
+private Q_SLOTS:
+    // Relays the daemon's `org.desktopAssistant.Voice.CalibrationProgress` D-Bus
+    // signal into `calibrationStatus` while a calibration is in flight (#121).
+    void onCalibrationProgress(uint captured, uint total, double score);
 
 private:
     struct ConnectionProfile {
@@ -582,6 +605,10 @@ private:
     int m_sttDownloadProgress = -1;
     bool m_sttDownloadActive = false;
     double m_wakeSensitivity = 0.5;
+    // Wake-word calibration (#121): in-flight flag + the status/prompt text shown
+    // in the Voice page while calibrating and after it finishes.
+    bool m_calibrationActive = false;
+    QString m_calibrationStatus;
     QString m_inputDevice = QStringLiteral("default");
     QString m_outputDevice = QStringLiteral("default");
     // Tuning knobs (adele-kde#37). Initial values mirror the daemon's

@@ -269,27 +269,68 @@ ColumnLayout {
         Layout.fillWidth: true
         wrapMode: Text.Wrap
         opacity: 0.7
-        // IMPORTANT (adele-kde#37): the detector runs with eager = false, so
-        // this is a confidence THRESHOLD, not a plain "more/less sensitive"
-        // dial — lower is NOT simply more sensitive. Setting it too low can mean
-        // the wake word never finalises (the detector keeps waiting for a
-        // higher-scoring frame that doesn't come). Around 0.45 is a good start;
-        // raise it if you get false triggers, nudge it down only a little if
-        // "Hey Adele" is being missed.
-        text: "Confidence threshold for “Hey Adele”. This is NOT a simple "
-              + "more-sensitive dial: too low and the wake word may never "
-              + "trigger (it waits for a better match). Start near 0.45 — raise "
-              + "it for fewer false triggers, lower it only slightly if it’s "
-              + "being missed."
+        // What this value MEANS depends on the wake mode (the "Eager wake"
+        // checkbox below), so the guidance is mode-specific. Describing both
+        // cases in one blurb is what made the old text read as contradictory
+        // ("lower if it's being missed" vs. "too low and it never triggers").
+        text: kcm.wakeEager
+            ? "How strong a match “Hey Adele” must be to wake Adele, from 0 to 1. "
+              + "In eager mode it's a straightforward dial: LOWER wakes more easily "
+              + "but risks false triggers; HIGHER is stricter but may miss you. "
+              + "Values usually land around 0.2–0.4. Use “Calibrate automatically” "
+              + "below to set it from your own voice and microphone."
+            : "How strong a match “Hey Adele” must be to wake Adele, from 0 to 1. "
+              + "In standard (non-eager) mode this is NOT a simple dial — it has a "
+              + "sweet spot: too HIGH and it misses you, but too LOW and it never "
+              + "fires at all (it waits for the match to drop back below this value "
+              + "at the end of the phrase, which never happens if the value sits "
+              + "below the room's background match level). Around 0.3–0.45 usually "
+              + "works. Tip: turn on “Eager wake” below for a simpler dial where "
+              + "lower always just means easier to trigger."
     }
 
-    // Wake-word forward-compat (voice#50/#51): eager mode + a listening cue.
-    // These map to real config keys (wake_word.eager / wake_word.listening_cue)
-    // so it's safe to write them now even though the daemon may not consume them
-    // until those issues land.
+    // Auto-calibration (#121): let the daemon measure the user's real "Hey
+    // Adele" scores and set the threshold, instead of hand-tuning the slider.
+    // Needs the service actually running (it takes over the mic), so gate on the
+    // live `voiceServiceAvailable`, not `voicePresent`.
+    RowLayout {
+        Layout.fillWidth: true
+        QQC2.Button {
+            text: kcm.calibrationActive ? "Calibrating…" : "Calibrate automatically…"
+            icon.name: "audio-input-microphone"
+            enabled: kcm.voiceServiceAvailable && !kcm.calibrationActive
+            onClicked: kcm.calibrateWake()
+        }
+        QQC2.BusyIndicator {
+            running: kcm.calibrationActive
+            visible: kcm.calibrationActive
+            Layout.preferredHeight: parent.height
+        }
+        QQC2.Label {
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+            opacity: 0.8
+            visible: kcm.calibrationStatus.length > 0
+            text: kcm.calibrationStatus
+        }
+    }
+
+    QQC2.Label {
+        Layout.fillWidth: true
+        wrapMode: Text.Wrap
+        opacity: 0.7
+        text: "Calibrate picks the threshold for you: the assistant asks you to "
+              + "say “Hey Adele” a few times and sets a value that matches your "
+              + "voice and microphone. The result is applied immediately and "
+              + "saved. Requires the voice service to be running."
+    }
+
+    // Eager wake (voice#50) + listening cue. `eager` is captured at daemon
+    // startup, so a change needs a voice-service restart to take effect (unlike
+    // sensitivity, which applies live).
     QQC2.CheckBox {
         id: wakeEagerCheck
-        text: "Eager wake (trigger as soon as the threshold is crossed)"
+        text: "Eager wake (fire as soon as the match crosses the sensitivity)"
         enabled: root.voicePresent
         checked: kcm.wakeEager
         onToggled: kcm.wakeEager = checked
@@ -299,10 +340,13 @@ ColumnLayout {
         Layout.fillWidth: true
         wrapMode: Text.Wrap
         opacity: 0.7
-        text: "Eager mode fires the moment confidence passes the threshold "
-              + "above, instead of waiting for the score to peak. It feels "
-              + "snappier but can be twitchier. (Takes effect once the daemon "
-              + "supports it — voice#50.)"
+        text: "Eager wake fires the instant the match score crosses the "
+              + "sensitivity above, instead of waiting for you to finish the "
+              + "phrase. It's snappier, and it makes sensitivity behave like a "
+              + "simple dial (lower = easier to trigger) — so it pairs best with "
+              + "“Calibrate automatically”, which sets a low per-voice value. The "
+              + "trade-off is a bit more chance of false triggers. Changing this "
+              + "takes effect after the voice service restarts."
     }
 
     RowLayout {
