@@ -39,11 +39,25 @@ ColumnLayout {
                 statusText = error
                 return
             }
-            // ListMcpServersJson returns a JSON *array* (not an object wrapper),
-            // which the C++ edge JSON.parses into a JS array before it reaches
-            // us. Guard the shape defensively so a daemon that ever wrapped it
-            // can't throw here.
-            const rows = Array.isArray(result) ? result : []
+            // ListMcpServersJson returns a *top-level* JSON array. The C++ edge
+            // parses the reply (QVariantList → QJSValue), which yields a value
+            // that is array-*like* (indexable, has .length) but NOT a strict JS
+            // Array — so `Array.isArray()` rejects it and the list rendered empty
+            // even though every server arrived. Accept by .length (as
+            // ConnectionsPage does with result.connections), and tolerate a
+            // {servers:[...]} wrapper or a raw JSON string, so this can't silently
+            // drop rows again.
+            let rows = []
+            if (typeof result === "string") {
+                try { rows = JSON.parse(result) } catch (e) { rows = [] }
+            } else if (result && result.servers !== undefined) {
+                rows = result.servers
+            } else if (result && result.length !== undefined) {
+                rows = result
+            }
+            if (!rows || rows.length === undefined) {
+                rows = []
+            }
             const normalised = []
             for (let i = 0; i < rows.length; i++) {
                 const item = rows[i] || {}
