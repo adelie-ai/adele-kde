@@ -471,6 +471,17 @@ KCM.AbstractKCM {
                         Item { Layout.fillWidth: true }
                     }
 
+                    // Purpose label (inbound): keep this distinct from the
+                    // outbound Service accounts section below — epic #477's
+                    // type-safety guardrail is also a UX one.
+                    QQC2.Label {
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                        font: Kirigami.Theme.smallFont
+                        color: Kirigami.Theme.disabledTextColor
+                        text: "Who may connect to Adele's API (inbound)."
+                    }
+
                     QQC2.Label {
                         font.bold: true
                         text: "Enabled Methods"
@@ -576,6 +587,14 @@ KCM.AbstractKCM {
                             text: kcm.oidcScopes
                             onTextEdited: kcm.oidcScopes = text
                         }
+                    }
+
+                    Kirigami.Separator { Layout.fillWidth: true }
+
+                    // Outbound half of the Auth tab (epic #477): reusable OAuth
+                    // credentials Adele uses to reach external services.
+                    ServiceAccountsSection {
+                        Layout.fillWidth: true
                     }
 
                     Item { Layout.fillHeight: true }
