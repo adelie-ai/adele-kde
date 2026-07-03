@@ -346,6 +346,16 @@ public:
     /// every QML caller.
     Q_INVOKABLE void daemonCall(const QString &command, const QJSValue &payload, const QJSValue &callback);
 
+    /// Launch a daemon-provided MCP configure / sign-in command (mcp-servers-ui
+    /// epic). The headless daemon never opens a GUI — it only reports an argv
+    /// (`configure_command`, program first, built from config) and the KCM, on
+    /// the desktop, spawns it. Runs DETACHED and with NO shell via
+    /// QProcess::startDetached(argv[0], argv.mid(1)): the OAuth sign-in flow
+    /// opens a browser and must outlive the System Settings dialog, and the
+    /// no-shell form avoids word-splitting / metacharacter surprises. Called
+    /// from McpServersPage with the row's `configure_command`.
+    Q_INVOKABLE void launchMcpConfigure(const QStringList &argv);
+
 Q_SIGNALS:
     void statusTextChanged();
     /// Relays the daemon's `Knowledge.EntriesChanged` D-Bus signal so the QML

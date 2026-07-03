@@ -3146,12 +3146,29 @@ void DesktopAssistantKcm::daemonCall(const QString &command, const QJSValue &pay
         || snake.startsWith(QLatin1String("delete_knowledge_"))
         || snake == QLatin1String("start_maintenance");
 
-    const QByteArray objectPath = isKnowledge
-        ? QByteArrayLiteral("/org/desktopAssistant/Knowledge")
-        : QByteArrayLiteral("/org/desktopAssistant/Connections");
-    const QByteArray interfaceName = isKnowledge
-        ? QByteArrayLiteral("org.desktopAssistant.Knowledge")
-        : QByteArrayLiteral("org.desktopAssistant.Connections");
+    // MCP-server management commands route to the orchestrator
+    // `org.desktopAssistant.Settings` interface (mcp-servers-ui epic). The wire
+    // is JSON at the D-Bus edge: `list_mcp_servers` returns a JSON array of
+    // server descriptors we re-parse, `upsert_mcp_server` sends a JSON
+    // McpServerConfig string, the rest send plain string/bool args.
+    const bool isMcp = snake == QLatin1String("list_mcp_servers")
+        || snake == QLatin1String("upsert_mcp_server")
+        || snake == QLatin1String("remove_mcp_server")
+        || snake == QLatin1String("set_mcp_server_enabled")
+        || snake == QLatin1String("set_mcp_secret");
+
+    QByteArray objectPath;
+    QByteArray interfaceName;
+    if (isKnowledge) {
+        objectPath = QByteArrayLiteral("/org/desktopAssistant/Knowledge");
+        interfaceName = QByteArrayLiteral("org.desktopAssistant.Knowledge");
+    } else if (isMcp) {
+        objectPath = QByteArrayLiteral("/org/desktopAssistant/Settings");
+        interfaceName = QByteArrayLiteral("org.desktopAssistant.Settings");
+    } else {
+        objectPath = QByteArrayLiteral("/org/desktopAssistant/Connections");
+        interfaceName = QByteArrayLiteral("org.desktopAssistant.Connections");
+    }
 
     auto serializeArrayField = [&payloadObj](const QString &key) -> QString {
         const QJsonValue value = payloadObj.value(key);
@@ -3264,6 +3281,37 @@ void DesktopAssistantKcm::daemonCall(const QString &command, const QJSValue &pay
         method = QStringLiteral("StartMaintenance");
         callArgs << op;
         returnsJson = true;
+    } else if (snake == QLatin1String("list_mcp_servers")) {
+        // Returns a JSON array of MCP server descriptors (transport, honest
+        // status, per-server configure action); QML JSON.parses it. Additive
+        // JSON-at-the-edge method so the descriptor can grow without churning
+        // the D-Bus signature (mcp-servers-ui epic).
+        method = QStringLiteral("ListMcpServersJson");
+        returnsJson = true;
+    } else if (snake == QLatin1String("upsert_mcp_server")) {
+        // Add-or-replace a server by name. The whole McpServerConfig (stdio or
+        // http+oauth) is a JSON string the editor built; secret *values* are
+        // never in it — only refs, whose values are written first via
+        // set_mcp_secret.
+        const QString configJson = serializePayloadField(QStringLiteral("config"));
+        method = QStringLiteral("UpsertMcpServer");
+        callArgs << configJson;
+    } else if (snake == QLatin1String("remove_mcp_server")) {
+        const QString name = payloadObj.value(QStringLiteral("name")).toString();
+        method = QStringLiteral("RemoveMcpServer");
+        callArgs << name;
+    } else if (snake == QLatin1String("set_mcp_server_enabled")) {
+        const QString name = payloadObj.value(QStringLiteral("name")).toString();
+        const bool enabled = payloadObj.value(QStringLiteral("enabled")).toBool(false);
+        method = QStringLiteral("SetMcpServerEnabled");
+        callArgs << name << enabled;
+    } else if (snake == QLatin1String("set_mcp_secret")) {
+        // Write ONE secret value into secrets.toml (0600) under `id`. Called
+        // before upsert so a following config referencing the ref resolves.
+        const QString id = payloadObj.value(QStringLiteral("id")).toString();
+        const QString value = payloadObj.value(QStringLiteral("value")).toString();
+        method = QStringLiteral("SetMcpSecret");
+        callArgs << id << value;
     } else {
         fail(QStringLiteral("daemonCall: unsupported command '%1'").arg(snake));
         return;
@@ -3318,6 +3366,28 @@ void DesktopAssistantKcm::daemonCall(const QString &command, const QJSValue &pay
             }
         },
         SERVICE, objectPath.constData(), interfaceName.constData());
+}
+
+void DesktopAssistantKcm::launchMcpConfigure(const QStringList &argv)
+{
+    // Spawn the daemon-provided MCP configure / sign-in command (e.g.
+    // `desktop-assistant --mcp-oauth-login <name>`) DETACHED and with NO shell
+    // (mcp-servers-ui epic). The argv is daemon-built from config — never user
+    // free-text at exec time — and program-first, so we start argv[0] with
+    // argv[1..] as literal arguments (no word-splitting, no shell metacharacter
+    // surprises). Detached because the OAuth flow opens a browser and outlives
+    // the System Settings dialog; we do NOT reuse runSystemctlUserAsync since we
+    // neither want to wait for it nor tie its lifetime to this KCM.
+    if (argv.isEmpty()) {
+        m_statusText = QStringLiteral("MCP configure command was empty");
+        Q_EMIT statusTextChanged();
+        return;
+    }
+    const QString program = argv.first();
+    if (!QProcess::startDetached(program, argv.mid(1))) {
+        m_statusText = QStringLiteral("Failed to launch MCP configure command: %1").arg(program);
+        Q_EMIT statusTextChanged();
+    }
 }
 
 #include "desktopassistantkcm.moc"

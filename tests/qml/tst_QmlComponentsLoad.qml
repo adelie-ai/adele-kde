@@ -88,6 +88,16 @@ TestCase {
                 path: "../../kcm/desktop-assistant-settings/ui/ConnectionEditor.qml",
                 instantiate: false,
             },
+            {
+                tag: "kcm/McpServersPage",
+                path: "../../kcm/desktop-assistant-settings/ui/McpServersPage.qml",
+                instantiate: false,
+            },
+            {
+                tag: "kcm/McpServerEditor",
+                path: "../../kcm/desktop-assistant-settings/ui/McpServerEditor.qml",
+                instantiate: false,
+            },
         ]
     }
 
