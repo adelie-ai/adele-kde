@@ -9,23 +9,23 @@
  *   Remote (HTTP):  url + an Authentication sub-selector (None / Bearer / OAuth).
  *                     Bearer: a token value → stored via SetMcpSecret, config
  *                             carries only the secret *ref* (auth_bearer_secret).
- *                     OAuth:  client_id / token_url / authorize_url / scopes /
- *                             account (+ optional client secret value → SetMcpSecret).
- *                             The refresh token is NEVER typed here — it is minted
- *                             later by the row's Sign in button; we only reserve a
- *                             refresh_token_ref (<name>_refresh).
+ *                     OAuth:  a *service-account picker* (epic #477) + scopes. The
+ *                             server references an account by id (oauth_account);
+ *                             the OAuth client identity / secret / URLs live on the
+ *                             account (managed on the Auth tab), and the refresh
+ *                             token is minted by the account's Sign in there. The
+ *                             picker is type-constrained: it lists service accounts
+ *                             ONLY, never inbound WS/OIDC API-auth configs.
  *
- * SECURITY: secret *values* never go into config_json. Where the user enters a
- * value (bearer token, OAuth client secret) we call set_mcp_secret(ref, value)
- * FIRST, then upsert_mcp_server with the ref only.
+ * SECURITY: no secret value is entered here for OAuth — the server carries only
+ * an account *reference* + its required scopes. (Bearer still stores its token
+ * value via set_mcp_secret first, then upserts the ref only.)
  *
- * Note (contract): ListMcpServersJson echoes the OAuth non-secret request fields
- * (client_id / token_url / authorize_url / account / scopes), so editing an
- * existing remote server pre-fills them and a save round-trips without blanking
- * them — UpsertMcpServer replaces the server by name, so anything left blank is
- * dropped. Secret *values* (bearer token, client secret) are never echoed: those
- * fields stay blank on edit and "leave blank to keep the stored secret" applies
- * to them only; the refresh token is never typed at all (see below).
+ * Note (contract): ListMcpServersJson echoes `oauth_account_ref` (the referenced
+ * account id) + `oauth_scopes`, so editing a referencing server pre-selects its
+ * account and pre-fills scopes; a save round-trips the reference (no inline oauth
+ * is written). A legacy inline-oauth server has no ref, so the picker starts
+ * empty and the user selects an account to migrate it to.
  */
 import QtQuick
 import QtQuick.Controls as QQC2
@@ -62,13 +62,12 @@ Kirigami.OverlaySheet {
     property string fieldUrl: ""
     // http + bearer
     property string fieldBearerToken: ""
-    // http + oauth
-    property string fieldClientId: ""
-    property string fieldTokenUrl: ""
-    property string fieldAuthorizeUrl: ""
+    // http + oauth: the server contributes only its required scopes and
+    // *references* a reusable service account (epic #477) — the OAuth client
+    // identity (client_id / secret / urls) lives on the account, entered once.
     property string fieldScopes: ""
-    property string fieldAccount: ""
-    property string fieldClientSecret: ""
+    property var serviceAccounts: []        // loaded from list_service_accounts
+    property string selectedAccountId: ""   // the referenced account id, or ""
 
     property string errorText: ""
 
@@ -80,13 +79,58 @@ Kirigami.OverlaySheet {
         fieldEnv = ""
         fieldUrl = ""
         fieldBearerToken = ""
-        fieldClientId = ""
-        fieldTokenUrl = ""
-        fieldAuthorizeUrl = ""
         fieldScopes = ""
-        fieldAccount = ""
-        fieldClientSecret = ""
+        selectedAccountId = ""
         errorText = ""
+    }
+
+    // Load the service accounts for the OAuth picker; type-constrained to
+    // service accounts only (it never lists inbound WS/OIDC API-auth configs).
+    // `preselectId` re-selects an account after a reload (e.g. a just-created one).
+    function loadAccounts(preselectId) {
+        kcm.daemonCall("list_service_accounts", {}, function(result, error) {
+            if (error) {
+                errorText = "Failed to load service accounts: " + error
+                return
+            }
+            let rows = []
+            if (typeof result === "string") {
+                try { rows = JSON.parse(result) } catch (e) { rows = [] }
+            } else if (result && result.accounts !== undefined) {
+                rows = result.accounts
+            } else if (result && result.length !== undefined) {
+                rows = result
+            }
+            if (!rows || rows.length === undefined) { rows = [] }
+            const list = []
+            for (let i = 0; i < rows.length; i++) {
+                const a = rows[i] || {}
+                const id = String(a.id || "")
+                if (id.length === 0) continue
+                list.push({
+                    id: id,
+                    label: (String(a.display_name || "").length > 0
+                        ? String(a.display_name) : id)
+                        + (a.authorized ? "" : "  (not signed in)"),
+                })
+            }
+            serviceAccounts = list
+            if (preselectId !== undefined && preselectId.length > 0) {
+                selectedAccountId = preselectId
+            }
+            syncAccountCombo()
+        })
+    }
+
+    // Point the ComboBox at the currently-selected account id.
+    function syncAccountCombo() {
+        for (let i = 0; i < serviceAccounts.length; i++) {
+            if (serviceAccounts[i].id === selectedAccountId) {
+                accountCombo.currentIndex = i
+                return
+            }
+        }
+        accountCombo.currentIndex = -1
     }
 
     function openForNew() {
@@ -97,6 +141,7 @@ Kirigami.OverlaySheet {
         transportCombo.currentIndex = 0
         authCombo.currentIndex = 0
         resetFields()
+        loadAccounts()
         open()
     }
 
@@ -123,14 +168,16 @@ Kirigami.OverlaySheet {
             fieldUrl = String(item.target || "")
             authKind = String(item.auth_kind || "none")
             authCombo.currentIndex = (authKind === "bearer") ? 1 : (authKind === "oauth" ? 2 : 0)
-            fieldClientId = String(item.oauth_client_id || "")
-            fieldTokenUrl = String(item.oauth_token_url || "")
-            fieldAuthorizeUrl = String(item.oauth_authorize_url || "")
-            fieldAccount = String(item.oauth_account || "")
             fieldScopes = (Array.isArray(item.oauth_scopes) ? item.oauth_scopes : []).join(" ")
+            // Preselect the referenced service account (epic #477). Legacy
+            // inline-oauth servers have no ref, so the picker starts empty and
+            // the user picks an account to migrate to on save.
+            selectedAccountId = String(item.oauth_account_ref || "")
+            loadAccounts(selectedAccountId)
         } else {
             authKind = "none"
             authCombo.currentIndex = 0
+            loadAccounts()
         }
         open()
     }
@@ -204,30 +251,17 @@ Kirigami.OverlaySheet {
                     pendingSecret = { id: bearerRef, value: fieldBearerToken }
                 }
             } else if (authKind === "oauth") {
-                const clientId = fieldClientId.trim()
-                const tokenUrl = fieldTokenUrl.trim()
-                const authorizeUrl = fieldAuthorizeUrl.trim()
-                if (clientId.length === 0 || tokenUrl.length === 0 || authorizeUrl.length === 0) {
-                    errorText = "OAuth needs client id, token URL and authorize URL"
+                // Reference a reusable service account (epic #477): the server
+                // contributes only its required scopes + the account id. The
+                // OAuth client identity + secret + refresh token live on the
+                // account, so nothing secret is written here.
+                if (selectedAccountId.length === 0) {
+                    errorText = "Select a service account (or create one) for OAuth"
                     return
                 }
-                const oauth = {
-                    client_id: clientId,
-                    token_url: tokenUrl,
-                    authorize_url: authorizeUrl,
-                    // Reserved now, minted by the row's Sign in button (never typed).
-                    refresh_token_ref: name + "_refresh",
-                    scopes: splitWords(fieldScopes),
-                }
-                if (fieldAccount.trim().length > 0) oauth.account = fieldAccount.trim()
-                // Confidential client: store the secret value and reference it.
-                // Blank → PKCE-public (omit the ref entirely).
-                if (fieldClientSecret.length > 0) {
-                    const secretRef = name + "_client_secret"
-                    oauth.client_secret_ref = secretRef
-                    pendingSecret = { id: secretRef, value: fieldClientSecret }
-                }
-                http.oauth = oauth
+                http.oauth_account = selectedAccountId
+                const scopes = splitWords(fieldScopes)
+                if (scopes.length > 0) http.scopes = scopes
             }
             config.http = http
         } else {
@@ -429,49 +463,29 @@ Kirigami.OverlaySheet {
             }
         }
 
-        // OAuth
+        // OAuth: pick a reusable service account (epic #477) instead of
+        // re-entering the client identity. The picker lists service accounts
+        // ONLY — never inbound WS/OIDC API-auth configs (type-constrained).
         RowLayout {
             visible: transport === "http" && authKind === "oauth"
             Layout.fillWidth: true
             QQC2.Label {
-                text: "Client ID"
+                text: "Service account"
                 Layout.preferredWidth: 160
             }
-            QQC2.TextField {
+            QQC2.ComboBox {
+                id: accountCombo
                 Layout.fillWidth: true
-                placeholderText: "1234.apps.googleusercontent.com"
-                text: fieldClientId
-                onTextEdited: fieldClientId = text
+                textRole: "label"
+                valueRole: "id"
+                model: serviceAccounts
+                displayText: currentIndex >= 0 ? currentText : "Select an account…"
+                onActivated: selectedAccountId = serviceAccounts[currentIndex].id
             }
-        }
-
-        RowLayout {
-            visible: transport === "http" && authKind === "oauth"
-            Layout.fillWidth: true
-            QQC2.Label {
-                text: "Token URL"
-                Layout.preferredWidth: 160
-            }
-            QQC2.TextField {
-                Layout.fillWidth: true
-                placeholderText: "https://oauth2.googleapis.com/token"
-                text: fieldTokenUrl
-                onTextEdited: fieldTokenUrl = text
-            }
-        }
-
-        RowLayout {
-            visible: transport === "http" && authKind === "oauth"
-            Layout.fillWidth: true
-            QQC2.Label {
-                text: "Authorize URL"
-                Layout.preferredWidth: 160
-            }
-            QQC2.TextField {
-                Layout.fillWidth: true
-                placeholderText: "https://accounts.google.com/o/oauth2/v2/auth"
-                text: fieldAuthorizeUrl
-                onTextEdited: fieldAuthorizeUrl = text
+            QQC2.Button {
+                text: "New account…"
+                icon.name: "list-add"
+                onClicked: accountEditor.openForNew()
             }
         }
 
@@ -490,46 +504,15 @@ Kirigami.OverlaySheet {
             }
         }
 
-        RowLayout {
-            visible: transport === "http" && authKind === "oauth"
-            Layout.fillWidth: true
-            QQC2.Label {
-                text: "Account"
-                Layout.preferredWidth: 160
-            }
-            QQC2.TextField {
-                Layout.fillWidth: true
-                placeholderText: "optional — token-store key, e.g. dave@example.com"
-                text: fieldAccount
-                onTextEdited: fieldAccount = text
-            }
-        }
-
-        RowLayout {
-            visible: transport === "http" && authKind === "oauth"
-            Layout.fillWidth: true
-            QQC2.Label {
-                text: "Client secret"
-                Layout.preferredWidth: 160
-            }
-            QQC2.TextField {
-                Layout.fillWidth: true
-                echoMode: TextInput.Password
-                placeholderText: "optional — blank for a public (PKCE) client"
-                text: fieldClientSecret
-                onTextEdited: fieldClientSecret = text
-            }
-        }
-
         QQC2.Label {
             visible: transport === "http" && authKind === "oauth"
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             font: Kirigami.Theme.smallFont
             color: Kirigami.Theme.disabledTextColor
-            text: "After saving, this server shows “Sign in required”. Click Sign in on "
-                + "its row to open the browser and mint the refresh token — it is never "
-                + "typed here."
+            text: "This server uses the selected account's OAuth client. Manage the "
+                + "client id / secret / URLs and sign in from the Authentication "
+                + "tab — one sign-in serves every server that shares the account."
         }
 
         Kirigami.Separator {
@@ -556,6 +539,17 @@ Kirigami.OverlaySheet {
                 text: isNew ? "Create" : "Save"
                 highlighted: true
                 onClicked: saveServer()
+            }
+        }
+
+        // "New account…" opens the same account editor used on the Auth tab;
+        // on success we reload the picker and select the just-created account.
+        ServiceAccountEditor {
+            id: accountEditor
+            onDone: function(succeeded) {
+                if (succeeded) {
+                    loadAccounts(accountEditor.fieldId)
+                }
             }
         }
     }
