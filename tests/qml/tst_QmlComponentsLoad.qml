@@ -98,6 +98,16 @@ TestCase {
                 path: "../../kcm/desktop-assistant-settings/ui/McpServerEditor.qml",
                 instantiate: false,
             },
+            {
+                tag: "kcm/ServiceAccountsSection",
+                path: "../../kcm/desktop-assistant-settings/ui/ServiceAccountsSection.qml",
+                instantiate: false,
+            },
+            {
+                tag: "kcm/ServiceAccountEditor",
+                path: "../../kcm/desktop-assistant-settings/ui/ServiceAccountEditor.qml",
+                instantiate: false,
+            },
         ]
     }
 

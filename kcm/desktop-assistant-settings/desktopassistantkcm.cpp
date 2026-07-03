@@ -3157,12 +3157,18 @@ void DesktopAssistantKcm::daemonCall(const QString &command, const QJSValue &pay
         || snake == QLatin1String("set_mcp_server_enabled")
         || snake == QLatin1String("set_mcp_secret");
 
+    // Reusable outbound OAuth service accounts (epic #477) route to the same
+    // `org.desktopAssistant.Settings` interface as the MCP methods.
+    const bool isServiceAccount = snake == QLatin1String("list_service_accounts")
+        || snake == QLatin1String("upsert_service_account")
+        || snake == QLatin1String("remove_service_account");
+
     QByteArray objectPath;
     QByteArray interfaceName;
     if (isKnowledge) {
         objectPath = QByteArrayLiteral("/org/desktopAssistant/Knowledge");
         interfaceName = QByteArrayLiteral("org.desktopAssistant.Knowledge");
-    } else if (isMcp) {
+    } else if (isMcp || isServiceAccount) {
         objectPath = QByteArrayLiteral("/org/desktopAssistant/Settings");
         interfaceName = QByteArrayLiteral("org.desktopAssistant.Settings");
     } else {
@@ -3312,6 +3318,23 @@ void DesktopAssistantKcm::daemonCall(const QString &command, const QJSValue &pay
         const QString value = payloadObj.value(QStringLiteral("value")).toString();
         method = QStringLiteral("SetMcpSecret");
         callArgs << id << value;
+    } else if (snake == QLatin1String("list_service_accounts")) {
+        // JSON array of service-account descriptors (refs + derived authorized
+        // state + a Sign-in argv); QML JSON.parses it. Additive JSON-at-the-edge
+        // method, mirroring list_mcp_servers (epic #477).
+        method = QStringLiteral("ListServiceAccountsJson");
+        returnsJson = true;
+    } else if (snake == QLatin1String("upsert_service_account")) {
+        // Add-or-replace an account by id. The whole ServiceAccount is a JSON
+        // string the editor built; only secret *refs* are in it — the
+        // client-secret value is written first via set_mcp_secret.
+        const QString configJson = serializePayloadField(QStringLiteral("config"));
+        method = QStringLiteral("UpsertServiceAccount");
+        callArgs << configJson;
+    } else if (snake == QLatin1String("remove_service_account")) {
+        const QString id = payloadObj.value(QStringLiteral("id")).toString();
+        method = QStringLiteral("RemoveServiceAccount");
+        callArgs << id;
     } else {
         fail(QStringLiteral("daemonCall: unsupported command '%1'").arg(snake));
         return;
