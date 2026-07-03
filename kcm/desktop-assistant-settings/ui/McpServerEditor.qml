@@ -19,11 +19,13 @@
  * value (bearer token, OAuth client secret) we call set_mcp_secret(ref, value)
  * FIRST, then upsert_mcp_server with the ref only.
  *
- * Note (contract): ListMcpServersJson echoes only the OAuth *summary* (authorized
- * / account / scopes), not client_id / token_url / authorize_url / refresh or
- * client-secret refs. So editing an existing remote server pre-fills what the
- * daemon reports and leaves those request fields blank to re-enter — UpsertMcpServer
- * replaces the server by name, so anything left blank is dropped.
+ * Note (contract): ListMcpServersJson echoes the OAuth non-secret request fields
+ * (client_id / token_url / authorize_url / account / scopes), so editing an
+ * existing remote server pre-fills them and a save round-trips without blanking
+ * them — UpsertMcpServer replaces the server by name, so anything left blank is
+ * dropped. Secret *values* (bearer token, client secret) are never echoed: those
+ * fields stay blank on edit and "leave blank to keep the stored secret" applies
+ * to them only; the refresh token is never typed at all (see below).
  */
 import QtQuick
 import QtQuick.Controls as QQC2
@@ -112,14 +114,18 @@ Kirigami.OverlaySheet {
         fieldArgs = (Array.isArray(item.args) ? item.args : []).join(" ")
         fieldNamespace = String(item.namespace || "")
 
-        // remote pre-fill: url comes back as `target` for an http server. Only
-        // the OAuth *summary* (kind / account / scopes) is echoed — client_id,
-        // token_url, authorize_url and the secret refs are not, so leave them
-        // blank to re-enter (see the header note).
+        // remote pre-fill: url comes back as `target` for an http server. The
+        // OAuth non-secret request fields (client_id / token_url / authorize_url
+        // / account / scopes) are echoed too, so pre-fill them and the save
+        // round-trips without blanking them. They are absent for non-oauth
+        // servers, so `|| ""` guards undefined. Secret *values* are never echoed.
         if (transport === "http") {
             fieldUrl = String(item.target || "")
             authKind = String(item.auth_kind || "none")
             authCombo.currentIndex = (authKind === "bearer") ? 1 : (authKind === "oauth" ? 2 : 0)
+            fieldClientId = String(item.oauth_client_id || "")
+            fieldTokenUrl = String(item.oauth_token_url || "")
+            fieldAuthorizeUrl = String(item.oauth_authorize_url || "")
             fieldAccount = String(item.oauth_account || "")
             fieldScopes = (Array.isArray(item.oauth_scopes) ? item.oauth_scopes : []).join(" ")
         } else {

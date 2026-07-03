@@ -102,6 +102,9 @@ private Q_SLOTS:
             "\"configure_command\":[\"/opt/desktop-assistant\",\"--mcp-oauth-login\",\"gmail-work\"],"
             "\"auth_kind\":\"oauth\",\"oauth_authorized\":false,"
             "\"oauth_account\":\"dave@x.tech\","
+            "\"oauth_client_id\":\"1234.apps.googleusercontent.com\","
+            "\"oauth_token_url\":\"https://oauth2.googleapis.com/token\","
+            "\"oauth_authorize_url\":\"https://accounts.google.com/o/oauth2/v2/auth\","
             "\"oauth_scopes\":[\"https://www.googleapis.com/auth/gmail.modify\"]}]");
         const auto r = daemonreply::parseJsonReply({json});
         QVERIFY(r.ok);
@@ -126,6 +129,14 @@ private Q_SLOTS:
         QCOMPARE(oauthSrv.value(QStringLiteral("oauth_authorized")).toBool(), false);
         QCOMPARE(oauthSrv.value(QStringLiteral("oauth_account")).toString(),
                  QStringLiteral("dave@x.tech"));
+        // The non-secret OAuth request fields are echoed so the editor can
+        // pre-fill them on edit (no forced re-entry).
+        QCOMPARE(oauthSrv.value(QStringLiteral("oauth_client_id")).toString(),
+                 QStringLiteral("1234.apps.googleusercontent.com"));
+        QCOMPARE(oauthSrv.value(QStringLiteral("oauth_token_url")).toString(),
+                 QStringLiteral("https://oauth2.googleapis.com/token"));
+        QCOMPARE(oauthSrv.value(QStringLiteral("oauth_authorize_url")).toString(),
+                 QStringLiteral("https://accounts.google.com/o/oauth2/v2/auth"));
         // The Sign-in button reads configure_label + spawns configure_command argv.
         QCOMPARE(oauthSrv.value(QStringLiteral("configure_label")).toString(),
                  QStringLiteral("Sign in"));
