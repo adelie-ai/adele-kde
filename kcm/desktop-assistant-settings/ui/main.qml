@@ -45,6 +45,7 @@ KCM.AbstractKCM {
             // but this KCM no longer uses them). Connections + Purposes
             // replace it.
             QQC2.TabButton { text: "Connections" }
+            QQC2.TabButton { text: "MCP Servers" }
             QQC2.TabButton { text: "Purposes" }
             QQC2.TabButton { text: "Knowledge" }
             QQC2.TabButton { text: "Voice" }
@@ -67,6 +68,19 @@ KCM.AbstractKCM {
                 ConnectionsPage {
                     width: connectionsScroll.availableWidth
                     height: connectionsScroll.availableHeight
+                }
+            }
+
+            // MCP Servers tab (mcp-servers-ui epic). Same StackLayout index as
+            // its TabButton (1); a daemon-backed list + transport-aware editor,
+            // mirroring the Connections tab above.
+            QQC2.ScrollView {
+                id: mcpServersScroll
+                clip: true
+                contentWidth: availableWidth
+                McpServersPage {
+                    width: mcpServersScroll.availableWidth
+                    height: mcpServersScroll.availableHeight
                 }
             }
 
