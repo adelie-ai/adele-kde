@@ -79,6 +79,62 @@ private Q_SLOTS:
         QCOMPARE(r.value.toMap().value(QStringLiteral("v")).toInt(), 1);
     }
 
+    // --- ListMcpServersJson descriptor decode (mcp-servers-ui epic) ----------
+    //
+    // The MCP D-Bus edge is JSON: ListMcpServersJson returns a JSON *array* of
+    // per-server descriptors that the KCM re-parses through the same
+    // parseJsonReply the QML `list_mcp_servers` handler uses. This pins the
+    // wire-contract shape the McpServersPage delegate reads — a top-level array,
+    // a stdio descriptor, and an http+oauth descriptor with a nested oauth
+    // summary — so a drift in either side is caught by the unit gate.
+
+    void parsesMcpServerDescriptorArray()
+    {
+        const QString json = QStringLiteral(
+            "[{\"name\":\"weather\",\"command\":\"/usr/bin/weather-mcp\","
+            "\"args\":[\"--port\",\"8080\"],\"namespace\":\"wx\",\"enabled\":true,"
+            "\"status\":\"running\",\"tool_count\":12,\"transport\":\"stdio\","
+            "\"target\":\"/usr/bin/weather-mcp\"},"
+            "{\"name\":\"gmail-work\",\"command\":\"\",\"args\":[],\"enabled\":true,"
+            "\"status\":\"needs_auth\",\"tool_count\":0,\"transport\":\"http\","
+            "\"target\":\"https://example.com/mcp\","
+            "\"configure_label\":\"Sign in\","
+            "\"configure_command\":[\"/opt/desktop-assistant\",\"--mcp-oauth-login\",\"gmail-work\"],"
+            "\"auth_kind\":\"oauth\",\"oauth_authorized\":false,"
+            "\"oauth_account\":\"dave@x.tech\","
+            "\"oauth_scopes\":[\"https://www.googleapis.com/auth/gmail.modify\"]}]");
+        const auto r = daemonreply::parseJsonReply({json});
+        QVERIFY(r.ok);
+        const QVariantList servers = r.value.toList();
+        QCOMPARE(servers.size(), 2);
+
+        const QVariantMap stdioSrv = servers.at(0).toMap();
+        QCOMPARE(stdioSrv.value(QStringLiteral("name")).toString(), QStringLiteral("weather"));
+        QCOMPARE(stdioSrv.value(QStringLiteral("transport")).toString(), QStringLiteral("stdio"));
+        QCOMPARE(stdioSrv.value(QStringLiteral("status")).toString(), QStringLiteral("running"));
+        QCOMPARE(stdioSrv.value(QStringLiteral("tool_count")).toInt(), 12);
+        const QVariantList args = stdioSrv.value(QStringLiteral("args")).toList();
+        QCOMPARE(args.size(), 2);
+        QCOMPARE(args.at(1).toString(), QStringLiteral("8080"));
+        // A stdio descriptor carries no configure action.
+        QVERIFY(stdioSrv.value(QStringLiteral("configure_label")).toString().isEmpty());
+
+        const QVariantMap oauthSrv = servers.at(1).toMap();
+        QCOMPARE(oauthSrv.value(QStringLiteral("transport")).toString(), QStringLiteral("http"));
+        QCOMPARE(oauthSrv.value(QStringLiteral("status")).toString(), QStringLiteral("needs_auth"));
+        QCOMPARE(oauthSrv.value(QStringLiteral("auth_kind")).toString(), QStringLiteral("oauth"));
+        QCOMPARE(oauthSrv.value(QStringLiteral("oauth_authorized")).toBool(), false);
+        QCOMPARE(oauthSrv.value(QStringLiteral("oauth_account")).toString(),
+                 QStringLiteral("dave@x.tech"));
+        // The Sign-in button reads configure_label + spawns configure_command argv.
+        QCOMPARE(oauthSrv.value(QStringLiteral("configure_label")).toString(),
+                 QStringLiteral("Sign in"));
+        const QVariantList configureCmd =
+            oauthSrv.value(QStringLiteral("configure_command")).toList();
+        QCOMPARE(configureCmd.size(), 3);
+        QCOMPARE(configureCmd.at(1).toString(), QStringLiteral("--mcp-oauth-login"));
+    }
+
     // --- dbusErrorMessage ----------------------------------------------------
 
     void errorMessagePreferred()
