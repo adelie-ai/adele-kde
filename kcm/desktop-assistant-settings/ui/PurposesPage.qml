@@ -39,6 +39,13 @@ ColumnLayout {
             description: "The model that powers live conversation with you."
         },
         {
+            key: "voice",
+            label: "Voice (spoken replies)",
+            description: "The model for voice-assistant turns (\"Hey Adele\"). On-demand voice "
+                + "leans on reliable tool-calling, so a strong tool-caller is a good pick here. "
+                + "Leave unset to reuse the Interactive model."
+        },
+        {
             key: "dreaming",
             label: "Dreaming: Extraction (quick/cheap)",
             description: "Frequent, lightweight pass that pulls durable facts out of each "
