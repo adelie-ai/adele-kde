@@ -101,7 +101,7 @@ private Q_SLOTS:
             "\"configure_label\":\"Sign in\","
             "\"configure_command\":[\"/opt/desktop-assistant\",\"--mcp-oauth-login\",\"gmail-work\"],"
             "\"auth_kind\":\"oauth\",\"oauth_authorized\":false,"
-            "\"oauth_account\":\"dave@x.tech\","
+            "\"oauth_account\":\"dave@example.com\","
             "\"oauth_client_id\":\"1234.apps.googleusercontent.com\","
             "\"oauth_token_url\":\"https://oauth2.googleapis.com/token\","
             "\"oauth_authorize_url\":\"https://accounts.google.com/o/oauth2/v2/auth\","
@@ -128,7 +128,7 @@ private Q_SLOTS:
         QCOMPARE(oauthSrv.value(QStringLiteral("auth_kind")).toString(), QStringLiteral("oauth"));
         QCOMPARE(oauthSrv.value(QStringLiteral("oauth_authorized")).toBool(), false);
         QCOMPARE(oauthSrv.value(QStringLiteral("oauth_account")).toString(),
-                 QStringLiteral("dave@x.tech"));
+                 QStringLiteral("dave@example.com"));
         // The non-secret OAuth request fields are echoed so the editor can
         // pre-fill them on edit (no forced re-entry).
         QCOMPARE(oauthSrv.value(QStringLiteral("oauth_client_id")).toString(),
