@@ -27,8 +27,16 @@ import org.kde.kirigami as Kirigami
 Kirigami.OverlaySheet {
     id: sheet
 
-    implicitWidth: Math.min(parent ? parent.width - Kirigami.Units.gridUnit * 2 : 560, 720)
-    implicitHeight: Math.min(parent ? parent.height - Kirigami.Units.gridUnit * 2 : 600, 720)
+    // Fixed, parent-INDEPENDENT size. The other editors derive their size from
+    // `parent` (`Math.min(parent.height - …, 720)`), which works only because
+    // they are declared inside a full-height *page*. This sheet is declared inside
+    // a short section (the Auth-tab Service Accounts block, and the "New account…"
+    // flow inside the MCP editor), so `parent.height` was that section's ~72px and
+    // the content collapsed to a sliver over the scrim — the "darkens but no UI"
+    // bug. A fixed implicit size renders correctly wherever it is declared;
+    // OverlaySheet still caps to the window and scrolls its content if too tall.
+    implicitWidth: Kirigami.Units.gridUnit * 30
+    implicitHeight: Kirigami.Units.gridUnit * 28
 
     signal done(bool succeeded)
 
