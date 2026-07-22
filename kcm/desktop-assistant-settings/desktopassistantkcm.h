@@ -33,6 +33,10 @@ class DesktopAssistantKcm : public KQuickConfigModule {
     Q_PROPERTY(QString selectedConnectionWsUrl READ selectedConnectionWsUrl WRITE setSelectedConnectionWsUrl NOTIFY selectedConnectionWsUrlChanged)
     Q_PROPERTY(QString selectedConnectionWsSubject READ selectedConnectionWsSubject WRITE setSelectedConnectionWsSubject NOTIFY selectedConnectionWsSubjectChanged)
     Q_PROPERTY(bool selectedConnectionRemovable READ selectedConnectionRemovable NOTIFY selectedConnectionRemovableChanged)
+    // Client-side privacy toggle (#549): whether the KDE chat client sends basic
+    // device context to the assistant. Persisted in a local KConfig (not the
+    // daemon), read by the chat client's AdeleCore. Default ON.
+    Q_PROPERTY(bool shareClientContext READ shareClientContext WRITE setShareClientContext NOTIFY shareClientContextChanged)
     Q_PROPERTY(bool btDreamingEnabled READ btDreamingEnabled WRITE setBtDreamingEnabled NOTIFY btDreamingEnabledChanged)
     Q_PROPERTY(int btDreamingIntervalSecs READ btDreamingIntervalSecs WRITE setBtDreamingIntervalSecs NOTIFY btDreamingIntervalSecsChanged)
     Q_PROPERTY(int btArchiveAfterDays READ btArchiveAfterDays WRITE setBtArchiveAfterDays NOTIFY btArchiveAfterDaysChanged)
@@ -162,6 +166,9 @@ public:
     void setSelectedConnectionWsSubject(const QString &value);
 
     bool selectedConnectionRemovable() const;
+
+    bool shareClientContext() const;
+    void setShareClientContext(bool value);
 
     bool btDreamingEnabled() const;
     void setBtDreamingEnabled(bool value);
@@ -376,6 +383,7 @@ Q_SIGNALS:
     void selectedConnectionWsUrlChanged();
     void selectedConnectionWsSubjectChanged();
     void selectedConnectionRemovableChanged();
+    void shareClientContextChanged();
     void btDreamingEnabledChanged();
     void btDreamingIntervalSecsChanged();
     void btArchiveAfterDaysChanged();
@@ -555,6 +563,9 @@ private:
     quint64 m_voiceLoadGeneration = 0;
 
     QString m_statusText;
+    // Client-context opt-out (#549), persisted in a local KConfig. Default ON,
+    // matching ConnectionConfig::default() in client-common.
+    bool m_shareClientContext = true;
     bool m_gitEnabled = false;
     QString m_gitRemoteUrl;
     QString m_gitRemoteName = QStringLiteral("origin");
