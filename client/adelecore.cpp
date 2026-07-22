@@ -6,9 +6,21 @@
 #include <QLatin1String>
 #include <QMetaObject>
 
+#include <KConfigGroup>
+#include <KSharedConfig>
+
 #include "adele_client_core.h" // generated C ABI for client-ui-ffi
 
 namespace adele {
+
+namespace {
+// Client-context opt-out (#549). The KCM ("Share device info with the assistant"
+// checkbox) writes this key; the chat client reads it here. The file / group /
+// key MUST stay in sync with the KCM (kcm/.../desktopassistantkcm.cpp).
+constexpr auto kClientConfigFile = "desktopassistant-clientrc";
+constexpr auto kClientConfigGroup = "General";
+constexpr auto kShareClientContextKey = "ShareClientContext";
+} // namespace
 
 AdeleCore::AdeleCore(QObject *parent)
     : QObject(parent)
@@ -40,6 +52,20 @@ void AdeleCore::connectToDaemon(const QString &transport, const QString &address
     const QByteArray t = transport.toUtf8();
     const QByteArray a = address.toUtf8();
     adele_core_connect(m_handle, t.constData(), a.constData());
+}
+
+void AdeleCore::setShareClientContext(bool enabled)
+{
+    // TODO(spec): forward to the core (wired in the implementation commit).
+    Q_UNUSED(enabled);
+}
+
+bool AdeleCore::shareClientContextPreference()
+{
+    const auto config = KSharedConfig::openConfig(QLatin1String(kClientConfigFile));
+    const KConfigGroup group(config, QLatin1String(kClientConfigGroup));
+    // TODO(spec): the default must be ON (#549); wired in the implementation commit.
+    return group.readEntry(kShareClientContextKey, false);
 }
 
 void AdeleCore::sendPrompt(const QString &text)

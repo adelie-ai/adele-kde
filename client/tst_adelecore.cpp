@@ -10,19 +10,50 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSignalSpy>
+#include <QStandardPaths>
 #include <QTest>
 #include <QVariantList>
 #include <QVariantMap>
 
+#include <KConfigGroup>
+#include <KSharedConfig>
+
 #include "adelecore.h"
 
 using adele::AdeleCore;
+
+// The client-context KConfig contract, spelled as literals here (not via the
+// production constants) so this test pins the exact file/group/key the KCM must
+// write and AdeleCore must read. Drift on either side fails these tests.
+namespace {
+constexpr auto kClientConfigFile = "desktopassistant-clientrc";
+constexpr auto kClientConfigGroup = "General";
+constexpr auto kShareClientContextKey = "ShareClientContext";
+
+void writeShareClientContext(bool value)
+{
+    auto config = KSharedConfig::openConfig(QLatin1String(kClientConfigFile));
+    KConfigGroup group(config, QLatin1String(kClientConfigGroup));
+    group.writeEntry(kShareClientContextKey, value);
+    config->sync();
+}
+
+void clearShareClientContext()
+{
+    auto config = KSharedConfig::openConfig(QLatin1String(kClientConfigFile));
+    KConfigGroup group(config, QLatin1String(kClientConfigGroup));
+    group.deleteEntry(kShareClientContextKey);
+    config->sync();
+}
+} // namespace
 
 class TestAdeleCore : public QObject
 {
     Q_OBJECT
 
 private Q_SLOTS:
+    void initTestCase();
+
     void constructAndDestroyDoesNotCrash();
     void intentsBeforeConnectDoNotCrash();
 
@@ -34,6 +65,11 @@ private Q_SLOTS:
     void nonObjectJsonEmitsNothing();
     void missingTypeEmitsNothing();
 
+    void shareClientContextDefaultsOnWhenUnset();
+    void shareClientContextReadsPersistedOptOut();
+    void shareClientContextReadsPersistedOptIn();
+    void setShareClientContextBeforeConnectDoesNotCrash();
+
 private:
     // Drive the private Q_INVOKABLE dispatchEvent synchronously (same thread).
     static void dispatch(AdeleCore &c, const QString &json)
@@ -41,6 +77,13 @@ private:
         QVERIFY(QMetaObject::invokeMethod(&c, "dispatchEvent", Qt::DirectConnection, Q_ARG(QString, json)));
     }
 };
+
+void TestAdeleCore::initTestCase()
+{
+    // Isolate KConfig reads/writes to a throwaway XDG tree so these tests never
+    // touch (or depend on) the developer's real ~/.config/desktopassistant-clientrc.
+    QStandardPaths::setTestModeEnabled(true);
+}
 
 // --- Lifecycle / graceful degradation ----------------------------------------
 
@@ -65,6 +108,7 @@ void TestAdeleCore::intentsBeforeConnectDoNotCrash()
     core.selectModel(QStringLiteral("conn"), QStringLiteral("model"), QStringLiteral("high"));
     core.cancelTask(QStringLiteral("t1"));
     core.fetchTaskLogs(QStringLiteral("t1"));
+    core.setShareClientContext(false);
     core.connectToDaemon(QStringLiteral("uds"), QStringLiteral("/nonexistent/adele-test.sock"));
     // Let any queued work run; the object must remain alive and disconnected.
     QTest::qWait(50);
@@ -152,6 +196,42 @@ void TestAdeleCore::missingTypeEmitsNothing()
     QSignalSpy spy(&core, &AdeleCore::viewEvent);
     dispatch(core, QStringLiteral(R"({"text":"orphan"})")); // no "type" tag
     QCOMPARE(spy.count(), 0);
+}
+
+// --- Client-context opt-out (#549 / #556) ------------------------------------
+
+void TestAdeleCore::shareClientContextDefaultsOnWhenUnset()
+{
+    // The privacy default is ON: an absent key means share, matching
+    // ConnectionConfig::default() in client-common. A fresh install (no key) or
+    // a config that predates the feature must still share.
+    clearShareClientContext();
+    QVERIFY(AdeleCore::shareClientContextPreference());
+}
+
+void TestAdeleCore::shareClientContextReadsPersistedOptOut()
+{
+    // The KCM checkbox unchecked persists false; the client must read it as an
+    // opt-out from the same file/group/key.
+    writeShareClientContext(false);
+    QVERIFY(!AdeleCore::shareClientContextPreference());
+}
+
+void TestAdeleCore::shareClientContextReadsPersistedOptIn()
+{
+    // Re-checking persists true; the client reads sharing back on.
+    writeShareClientContext(true);
+    QVERIFY(AdeleCore::shareClientContextPreference());
+}
+
+void TestAdeleCore::setShareClientContextBeforeConnectDoesNotCrash()
+{
+    // Fire-and-forget into the core with no connection; must not crash and must
+    // leave the object disconnected (graceful degradation, like the other intents).
+    AdeleCore core;
+    core.setShareClientContext(false);
+    core.setShareClientContext(true);
+    QVERIFY(!core.isConnected());
 }
 
 QTEST_MAIN(TestAdeleCore)
