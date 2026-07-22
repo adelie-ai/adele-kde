@@ -6,9 +6,21 @@
 #include <QLatin1String>
 #include <QMetaObject>
 
+#include <KConfigGroup>
+#include <KSharedConfig>
+
 #include "adele_client_core.h" // generated C ABI for client-ui-ffi
 
 namespace adele {
+
+namespace {
+// Client-context opt-out (#549). The KCM ("Share device info with the assistant"
+// checkbox) writes this key; the chat client reads it here. The file / group /
+// key MUST stay in sync with the KCM (kcm/.../desktopassistantkcm.cpp).
+constexpr auto kClientConfigFile = "desktopassistant-clientrc";
+constexpr auto kClientConfigGroup = "General";
+constexpr auto kShareClientContextKey = "ShareClientContext";
+} // namespace
 
 AdeleCore::AdeleCore(QObject *parent)
     : QObject(parent)
@@ -37,9 +49,29 @@ void AdeleCore::connectToDaemon(const QString &transport, const QString &address
     // Keep the UTF-8 buffers alive across the FFI call. Empty strings are fine:
     // the core treats an empty transport as "dbus" and an empty address as the
     // platform default.
+    // Apply the persisted client-context preference before connecting so the core
+    // stages it onto the ConnectionConfig it builds for this connect (#549).
+    setShareClientContext(shareClientContextPreference());
     const QByteArray t = transport.toUtf8();
     const QByteArray a = address.toUtf8();
     adele_core_connect(m_handle, t.constData(), a.constData());
+}
+
+void AdeleCore::setShareClientContext(bool enabled)
+{
+    if (!m_handle) {
+        return;
+    }
+    adele_core_set_share_client_context(m_handle, enabled);
+}
+
+bool AdeleCore::shareClientContextPreference()
+{
+    // Default ON: an absent key means share, matching ConnectionConfig::default()
+    // in client-common. The KCM persists the opt-out to the same file/group/key.
+    const auto config = KSharedConfig::openConfig(QLatin1String(kClientConfigFile));
+    const KConfigGroup group(config, QLatin1String(kClientConfigGroup));
+    return group.readEntry(kShareClientContextKey, true);
 }
 
 void AdeleCore::sendPrompt(const QString &text)

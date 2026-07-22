@@ -13,6 +13,9 @@ include(KDECMakeSettings)
 include(KDECompilerSettings NO_POLICY_SCOPE)
 
 find_package(Qt6 REQUIRED COMPONENTS Core Qml DBus)
+# KF6::ConfigCore backs the client-context opt-out (#549): AdeleCore reads the
+# "share device info" preference the KCM persists to a KConfig file.
+find_package(KF6 REQUIRED COMPONENTS Config)
 find_package(Threads REQUIRED)
 
 qt_standard_project_setup(REQUIRES 6.5)
@@ -85,7 +88,7 @@ qt_add_qml_module(adelecore
         voicecontroller.h
 )
 add_dependencies(adelecore adele_core_build)
-target_link_libraries(adelecore PRIVATE Qt6::Core Qt6::Qml Qt6::DBus adele_core)
+target_link_libraries(adelecore PRIVATE Qt6::Core Qt6::Qml Qt6::DBus KF6::ConfigCore adele_core)
 target_compile_options(adelecore PRIVATE -Werror)
 # Qt resolves the qmldir's `plugin adelecore` to a file named `libadelecore.so`,
 # but qt_add_qml_module leaves this merged plugin target prefix-less
@@ -127,7 +130,7 @@ if(BUILD_CLIENT_TESTS)
         adelecore.h
     )
     add_dependencies(tst_adelecore adele_core_build)
-    target_link_libraries(tst_adelecore PRIVATE Qt6::Core Qt6::Qml Qt6::Test adele_core)
+    target_link_libraries(tst_adelecore PRIVATE Qt6::Core Qt6::Qml Qt6::Test KF6::ConfigCore adele_core)
     target_compile_options(tst_adelecore PRIVATE -Werror)
     # The test links the cdylib directly (not via the installed module), so point
     # its runtime loader at the cargo target dir.

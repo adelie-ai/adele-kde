@@ -157,6 +157,29 @@ ColumnLayout {
         }
     }
 
+    // --- Client-context opt-out (desktop-assistant #549 / #556) ----------------
+    // Client-side privacy toggle (not a daemon setting): whether this KDE client
+    // sends basic device context (device/user name, home folder, hostname,
+    // timezone, OS) to the assistant on connect. The KCM persists it to a local
+    // KConfig; the chat client's AdeleCore reads it. Declarative binding to the
+    // KCM property, mirroring the other bool checkboxes.
+    RowLayout {
+        Layout.fillWidth: true
+
+        QQC2.CheckBox {
+            id: shareClientContextCheck
+            text: "Share device info with the assistant"
+            checked: kcm.shareClientContext
+            onToggled: kcm.shareClientContext = checked
+        }
+
+        InfoTip {
+            text: "When on, this device shares basic info (device and user name, home folder, hostname, timezone, OS) so the assistant can personalize its replies. Turn it off to send nothing. Takes effect on the next connection."
+        }
+
+        Item { Layout.fillWidth: true }
+    }
+
     // --- Add-connection chooser ------------------------------------------------
 
     QQC2.Dialog {

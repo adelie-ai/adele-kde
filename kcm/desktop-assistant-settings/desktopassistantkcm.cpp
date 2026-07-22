@@ -42,7 +42,9 @@
 #include <QVariantList>
 #include <QVariantMap>
 
+#include <KConfigGroup>
 #include <KPluginFactory>
+#include <KSharedConfig>
 
 namespace {
 constexpr auto SERVICE = "org.desktopAssistant";
@@ -51,6 +53,12 @@ constexpr auto IFACE = "org.desktopAssistant.Settings";
 constexpr auto DEFAULT_CONNECTION_NAME = "local";
 constexpr auto DEFAULT_WS_URL = "ws://127.0.0.1:11339/ws";
 constexpr auto DEFAULT_WS_SUBJECT = "desktop-widget";
+// Client-context opt-out (#549). This KCM writes the "Share device info with the
+// assistant" checkbox here; the chat client (client/adelecore.cpp) reads the same
+// file/group/key. Keep the three strings in sync with that reader.
+constexpr auto CLIENT_CONFIG_FILE = "desktopassistant-clientrc";
+constexpr auto CLIENT_CONFIG_GROUP = "General";
+constexpr auto SHARE_CLIENT_CONTEXT_KEY = "ShareClientContext";
 // Voice daemon (repo adelie-ai/voice). Distinct bus name from the orchestrator.
 constexpr auto VOICE_SERVICE = "org.desktopAssistant.Voice";
 constexpr auto VOICE_PATH = "/org/desktopAssistant/Voice";
@@ -366,6 +374,26 @@ void DesktopAssistantKcm::setSelectedConnectionWsSubject(const QString &value)
 bool DesktopAssistantKcm::selectedConnectionRemovable() const
 {
     return m_connections.size() > 1;
+}
+
+bool DesktopAssistantKcm::shareClientContext() const
+{
+    return m_shareClientContext;
+}
+
+void DesktopAssistantKcm::setShareClientContext(bool value)
+{
+    if (m_shareClientContext == value) {
+        return;
+    }
+    m_shareClientContext = value;
+    // Immediate-save (this KCM has no Apply button): persist to the local client
+    // KConfig the chat client reads. Not a daemon setting, so no D-Bus push.
+    auto config = KSharedConfig::openConfig(QLatin1String(CLIENT_CONFIG_FILE));
+    KConfigGroup group(config, QLatin1String(CLIENT_CONFIG_GROUP));
+    group.writeEntry(SHARE_CLIENT_CONTEXT_KEY, value);
+    group.sync();
+    Q_EMIT shareClientContextChanged();
 }
 
 bool DesktopAssistantKcm::btDreamingEnabled() const
@@ -904,6 +932,13 @@ void DesktopAssistantKcm::load()
     Q_EMIT connectionNamesChanged();
     Q_EMIT defaultConnectionNameChanged();
     emitConnectionSelectionChanged();
+
+    // Client-context opt-out (#549): a local KConfig preference, not a daemon
+    // setting. Default ON when the key is absent (matches ConnectionConfig).
+    const auto clientConfig = KSharedConfig::openConfig(QLatin1String(CLIENT_CONFIG_FILE));
+    const KConfigGroup clientGroup(clientConfig, QLatin1String(CLIENT_CONFIG_GROUP));
+    m_shareClientContext = clientGroup.readEntry(SHARE_CLIENT_CONTEXT_KEY, true);
+    Q_EMIT shareClientContextChanged();
 
     // Probe the voice service + read its config so the Voice tab is populated
     // on open. This emits voiceChanged/voiceConfigChanged itself.

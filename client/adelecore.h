@@ -77,6 +77,22 @@ public:
     Q_INVOKABLE void cancelTask(const QString &taskId);
     /** Fetch a background task's log page (arrives later as a `task_logs` viewEvent). */
     Q_INVOKABLE void fetchTaskLogs(const QString &taskId);
+    /**
+     * Set whether basic device context (name, username, home dir, hostname,
+     * timezone, OS) is shared with the assistant on the next connect (#549).
+     * Forwards to the Rust core, which stages it onto the ConnectionConfig it
+     * builds on connect. The persisted preference is applied automatically by
+     * connectToDaemon, so QML rarely needs to call this directly.
+     */
+    Q_INVOKABLE void setShareClientContext(bool enabled);
+
+    /**
+     * Read the persisted "share device info" preference from the client KConfig
+     * (`desktopassistant-clientrc`, default true). Static: it reads process-wide
+     * config independent of any core instance, and the KCM "Share device info
+     * with the assistant" checkbox writes the same file/group/key.
+     */
+    [[nodiscard]] static bool shareClientContextPreference();
 
 Q_SIGNALS:
     void connectedChanged(bool connected);
