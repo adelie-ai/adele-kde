@@ -51,6 +51,32 @@ void AdeleCore::sendPrompt(const QString &text)
     adele_core_send_prompt(m_handle, t.constData());
 }
 
+void AdeleCore::editQueued(int index)
+{
+    // Guard the sign before widening to uintptr_t: a negative index must not
+    // wrap to a huge value. An out-of-range positive index is a reducer no-op.
+    if (!m_handle || index < 0) {
+        return;
+    }
+    adele_core_edit_queued(m_handle, static_cast<uintptr_t>(index));
+}
+
+void AdeleCore::removeQueued(int index)
+{
+    if (!m_handle || index < 0) {
+        return;
+    }
+    adele_core_remove_queued(m_handle, static_cast<uintptr_t>(index));
+}
+
+void AdeleCore::cancelQueuedEdit()
+{
+    if (!m_handle) {
+        return;
+    }
+    adele_core_cancel_queued_edit(m_handle);
+}
+
 void AdeleCore::selectConversation(const QString &conversationId)
 {
     if (!m_handle) {

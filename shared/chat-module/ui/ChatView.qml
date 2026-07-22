@@ -23,6 +23,7 @@ import org.kde.plasma.plasmoid
 import org.desktopassistant.client
 
 import "LinkSafety.js" as LinkSafety
+import "QueueRecall.js" as QueueRecall
 
 Item {
     id: root
@@ -101,6 +102,12 @@ Item {
     property var tasksList: []
     property int runningTaskCount: 0
     property var taskLogsById: ({})
+    // Message queue (submit while busy). The composer stays editable/submittable
+    // while a reply streams; a submit is enqueued by the core, surfaced here as
+    // removable/editable chips (queuedMessagesModel) plus the index currently
+    // checked out for editing (-1 = none). Both are driven by the core's
+    // `queued_messages` event; the composer text is driven by `composer_text`.
+    property int editingQueuedIndex: -1
 
     // --- view configuration (preserved styling) ----------------------------
     property real uiScale: 1.0
@@ -227,6 +234,15 @@ Item {
             // Route the model's say_this through the voice daemon's TTS.
             voice.sayText(String(data.text || ""))
             break
+        case "composer_text":
+            // The core sets the live composer: recall load, or an empty string
+            // to clear on enqueue / cancel. Move the caret to the end.
+            promptInput.text = String(data.text || "")
+            promptInput.cursorPosition = promptInput.length
+            break
+        case "queued_messages":
+            root.applyQueuedMessages(data.messages || [], data.editing)
+            break
         case "context_usage":
             root.contextUsage = data.usage || null
             break
@@ -298,6 +314,17 @@ Item {
         })
     }
 
+    // Rebuild the queued-message chips from the core's snapshot (submit order)
+    // and record which index is checked out for editing (-1 = none). A ListModel
+    // sidesteps the QV4 insertMember GC hazard a `property var` array carries.
+    function applyQueuedMessages(messages, editing) {
+        queuedMessagesModel.clear()
+        for (let i = 0; i < messages.length; i++) {
+            queuedMessagesModel.append({ text: String(messages[i]) })
+        }
+        root.editingQueuedIndex = QueueRecall.normalizeEditing(editing)
+    }
+
     function appendMessage(role, body) {
         transcriptModel.append({ kind: "message", role: role, body: body })
         root.maybeStickToBottom()
@@ -350,9 +377,10 @@ Item {
     //  intents (user actions → the core)
     // ======================================================================
     function submitPrompt() {
-        if (root.busy) {
-            return
-        }
+        // No busy guard: the composer stays submittable while a reply streams.
+        // The core sends when idle and enqueues while busy; either way it drives
+        // the composer via `composer_text`. We also clear locally so the idle
+        // path always empties the field even if no event follows.
         const text = promptInput.text
         if (text.trim().length === 0) {
             return
@@ -732,6 +760,13 @@ Item {
         id: transcriptModel
     }
 
+    // Queued outbound messages (submit order) shown as removable/editable chips.
+    // Role: text (the queued prompt). A ListModel (C++-backed) sidesteps the QV4
+    // insertMember GC hazard a `property var` array of objects would carry.
+    ListModel {
+        id: queuedMessagesModel
+    }
+
     // ======================================================================
     //  shortcuts
     // ======================================================================
@@ -1029,6 +1064,81 @@ Item {
             elide: Text.ElideRight
         }
 
+        // Queued messages: prompts submitted while a reply was still streaming.
+        // They are held (not sent) until the stream ends, then flushed as one
+        // combined turn. Each chip previews a queued message; tapping it recalls
+        // the message into the composer to edit (an in-place reinsert on
+        // re-submit), the x drops it. The count is the "N queued" indicator.
+        Flow {
+            id: queuedChipsRow
+            Layout.fillWidth: true
+            visible: queuedMessagesModel.count > 0
+            spacing: Math.round(6 * root.uiScale)
+
+            QQC2.Label {
+                height: Math.round(26 * root.uiScale)
+                verticalAlignment: Text.AlignVCenter
+                text: queuedMessagesModel.count + " queued"
+                color: root.themeDisabledTextColor
+                font.bold: true
+                font.pointSize: root.baseFontPointSize * 0.9
+            }
+
+            Repeater {
+                model: queuedMessagesModel
+
+                delegate: Rectangle {
+                    id: queuedChip
+                    required property int index
+                    required property string text
+                    readonly property bool isEditing: queuedChip.index === root.editingQueuedIndex
+
+                    implicitHeight: Math.round(26 * root.uiScale)
+                    implicitWidth: queuedChipRow.implicitWidth + Math.round(12 * root.uiScale)
+                    radius: implicitHeight / 2
+                    color: queuedChip.isEditing
+                        ? Qt.rgba(root.themeHighlightColor.r, root.themeHighlightColor.g, root.themeHighlightColor.b, 0.28)
+                        : Qt.rgba(root.themeHighlightColor.r, root.themeHighlightColor.g, root.themeHighlightColor.b, 0.12)
+                    border.width: 1
+                    border.color: Qt.rgba(root.themeHighlightColor.r, root.themeHighlightColor.g, root.themeHighlightColor.b,
+                        queuedChip.isEditing ? 0.7 : 0.4)
+
+                    RowLayout {
+                        id: queuedChipRow
+                        anchors.centerIn: parent
+                        spacing: Math.round(2 * root.uiScale)
+
+                        QQC2.Label {
+                            Layout.leftMargin: Math.round(6 * root.uiScale)
+                            Layout.alignment: Qt.AlignVCenter
+                            Layout.maximumWidth: Math.round(200 * root.uiScale)
+                            text: QueueRecall.previewText(queuedChip.text)
+                            color: root.themeTextColor
+                            elide: Text.ElideRight
+                            font.pointSize: root.baseFontPointSize * 0.9
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: core.editQueued(queuedChip.index)
+                            }
+                        }
+
+                        QQC2.ToolButton {
+                            Layout.alignment: Qt.AlignVCenter
+                            implicitWidth: Math.round(22 * root.uiScale)
+                            implicitHeight: Math.round(22 * root.uiScale)
+                            icon.name: "dialog-close"
+                            display: QQC2.AbstractButton.IconOnly
+                            QQC2.ToolTip.text: "Remove from queue"
+                            QQC2.ToolTip.visible: hovered
+                            onClicked: core.removeQueued(queuedChip.index)
+                        }
+                    }
+                }
+            }
+        }
+
         // TTS voice switcher. Hidden unless the voice daemon is up AND at least
         // one voice is installed, so it never shows a dead control. The speaker
         // picker only appears for multi-speaker voices.
@@ -1277,7 +1387,8 @@ Item {
                     width: promptInputScroll.availableWidth
                     placeholderText: "Ask Adele…"
                     wrapMode: TextEdit.Wrap
-                    enabled: !root.busy
+                    // Always editable — a submit while a reply streams is queued
+                    // by the core, not blocked.
                     onTextChanged: Qt.callLater(root.keepPromptCursorVisible)
                     onCursorPositionChanged: Qt.callLater(root.keepPromptCursorVisible)
                     onActiveFocusChanged: {
@@ -1286,6 +1397,25 @@ Item {
                         }
                     }
                     Keys.onPressed: function(event) {
+                        // Up/Down recall a queued message into the composer to
+                        // edit it. Only fires when the field is empty (Up walks
+                        // backward from the last; Down walks forward or cancels
+                        // the edit) so it never fights caret movement.
+                        if (event.key === Qt.Key_Up || event.key === Qt.Key_Down) {
+                            const decision = QueueRecall.recallDecision(
+                                event.key === Qt.Key_Up ? "up" : "down",
+                                promptInput.length === 0,
+                                root.editingQueuedIndex,
+                                queuedMessagesModel.count)
+                            if (decision.action === "edit") {
+                                core.editQueued(decision.index)
+                                event.accepted = true
+                            } else if (decision.action === "cancel") {
+                                core.cancelQueuedEdit()
+                                event.accepted = true
+                            }
+                            return
+                        }
                         const isEnterKey = event.key === Qt.Key_Return || event.key === Qt.Key_Enter
                         if (!isEnterKey) {
                             return
@@ -1309,8 +1439,10 @@ Item {
 
             QQC2.Button {
                 id: sendButton
-                text: root.busy ? "…" : "Send"
-                enabled: !root.busy
+                // Enabled on connection, not on idleness: a submit while a reply
+                // streams is queued. The label hints at that ("Queue" vs "Send").
+                text: root.busy ? "Queue" : "Send"
+                enabled: core.connected && root.conversationId.length > 0
                 onClicked: root.submitPrompt()
             }
 
