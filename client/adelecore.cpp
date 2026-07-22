@@ -49,6 +49,9 @@ void AdeleCore::connectToDaemon(const QString &transport, const QString &address
     // Keep the UTF-8 buffers alive across the FFI call. Empty strings are fine:
     // the core treats an empty transport as "dbus" and an empty address as the
     // platform default.
+    // Apply the persisted client-context preference before connecting so the core
+    // stages it onto the ConnectionConfig it builds for this connect (#549).
+    setShareClientContext(shareClientContextPreference());
     const QByteArray t = transport.toUtf8();
     const QByteArray a = address.toUtf8();
     adele_core_connect(m_handle, t.constData(), a.constData());
@@ -56,16 +59,19 @@ void AdeleCore::connectToDaemon(const QString &transport, const QString &address
 
 void AdeleCore::setShareClientContext(bool enabled)
 {
-    // TODO(spec): forward to the core (wired in the implementation commit).
-    Q_UNUSED(enabled);
+    if (!m_handle) {
+        return;
+    }
+    adele_core_set_share_client_context(m_handle, enabled);
 }
 
 bool AdeleCore::shareClientContextPreference()
 {
+    // Default ON: an absent key means share, matching ConnectionConfig::default()
+    // in client-common. The KCM persists the opt-out to the same file/group/key.
     const auto config = KSharedConfig::openConfig(QLatin1String(kClientConfigFile));
     const KConfigGroup group(config, QLatin1String(kClientConfigGroup));
-    // TODO(spec): the default must be ON (#549); wired in the implementation commit.
-    return group.readEntry(kShareClientContextKey, false);
+    return group.readEntry(kShareClientContextKey, true);
 }
 
 void AdeleCore::sendPrompt(const QString &text)
