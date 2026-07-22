@@ -56,10 +56,15 @@ private Q_SLOTS:
 
     void constructAndDestroyDoesNotCrash();
     void intentsBeforeConnectDoNotCrash();
+    void queueIntentsBeforeConnectDoNotCrash();
 
     void dispatchEmitsViewEventWithType();
     void dispatchPreservesNestedData();
     void connectedPropertyTracksLifecycleEvents();
+
+    void composerTextEventMarshalsToViewEvent();
+    void queuedMessagesEventMarshalsToViewEvent();
+    void queuedMessagesEventEditingNullMarshals();
 
     void malformedJsonEmitsNothing();
     void nonObjectJsonEmitsNothing();
@@ -112,6 +117,24 @@ void TestAdeleCore::intentsBeforeConnectDoNotCrash()
     core.connectToDaemon(QStringLiteral("uds"), QStringLiteral("/nonexistent/adele-test.sock"));
     // Let any queued work run; the object must remain alive and disconnected.
     QTest::qWait(50);
+    QVERIFY(!core.isConnected());
+}
+
+void TestAdeleCore::queueIntentsBeforeConnectDoNotCrash()
+{
+    // The message-queue intents are fire-and-forget into the core. With no
+    // connection they early-return in the reducer; the C++ side forwards
+    // regardless. A negative index must be guarded so it never becomes a huge
+    // uintptr_t, and an out-of-range positive index is a reducer no-op. None
+    // must crash.
+    AdeleCore core;
+    core.editQueued(0);
+    core.editQueued(5);
+    core.editQueued(-1);
+    core.removeQueued(0);
+    core.removeQueued(-3);
+    core.cancelQueuedEdit();
+    QTest::qWait(20);
     QVERIFY(!core.isConnected());
 }
 
@@ -170,6 +193,53 @@ void TestAdeleCore::connectedPropertyTracksLifecycleEvents()
     dispatch(core, QStringLiteral(R"({"type":"connect_error","message":"refused"})"));
     QVERIFY(!core.isConnected());
     QCOMPARE(spy.count(), 2);
+}
+
+// --- queue view-events (composer_text / queued_messages) ---------------------
+
+void TestAdeleCore::composerTextEventMarshalsToViewEvent()
+{
+    // The reducer sets the live composer via a `composer_text` event (recall
+    // load, or an empty string to clear on enqueue/cancel). It must reach QML
+    // through the generic viewEvent marshalling with its text intact.
+    AdeleCore core;
+    QSignalSpy spy(&core, &AdeleCore::viewEvent);
+    dispatch(core, QStringLiteral(R"({"type":"composer_text","text":"recalled draft"})"));
+    QCOMPARE(spy.count(), 1);
+    QCOMPARE(spy.at(0).at(0).toString(), QStringLiteral("composer_text"));
+    QCOMPARE(spy.at(0).at(1).toMap().value(QStringLiteral("text")).toString(),
+             QStringLiteral("recalled draft"));
+}
+
+void TestAdeleCore::queuedMessagesEventMarshalsToViewEvent()
+{
+    // The queue snapshot carries the messages (submit order) and the index
+    // currently checked out for editing. Both must survive to QML.
+    AdeleCore core;
+    QSignalSpy spy(&core, &AdeleCore::viewEvent);
+    dispatch(core,
+             QStringLiteral(R"({"type":"queued_messages","messages":["first","second"],"editing":1})"));
+    QCOMPARE(spy.count(), 1);
+    QCOMPARE(spy.at(0).at(0).toString(), QStringLiteral("queued_messages"));
+    const auto data = spy.at(0).at(1).toMap();
+    const QVariantList messages = data.value(QStringLiteral("messages")).toList();
+    QCOMPARE(messages.size(), 2);
+    QCOMPARE(messages.at(0).toString(), QStringLiteral("first"));
+    QCOMPARE(messages.at(1).toString(), QStringLiteral("second"));
+    QCOMPARE(data.value(QStringLiteral("editing")).toInt(), 1);
+}
+
+void TestAdeleCore::queuedMessagesEventEditingNullMarshals()
+{
+    // A JSON null `editing` must survive as a null QVariant (not coerced to an
+    // integer), so the QML side can tell "not editing" apart from index 0.
+    AdeleCore core;
+    QSignalSpy spy(&core, &AdeleCore::viewEvent);
+    dispatch(core, QStringLiteral(R"({"type":"queued_messages","messages":[],"editing":null})"));
+    QCOMPARE(spy.count(), 1);
+    const auto data = spy.at(0).at(1).toMap();
+    QCOMPARE(data.value(QStringLiteral("messages")).toList().size(), 0);
+    QVERIFY(data.value(QStringLiteral("editing")).isNull());
 }
 
 // --- edge cases --------------------------------------------------------------

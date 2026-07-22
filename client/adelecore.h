@@ -57,8 +57,19 @@ public:
     Q_INVOKABLE void connectToDaemon(const QString &transport = QStringLiteral("dbus"),
                                      const QString &address = QString());
 
-    /** Send a prompt into the open conversation. */
+    /** Send a prompt into the open conversation. While a reply streams the core
+     *  queues it instead of sending immediately (surfaced via the
+     *  `queued_messages` / `composer_text` view-events). */
     Q_INVOKABLE void sendPrompt(const QString &text);
+    /** Check out queued message `index` into the composer to edit it (up-arrow
+     *  recall / a chip's edit affordance). A negative index is ignored. */
+    Q_INVOKABLE void editQueued(int index);
+    /** Remove queued message `index` (a chip's x) without sending it. A negative
+     *  index is ignored. */
+    Q_INVOKABLE void removeQueued(int index);
+    /** Abandon an in-progress queued-message edit: the checked-out item returns
+     *  to the queue unchanged and the composer clears. A no-op when not editing. */
+    Q_INVOKABLE void cancelQueuedEdit();
     /** Open (load) a conversation by id. */
     Q_INVOKABLE void selectConversation(const QString &conversationId);
     /** Create a new conversation and open it. */
