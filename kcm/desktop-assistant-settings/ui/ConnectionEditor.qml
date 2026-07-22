@@ -115,7 +115,7 @@ Kirigami.OverlaySheet {
             return
         }
         const config = { type: connectorType }
-        if (connectorType === "anthropic" || connectorType === "openai") {
+        if (connectorType === "anthropic" || connectorType === "openai" || connectorType === "openrouter") {
             if (fieldBaseUrl.trim().length > 0) config.base_url = fieldBaseUrl.trim()
             if (fieldApiKeyEnv.trim().length > 0) config.api_key_env = fieldApiKeyEnv.trim()
         } else if (connectorType === "bedrock") {
@@ -182,6 +182,8 @@ Kirigami.OverlaySheet {
                 ? "Anthropic connector: stores the API-key env var name and an optional base URL override. Secrets are resolved via env var or keyring at request time."
                 : connectorType === "openai"
                     ? "OpenAI-compatible connector: configure an env var name for the key and optionally override the base URL for self-hosted gateways."
+                    : connectorType === "openrouter"
+                    ? "OpenRouter connector: an OpenAI-compatible aggregator. Set the API-key env var and optionally override the base URL (defaults to the OpenRouter endpoint)."
                     : connectorType === "bedrock"
                         ? "AWS Bedrock connector: uses ambient AWS credentials (profile + region). Refresh models below to sanity-check access."
                         : connectorType === "ollama"
@@ -206,7 +208,7 @@ Kirigami.OverlaySheet {
 
         // Anthropic / OpenAI fields
         RowLayout {
-            visible: connectorType === "anthropic" || connectorType === "openai"
+            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "openrouter"
             Layout.fillWidth: true
             QQC2.Label {
                 text: "API key env var"
@@ -214,14 +216,18 @@ Kirigami.OverlaySheet {
             }
             QQC2.TextField {
                 Layout.fillWidth: true
-                placeholderText: connectorType === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY"
+                placeholderText: connectorType === "anthropic"
+                    ? "ANTHROPIC_API_KEY"
+                    : connectorType === "openrouter"
+                        ? "OPENROUTER_API_KEY"
+                        : "OPENAI_API_KEY"
                 text: fieldApiKeyEnv
                 onTextEdited: fieldApiKeyEnv = text
             }
         }
 
         RowLayout {
-            visible: connectorType === "anthropic" || connectorType === "openai"
+            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "openrouter"
             Layout.fillWidth: true
             QQC2.Label {
                 text: "API key (optional)"
@@ -237,7 +243,7 @@ Kirigami.OverlaySheet {
         }
 
         RowLayout {
-            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "bedrock" || connectorType === "ollama"
+            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "openrouter" || connectorType === "bedrock" || connectorType === "ollama"
             Layout.fillWidth: true
             QQC2.Label {
                 text: "Base URL"
@@ -251,7 +257,9 @@ Kirigami.OverlaySheet {
                         ? "(defaults to AWS region endpoint)"
                         : connectorType === "anthropic"
                             ? "https://api.anthropic.com"
-                            : "https://api.openai.com/v1"
+                            : connectorType === "openrouter"
+                                ? "https://openrouter.ai/api/v1"
+                                : "https://api.openai.com/v1"
                 text: fieldBaseUrl
                 onTextEdited: fieldBaseUrl = text
             }
@@ -261,7 +269,7 @@ Kirigami.OverlaySheet {
         // where a large model on CPU can take longer than the 30s default just
         // to return its first token.
         RowLayout {
-            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "bedrock" || connectorType === "ollama"
+            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "openrouter" || connectorType === "bedrock" || connectorType === "ollama"
             Layout.fillWidth: true
             QQC2.Label {
                 text: "Connect timeout (s)"
@@ -278,7 +286,7 @@ Kirigami.OverlaySheet {
         }
 
         RowLayout {
-            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "bedrock" || connectorType === "ollama"
+            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "openrouter" || connectorType === "bedrock" || connectorType === "ollama"
             Layout.fillWidth: true
             QQC2.Label {
                 text: "Stream timeout (s)"
@@ -295,7 +303,7 @@ Kirigami.OverlaySheet {
         }
 
         RowLayout {
-            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "bedrock" || connectorType === "ollama"
+            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "openrouter" || connectorType === "bedrock" || connectorType === "ollama"
             Layout.fillWidth: true
             QQC2.Label {
                 text: "Context length hard cap"
@@ -312,7 +320,7 @@ Kirigami.OverlaySheet {
         }
 
         QQC2.Label {
-            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "bedrock" || connectorType === "ollama"
+            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "openrouter" || connectorType === "bedrock" || connectorType === "ollama"
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             font: Kirigami.Theme.smallFont

@@ -202,6 +202,7 @@ ColumnLayout {
                 model: [
                     { type: "anthropic", label: "Anthropic (Claude)" },
                     { type: "openai", label: "OpenAI-compatible" },
+                    { type: "openrouter", label: "OpenRouter" },
                     { type: "bedrock", label: "AWS Bedrock" },
                     { type: "ollama", label: "Ollama" },
                 ]
