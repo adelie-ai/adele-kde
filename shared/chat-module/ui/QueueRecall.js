@@ -30,6 +30,11 @@
 //       Decide what a Up/Down keypress should do. "none" means let the key act
 //       normally (caret movement).
 //
+//   chipEditIndex(visible, editing) -> int
+//       Translate a visible chip index to the full-queue index EditQueued wants
+//       (the checked-out message is absent from the visible list but reinserted
+//       before indexing). Identity when not editing.
+//
 //   previewText(text) -> string
 //       Collapse whitespace (incl. newlines) to single spaces and trim, for a
 //       compact one-line chip label. null / undefined -> "".
@@ -89,6 +94,19 @@ function recallDecision(direction, fieldEmpty, editing, count) {
     }
 
     return { action: "none" }
+}
+
+// Map a visible chip index to the full-queue index the reducer's EditQueued
+// expects. While a message is checked out for editing it is ABSENT from the
+// queued_messages event's `messages` array (it lives in the composer), yet the
+// reducer reinserts it at its original slot BEFORE indexing. So a visible chip
+// at or after the checked-out slot is one position lower than its full-queue
+// index. When nothing is being edited (`editing` < 0) the two coincide.
+//
+//   visible — the chip's index within the visible (event) list
+//   editing — the normalized editing index, or -1 when not editing
+function chipEditIndex(visible, editing) {
+    return (editing >= 0 && visible >= editing) ? visible + 1 : visible
 }
 
 // Collapse whitespace to single spaces and trim, for a compact chip label. The

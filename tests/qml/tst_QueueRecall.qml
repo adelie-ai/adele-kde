@@ -114,6 +114,41 @@ TestCase {
         compare(QueueRecall.recallDecision("up", true, 0, 0).action, "none")
     }
 
+    // ── chipEditIndex: visible chip index → full-queue index ─────────────────
+    //
+    // The queued_messages event omits the checked-out message from the visible
+    // list, but the reducer's EditQueued reinserts it at its original slot
+    // BEFORE indexing. So a click on visible chip `j` must map to the full-queue
+    // index: full = (editing >= 0 && j >= editing) ? j + 1 : j.
+
+    function test_chipEditIndex_identity_when_not_editing() {
+        compare(QueueRecall.chipEditIndex(0, -1), 0)
+        compare(QueueRecall.chipEditIndex(3, -1), 3)
+    }
+
+    function test_chipEditIndex_shifts_at_the_checked_out_slot() {
+        // A visible chip sitting AT the editing slot occupies the position the
+        // reinserted message reclaims, so it maps one higher.
+        compare(QueueRecall.chipEditIndex(2, 2), 3)
+    }
+
+    function test_chipEditIndex_shifts_after_the_checked_out_slot() {
+        compare(QueueRecall.chipEditIndex(4, 2), 5)
+    }
+
+    function test_chipEditIndex_editing_first_shifts_all() {
+        // Editing index 0: every visible chip is at/after the slot → all +1.
+        compare(QueueRecall.chipEditIndex(0, 0), 1)
+        compare(QueueRecall.chipEditIndex(1, 0), 2)
+    }
+
+    function test_chipEditIndex_editing_last_leaves_earlier_chips_unshifted() {
+        // Editing the last full-queue item (e.g. index 3 of [0,1,2,3]); the
+        // visible chips are all before it, so they map through unchanged.
+        compare(QueueRecall.chipEditIndex(0, 3), 0)
+        compare(QueueRecall.chipEditIndex(2, 3), 2)
+    }
+
     // ── previewText ──────────────────────────────────────────────────────────
 
     function test_previewText_collapses_newlines_and_whitespace() {

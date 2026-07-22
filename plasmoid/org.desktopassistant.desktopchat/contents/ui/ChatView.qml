@@ -1078,8 +1078,13 @@ Item {
             QQC2.Label {
                 height: Math.round(26 * root.uiScale)
                 verticalAlignment: Text.AlignVCenter
-                text: queuedMessagesModel.count + " queued"
-                color: root.themeDisabledTextColor
+                // Row-level cue: while a message is checked out for editing it is
+                // in the composer, not the visible chips, so no single chip is
+                // "the" edited one. Flag the state here instead.
+                text: root.editingQueuedIndex >= 0
+                    ? queuedMessagesModel.count + " queued, editing"
+                    : queuedMessagesModel.count + " queued"
+                color: root.editingQueuedIndex >= 0 ? root.themeHighlightColor : root.themeDisabledTextColor
                 font.bold: true
                 font.pointSize: root.baseFontPointSize * 0.9
             }
@@ -1091,17 +1096,13 @@ Item {
                     id: queuedChip
                     required property int index
                     required property string text
-                    readonly property bool isEditing: queuedChip.index === root.editingQueuedIndex
 
                     implicitHeight: Math.round(26 * root.uiScale)
                     implicitWidth: queuedChipRow.implicitWidth + Math.round(12 * root.uiScale)
                     radius: implicitHeight / 2
-                    color: queuedChip.isEditing
-                        ? Qt.rgba(root.themeHighlightColor.r, root.themeHighlightColor.g, root.themeHighlightColor.b, 0.28)
-                        : Qt.rgba(root.themeHighlightColor.r, root.themeHighlightColor.g, root.themeHighlightColor.b, 0.12)
+                    color: Qt.rgba(root.themeHighlightColor.r, root.themeHighlightColor.g, root.themeHighlightColor.b, 0.12)
                     border.width: 1
-                    border.color: Qt.rgba(root.themeHighlightColor.r, root.themeHighlightColor.g, root.themeHighlightColor.b,
-                        queuedChip.isEditing ? 0.7 : 0.4)
+                    border.color: Qt.rgba(root.themeHighlightColor.r, root.themeHighlightColor.g, root.themeHighlightColor.b, 0.4)
 
                     RowLayout {
                         id: queuedChipRow
@@ -1120,7 +1121,11 @@ Item {
                             MouseArea {
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: core.editQueued(queuedChip.index)
+                                // Translate the visible index to the full-queue
+                                // index EditQueued expects (a checked-out item is
+                                // absent here but reinserted before indexing).
+                                onClicked: core.editQueued(
+                                    QueueRecall.chipEditIndex(queuedChip.index, root.editingQueuedIndex))
                             }
                         }
 
