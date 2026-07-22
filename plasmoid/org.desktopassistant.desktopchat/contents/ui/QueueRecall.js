@@ -86,8 +86,13 @@ function recallDecision(direction, fieldEmpty, editing, count) {
         if (edit < 0 || !fieldEmpty) {
             return { action: "none" }
         }
+        // While editing, `count` is the VISIBLE snapshot — the checked-out item
+        // is absent from it — so the full queue has `count + 1` slots and its
+        // last full index is `count`. `edit` is a full index (EditQueued
+        // reinserts before indexing), so walk to `edit + 1` while it still lands
+        // on a real item, and cancel only once past the last (`edit + 1 > n`).
         var down = edit + 1
-        if (down < n) {
+        if (down <= n) {
             return { action: "edit", index: down }
         }
         return { action: "cancel" }

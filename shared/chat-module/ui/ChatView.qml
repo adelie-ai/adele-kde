@@ -1092,54 +1092,23 @@ Item {
             Repeater {
                 model: queuedMessagesModel
 
-                delegate: Rectangle {
-                    id: queuedChip
+                // The chip's click->index mapping and remove wiring live in
+                // QueuedChip.qml so they can be exercised headless in
+                // qmltestrunner (ChatView can't be instantiated there). The
+                // delegate injects the model's index/text plus theme styling and
+                // routes the chip's signals to the core.
+                delegate: QueuedChip {
                     required property int index
                     required property string text
 
-                    implicitHeight: Math.round(26 * root.uiScale)
-                    implicitWidth: queuedChipRow.implicitWidth + Math.round(12 * root.uiScale)
-                    radius: implicitHeight / 2
-                    color: Qt.rgba(root.themeHighlightColor.r, root.themeHighlightColor.g, root.themeHighlightColor.b, 0.12)
-                    border.width: 1
-                    border.color: Qt.rgba(root.themeHighlightColor.r, root.themeHighlightColor.g, root.themeHighlightColor.b, 0.4)
+                    chipIndex: index
+                    chipText: text
+                    editingIndex: root.editingQueuedIndex
+                    uiScale: root.uiScale
+                    baseFontPointSize: root.baseFontPointSize
 
-                    RowLayout {
-                        id: queuedChipRow
-                        anchors.centerIn: parent
-                        spacing: Math.round(2 * root.uiScale)
-
-                        QQC2.Label {
-                            Layout.leftMargin: Math.round(6 * root.uiScale)
-                            Layout.alignment: Qt.AlignVCenter
-                            Layout.maximumWidth: Math.round(200 * root.uiScale)
-                            text: QueueRecall.previewText(queuedChip.text)
-                            color: root.themeTextColor
-                            elide: Text.ElideRight
-                            font.pointSize: root.baseFontPointSize * 0.9
-
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                // Translate the visible index to the full-queue
-                                // index EditQueued expects (a checked-out item is
-                                // absent here but reinserted before indexing).
-                                onClicked: core.editQueued(
-                                    QueueRecall.chipEditIndex(queuedChip.index, root.editingQueuedIndex))
-                            }
-                        }
-
-                        QQC2.ToolButton {
-                            Layout.alignment: Qt.AlignVCenter
-                            implicitWidth: Math.round(22 * root.uiScale)
-                            implicitHeight: Math.round(22 * root.uiScale)
-                            icon.name: "dialog-close"
-                            display: QQC2.AbstractButton.IconOnly
-                            QQC2.ToolTip.text: "Remove from queue"
-                            QQC2.ToolTip.visible: hovered
-                            onClicked: core.removeQueued(queuedChip.index)
-                        }
-                    }
+                    onEditRequested: function(fullIndex) { core.editQueued(fullIndex) }
+                    onRemoveRequested: function(idx) { core.removeQueued(idx) }
                 }
             }
         }

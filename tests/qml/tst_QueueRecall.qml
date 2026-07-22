@@ -95,9 +95,24 @@ TestCase {
         compare(d.index, 1)
     }
 
+    function test_down_from_second_to_last_edit_walks_to_last_with_visible_count() {
+        // The REAL caller (ChatView) passes `editing` as a FULL-queue index but
+        // `count` as the VISIBLE count — the queued_messages snapshot omits the
+        // checked-out item, so while editing the visible list is one shorter
+        // than the full queue. Full queue [A,B,C,D], editing C (full idx 2),
+        // visible list [A,B,D] (count 3). Down must walk to the LAST item D
+        // (full idx 3), not cancel — otherwise D is unreachable via Down-walk.
+        var d = QueueRecall.recallDecision("down", true, 2, 3)
+        compare(d.action, "edit")
+        compare(d.index, 3)
+    }
+
     function test_down_past_last_cancels_edit() {
-        // Down past the final queued item abandons the edit.
-        compare(QueueRecall.recallDecision("down", true, 2, 3).action, "cancel")
+        // Down past the final queued item abandons the edit. With visible-count
+        // semantics (see the walk-to-last test), editing the true last item of
+        // full queue [A,B,C,D] is full idx 3 with visible list [A,B,C] (count 3);
+        // one more Down cancels.
+        compare(QueueRecall.recallDecision("down", true, 3, 3).action, "cancel")
     }
 
     function test_down_nonempty_field_is_caret_movement() {
