@@ -23,6 +23,7 @@ import org.kde.plasma.plasmoid
 import org.desktopassistant.client
 
 import "LinkSafety.js" as LinkSafety
+import "MessageKind.js" as MessageKind
 import "QueueRecall.js" as QueueRecall
 
 Item {
@@ -225,7 +226,10 @@ Item {
             root.completeStreaming(String(data.text || ""))
             break
         case "inline_note":
-            root.appendNote(String(data.text || ""))
+            // `kind` is a structured token (normal / spoken / speech_disabled);
+            // this view has no badge affordance, so it renders it as the marker
+            // prefix the core used to bake in. Absent ⇒ an ordinary note.
+            root.appendNote(String(data.text || ""), String(data.kind || ""))
             break
         case "toast":
             root.statusText = String(data.text || "")
@@ -330,8 +334,15 @@ Item {
         root.maybeStickToBottom()
     }
 
-    function appendNote(text) {
-        transcriptModel.append({ kind: "note", role: "assistant", body: text })
+    // `messageKind` is the core's presentation token for the line (see
+    // MessageKind.js); it becomes a marker prefix on the body rather than a
+    // model role, so the transcript delegate is untouched.
+    function appendNote(text, messageKind) {
+        transcriptModel.append({
+            kind: "note",
+            role: "assistant",
+            body: MessageKind.decorate(text, messageKind),
+        })
         root.maybeStickToBottom()
     }
 
