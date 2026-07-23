@@ -21,6 +21,8 @@ import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 
+import "ConnectorConfig.js" as ConnectorConfig
+
 Kirigami.OverlaySheet {
     id: sheet
 
@@ -48,6 +50,18 @@ Kirigami.OverlaySheet {
     // Anthropic + OpenAI
     property string fieldApiKeyEnv: ""
     property string fieldApiKeyInput: ""
+    // Azure OpenAI. api_surface (v1|classic) and auth_mode (api_key|entra) are
+    // enums; api_version applies to the classic surface only.
+    property string fieldApiSurface: "v1"
+    property string fieldApiVersion: ""
+    // Google Vertex / Gemini. auth_mode (vertex|api_key) is an enum; project,
+    // location, and credentials_path back the Vertex path.
+    property string fieldProject: ""
+    property string fieldLocation: ""
+    property string fieldCredentialsPath: ""
+    // Shared enum between Azure (default "api_key") and Google (default
+    // "vertex"); the create form seeds the per-connector default.
+    property string fieldAuthMode: ""
     // Bedrock
     property string fieldAwsProfile: ""
     property string fieldRegion: ""
@@ -58,22 +72,37 @@ Kirigami.OverlaySheet {
     property string refreshStatus: ""
     property var refreshedModels: []
 
+    // Copy a ConnectorConfig field bag into the editor's flat field properties.
+    // Shared by openForNew (defaults) and openFor (parsed config) so the
+    // view<->config mapping lives in one tested place (ConnectorConfig.js).
+    function applyFields(f) {
+        fieldBaseUrl = f.baseUrl
+        fieldApiKeyEnv = f.apiKeyEnv
+        fieldApiSurface = f.apiSurface
+        fieldApiVersion = f.apiVersion
+        fieldProject = f.project
+        fieldLocation = f.location
+        fieldCredentialsPath = f.credentialsPath
+        fieldAuthMode = f.authMode
+        fieldAwsProfile = f.awsProfile
+        fieldRegion = f.region
+        fieldKeepWarm = f.keepWarm
+        fieldConnectTimeout = f.connectTimeout
+        fieldStreamTimeout = f.streamTimeout
+        fieldMaxContextTokens = f.maxContextTokens
+    }
+
     function openForNew(connType) {
         connectorType = (connType || "").toLowerCase()
         connectionId = ""
         isNew = true
-        fieldBaseUrl = ""
-        fieldConnectTimeout = ""
-        fieldStreamTimeout = ""
-        fieldMaxContextTokens = ""
-        fieldApiKeyEnv = ""
         fieldApiKeyInput = ""
-        fieldAwsProfile = ""
-        fieldRegion = ""
         fieldAutoPull = false
-        fieldKeepWarm = false
         refreshStatus = ""
         refreshedModels = []
+        // Seed blanks plus the per-connector enum defaults (Azure api_key + v1,
+        // Google vertex) the create form shows.
+        applyFields(ConnectorConfig.defaultFields(connectorType))
         open()
     }
 
@@ -82,6 +111,7 @@ Kirigami.OverlaySheet {
         connectionId = String(item.id || "")
         isNew = false
         fieldApiKeyInput = ""
+        fieldAutoPull = false
         refreshStatus = ""
         refreshedModels = []
         // The daemon echoes the stored *non-secret* config on `ListConnections`
@@ -90,19 +120,7 @@ Kirigami.OverlaySheet {
         // saving a keep-warm/timeout tweak would wipe an existing base_url.
         // API-key *values* are never echoed (only the env-var name) and stay
         // in the keyring untouched unless a new value is typed below.
-        var c = item.config || {}
-        fieldBaseUrl = String(c.base_url || "")
-        fieldApiKeyEnv = String(c.api_key_env || "")
-        fieldAwsProfile = String(c.aws_profile || "")
-        fieldRegion = String(c.region || "")
-        fieldAutoPull = false
-        fieldConnectTimeout = (c.connect_timeout_secs !== undefined && c.connect_timeout_secs !== null)
-            ? String(c.connect_timeout_secs) : ""
-        fieldStreamTimeout = (c.stream_timeout_secs !== undefined && c.stream_timeout_secs !== null)
-            ? String(c.stream_timeout_secs) : ""
-        fieldMaxContextTokens = (c.max_context_tokens !== undefined && c.max_context_tokens !== null)
-            ? String(c.max_context_tokens) : ""
-        fieldKeepWarm = c.keep_warm === true
+        applyFields(ConnectorConfig.parseConfig(connectorType, item.config || {}))
         open()
     }
 
@@ -114,41 +132,32 @@ Kirigami.OverlaySheet {
             refreshStatus = "Connection id is required"
             return
         }
-        const config = { type: connectorType }
-        if (connectorType === "anthropic" || connectorType === "openai" || connectorType === "openrouter") {
-            if (fieldBaseUrl.trim().length > 0) config.base_url = fieldBaseUrl.trim()
-            if (fieldApiKeyEnv.trim().length > 0) config.api_key_env = fieldApiKeyEnv.trim()
-        } else if (connectorType === "bedrock") {
-            if (fieldAwsProfile.trim().length > 0) config.aws_profile = fieldAwsProfile.trim()
-            if (fieldRegion.trim().length > 0) config.region = fieldRegion.trim()
-            if (fieldBaseUrl.trim().length > 0) config.base_url = fieldBaseUrl.trim()
-        } else if (connectorType === "ollama") {
-            if (fieldBaseUrl.trim().length > 0) config.base_url = fieldBaseUrl.trim()
-            // Keep this connection's interactive model resident in Ollama's
-            // memory (maps to `OllamaConnection.keep_warm`). Only send `true`;
-            // omit when off so the field round-trips cleanly.
-            if (fieldKeepWarm) config.keep_warm = true
-            // `auto_pull` is a UI intent that doesn't map to a daemon field
-            // today (see ConnectionConfigView::Ollama). We stash it into a
-            // future-proof `_meta` key so the field survives round-trips
-            // once the daemon grows it.
-        } else {
+        // Build the ConnectionConfigView-shaped object from the editor fields.
+        // The per-connector field selection, the api_version (classic-only) and
+        // keep_warm (only-when-true) rules, and the shared timeout / context-cap
+        // knobs all live in ConnectorConfig.buildConfig so they stay tested.
+        // A null result means an unknown connector type (`auto_pull` is a UI
+        // intent with no daemon field yet — see ConnectionConfigView::Ollama).
+        const config = ConnectorConfig.buildConfig(connectorType, {
+            baseUrl: fieldBaseUrl,
+            apiKeyEnv: fieldApiKeyEnv,
+            apiSurface: fieldApiSurface,
+            apiVersion: fieldApiVersion,
+            project: fieldProject,
+            location: fieldLocation,
+            credentialsPath: fieldCredentialsPath,
+            authMode: fieldAuthMode,
+            awsProfile: fieldAwsProfile,
+            region: fieldRegion,
+            keepWarm: fieldKeepWarm,
+            connectTimeout: fieldConnectTimeout,
+            streamTimeout: fieldStreamTimeout,
+            maxContextTokens: fieldMaxContextTokens,
+        })
+        if (config === null) {
             refreshStatus = "Unsupported connector type: " + connectorType
             return
         }
-
-        // Streaming stall budgets apply to every connector. Blank → omit
-        // (use the connector default); a positive integer → override seconds.
-        const connectSecs = parseInt(fieldConnectTimeout.trim(), 10)
-        if (!isNaN(connectSecs) && connectSecs > 0) config.connect_timeout_secs = connectSecs
-        const streamSecs = parseInt(fieldStreamTimeout.trim(), 10)
-        if (!isNaN(streamSecs) && streamSecs > 0) config.stream_timeout_secs = streamSecs
-
-        // Context length hard cap applies to every connector. Blank → omit =
-        // "Max available" (use the model's reported/curated window); a positive
-        // integer caps the effective window to min(value, model max).
-        const maxCtx = parseInt(fieldMaxContextTokens.trim(), 10)
-        if (!isNaN(maxCtx) && maxCtx > 0) config.max_context_tokens = maxCtx
 
         const variant = isNew ? "create_connection" : "update_connection"
         kcm.daemonCall(variant, { id: id, config: config }, function(result, error) {
@@ -184,6 +193,10 @@ Kirigami.OverlaySheet {
                     ? "OpenAI-compatible connector: configure an env var name for the key and optionally override the base URL for self-hosted gateways."
                     : connectorType === "openrouter"
                     ? "OpenRouter connector: an OpenAI-compatible aggregator. Set the API-key env var and optionally override the base URL (defaults to the OpenRouter endpoint)."
+                    : connectorType === "azure"
+                    ? "Azure OpenAI connector: point Base URL at your resource endpoint (https://<name>.openai.azure.com). The v1 GA surface with api-key auth is the default; switch to the classic surface to set an api-version, or Entra for token auth."
+                    : connectorType === "google"
+                    ? "Google connector: Vertex AI by default (set the GCP project, region, and a service-account credentials JSON path). Switch auth mode to api_key to use the Gemini API with a key env var instead."
                     : connectorType === "bedrock"
                         ? "AWS Bedrock connector: uses ambient AWS credentials (profile + region). Refresh models below to sanity-check access."
                         : connectorType === "ollama"
@@ -206,9 +219,9 @@ Kirigami.OverlaySheet {
             }
         }
 
-        // Anthropic / OpenAI fields
+        // Anthropic / OpenAI-compatible / Azure / Google fields
         RowLayout {
-            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "openrouter"
+            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "openrouter" || connectorType === "azure" || connectorType === "google"
             Layout.fillWidth: true
             QQC2.Label {
                 text: "API key env var"
@@ -220,14 +233,18 @@ Kirigami.OverlaySheet {
                     ? "ANTHROPIC_API_KEY"
                     : connectorType === "openrouter"
                         ? "OPENROUTER_API_KEY"
-                        : "OPENAI_API_KEY"
+                        : connectorType === "azure"
+                            ? "AZURE_OPENAI_API_KEY"
+                            : connectorType === "google"
+                                ? "GOOGLE_API_KEY"
+                                : "OPENAI_API_KEY"
                 text: fieldApiKeyEnv
                 onTextEdited: fieldApiKeyEnv = text
             }
         }
 
         RowLayout {
-            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "openrouter"
+            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "openrouter" || connectorType === "azure" || connectorType === "google"
             Layout.fillWidth: true
             QQC2.Label {
                 text: "API key (optional)"
@@ -243,7 +260,7 @@ Kirigami.OverlaySheet {
         }
 
         RowLayout {
-            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "openrouter" || connectorType === "bedrock" || connectorType === "ollama"
+            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "openrouter" || connectorType === "azure" || connectorType === "google" || connectorType === "bedrock" || connectorType === "ollama"
             Layout.fillWidth: true
             QQC2.Label {
                 text: "Base URL"
@@ -259,9 +276,110 @@ Kirigami.OverlaySheet {
                             ? "https://api.anthropic.com"
                             : connectorType === "openrouter"
                                 ? "https://openrouter.ai/api/v1"
-                                : "https://api.openai.com/v1"
+                                : connectorType === "azure"
+                                    ? "https://<resource>.openai.azure.com"
+                                    : connectorType === "google"
+                                        ? "(usually blank; the Vertex regional endpoint is derived)"
+                                        : "https://api.openai.com/v1"
                 text: fieldBaseUrl
                 onTextEdited: fieldBaseUrl = text
+            }
+        }
+
+        // Azure surface enum (v1 GA vs. the legacy classic surface).
+        RowLayout {
+            visible: connectorType === "azure"
+            Layout.fillWidth: true
+            QQC2.Label {
+                text: "API surface"
+                Layout.preferredWidth: 160
+            }
+            QQC2.ComboBox {
+                Layout.fillWidth: true
+                model: ["v1", "classic"]
+                currentIndex: Math.max(0, model.indexOf(fieldApiSurface))
+                onActivated: fieldApiSurface = currentText
+            }
+        }
+
+        // Shared auth-mode enum. Azure: api_key | entra. Google: vertex | api_key.
+        RowLayout {
+            visible: connectorType === "azure" || connectorType === "google"
+            Layout.fillWidth: true
+            QQC2.Label {
+                text: "Auth mode"
+                Layout.preferredWidth: 160
+            }
+            QQC2.ComboBox {
+                Layout.fillWidth: true
+                model: connectorType === "azure"
+                    ? ["api_key", "entra"]
+                    : ["vertex", "api_key"]
+                currentIndex: Math.max(0, model.indexOf(fieldAuthMode))
+                onActivated: fieldAuthMode = currentText
+            }
+        }
+
+        // Azure api-version: classic surface only (the v1 GA surface is
+        // versionless), so hide it under the default v1 surface.
+        RowLayout {
+            visible: connectorType === "azure" && fieldApiSurface === "classic"
+            Layout.fillWidth: true
+            QQC2.Label {
+                text: "API version"
+                Layout.preferredWidth: 160
+            }
+            QQC2.TextField {
+                Layout.fillWidth: true
+                placeholderText: "2024-10-21"
+                text: fieldApiVersion
+                onTextEdited: fieldApiVersion = text
+            }
+        }
+
+        // Google Vertex fields.
+        RowLayout {
+            visible: connectorType === "google"
+            Layout.fillWidth: true
+            QQC2.Label {
+                text: "GCP project"
+                Layout.preferredWidth: 160
+            }
+            QQC2.TextField {
+                Layout.fillWidth: true
+                placeholderText: "my-gcp-project"
+                text: fieldProject
+                onTextEdited: fieldProject = text
+            }
+        }
+
+        RowLayout {
+            visible: connectorType === "google"
+            Layout.fillWidth: true
+            QQC2.Label {
+                text: "Location / region"
+                Layout.preferredWidth: 160
+            }
+            QQC2.TextField {
+                Layout.fillWidth: true
+                placeholderText: "us-central1"
+                text: fieldLocation
+                onTextEdited: fieldLocation = text
+            }
+        }
+
+        RowLayout {
+            visible: connectorType === "google"
+            Layout.fillWidth: true
+            QQC2.Label {
+                text: "Credentials JSON path"
+                Layout.preferredWidth: 160
+            }
+            QQC2.TextField {
+                Layout.fillWidth: true
+                placeholderText: "/path/to/service-account.json (Vertex)"
+                text: fieldCredentialsPath
+                onTextEdited: fieldCredentialsPath = text
             }
         }
 
@@ -269,7 +387,7 @@ Kirigami.OverlaySheet {
         // where a large model on CPU can take longer than the 30s default just
         // to return its first token.
         RowLayout {
-            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "openrouter" || connectorType === "bedrock" || connectorType === "ollama"
+            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "openrouter" || connectorType === "azure" || connectorType === "google" || connectorType === "bedrock" || connectorType === "ollama"
             Layout.fillWidth: true
             QQC2.Label {
                 text: "Connect timeout (s)"
@@ -286,7 +404,7 @@ Kirigami.OverlaySheet {
         }
 
         RowLayout {
-            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "openrouter" || connectorType === "bedrock" || connectorType === "ollama"
+            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "openrouter" || connectorType === "azure" || connectorType === "google" || connectorType === "bedrock" || connectorType === "ollama"
             Layout.fillWidth: true
             QQC2.Label {
                 text: "Stream timeout (s)"
@@ -303,7 +421,7 @@ Kirigami.OverlaySheet {
         }
 
         RowLayout {
-            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "openrouter" || connectorType === "bedrock" || connectorType === "ollama"
+            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "openrouter" || connectorType === "azure" || connectorType === "google" || connectorType === "bedrock" || connectorType === "ollama"
             Layout.fillWidth: true
             QQC2.Label {
                 text: "Context length hard cap"
@@ -320,7 +438,7 @@ Kirigami.OverlaySheet {
         }
 
         QQC2.Label {
-            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "openrouter" || connectorType === "bedrock" || connectorType === "ollama"
+            visible: connectorType === "anthropic" || connectorType === "openai" || connectorType === "openrouter" || connectorType === "azure" || connectorType === "google" || connectorType === "bedrock" || connectorType === "ollama"
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             font: Kirigami.Theme.smallFont
