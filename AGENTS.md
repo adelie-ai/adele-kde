@@ -93,7 +93,7 @@ When the daemon's D-Bus / WS protocol changes, the chat side updates through the
 
 ## Dependency safety
 
-Base rule 6.1 and the 6.1 override at the end of this file cover the posture. Repo-specific notes:
+Base rule 6.1 covers the posture. Repo-specific notes:
 
 - The KCM links against Qt6 / KF6 system libraries — CVE scans against the build environment matter as much as against in-repo deps.
 - The chat plugin links the Rust core cdylib (built from `client-ui-common/ffi`); its Cargo dependency tree gets the same `cargo audit` / `cve-mcp` scan as any Rust change — and scan before the first build, since build scripts run then.
@@ -133,18 +133,15 @@ that mirrors the slug. Before you run tasks in parallel worktrees, look for shar
 shared `Cargo.toml` dependency edits, and shared migration ordinals. Serialize the work where
 they overlap, and tell each parallel agent the scope it owns.
 
-### 6.1 Dependencies - a high or critical advisory is a hard blocker (override, stricter than the base)
+### 6.1 Dependencies - the group's scan workflow (addition)
 
-Scan after you add a dependency and before the first build:
+Base rule 6.1 sets the policy, including that a high or critical advisory blocks the change.
+This group runs it with its own tooling:
 
 1. Add the dependency (`cargo add <crate>`). This writes the lockfile but does not build.
 2. Scan the updated lockfile with the `cve-mcp` server's `scan_packages` tool, or with
    `cargo audit`. Pass every (name, version, ecosystem) tuple.
-3. A high or critical finding blocks the change. Patch it in the same change, or prove the
-   path unreachable and write down why, or file an issue and reference it from the change.
-4. Build only after the scan is clean, or after you have accepted the findings in writing.
-
-Never pin around an advisory without a comment or a tracked issue.
+3. Build only after the scan is clean, or after you have accepted the findings in writing.
 
 ### 9.1 Tracker for this project
 
