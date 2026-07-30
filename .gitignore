@@ -1,3 +1,6 @@
 build/
 __pycache__/
 *.pyc
+
+# Gate and build output, never committed.
+*.log
