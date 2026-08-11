@@ -149,66 +149,6 @@ QString DesktopAssistantKcm::statusText() const
     return m_statusText;
 }
 
-bool DesktopAssistantKcm::gitEnabled() const
-{
-    return m_gitEnabled;
-}
-
-void DesktopAssistantKcm::setGitEnabled(bool value)
-{
-    if (m_gitEnabled == value) {
-        return;
-    }
-    m_gitEnabled = value;
-    Q_EMIT gitEnabledChanged();
-    pushPersistenceSettings();
-}
-
-QString DesktopAssistantKcm::gitRemoteUrl() const
-{
-    return m_gitRemoteUrl;
-}
-
-void DesktopAssistantKcm::setGitRemoteUrl(const QString &value)
-{
-    if (m_gitRemoteUrl == value) {
-        return;
-    }
-    m_gitRemoteUrl = value;
-    Q_EMIT gitRemoteUrlChanged();
-    pushPersistenceSettings();
-}
-
-QString DesktopAssistantKcm::gitRemoteName() const
-{
-    return m_gitRemoteName;
-}
-
-void DesktopAssistantKcm::setGitRemoteName(const QString &value)
-{
-    if (m_gitRemoteName == value) {
-        return;
-    }
-    m_gitRemoteName = value;
-    Q_EMIT gitRemoteNameChanged();
-    pushPersistenceSettings();
-}
-
-bool DesktopAssistantKcm::gitPushOnUpdate() const
-{
-    return m_gitPushOnUpdate;
-}
-
-void DesktopAssistantKcm::setGitPushOnUpdate(bool value)
-{
-    if (m_gitPushOnUpdate == value) {
-        return;
-    }
-    m_gitPushOnUpdate = value;
-    Q_EMIT gitPushOnUpdateChanged();
-    pushPersistenceSettings();
-}
-
 QString DesktopAssistantKcm::dbUrl() const
 {
     return m_dbUrl;
@@ -551,22 +491,20 @@ const char *const PERSONALITY_SET_FIELDS[PERSONALITY_TRAIT_COUNT] = {
 // Number of ConfigData fields that precede the personality block (the pre-#226
 // struct arity). If GetConfig returns exactly this many the daemon has no
 // personality surface yet and we keep the built-in defaults.
-constexpr int CONFIG_DATA_BASE_FIELDS = 18;
+constexpr int CONFIG_DATA_BASE_FIELDS = 14;
 
-// D-Bus signature of those 18 leading ConfigData fields, in declaration order
+// D-Bus signature of those 14 leading ConfigData fields, in declaration order
 // (desktop-assistant crates/dbus-interface/src/settings.rs `struct ConfigData`):
 //   llm_connector(s) llm_model(s) llm_base_url(s) llm_has_api_key(b)
 //   embeddings_connector(s) embeddings_model(s) embeddings_base_url(s)
 //   embeddings_has_api_key(b) embeddings_available(b) embeddings_is_default(b)
-//   persistence_enabled(b) persistence_remote_url(s) persistence_remote_name(s)
-//   persistence_push_on_update(b) llm_temperature(d) llm_top_p(d)
-//   llm_max_tokens(u) llm_hosted_tool_search(i)
+//   llm_temperature(d) llm_top_p(d) llm_max_tokens(u) llm_hosted_tool_search(i)
 // KDE-8 (#63) validates the GetConfig reply against this signature before
 // indexing the trailing personality block, so a daemon field inserted ahead of
 // the block is detected (schema mismatch -> keep defaults) instead of silently
 // shifting garbage into the 0..4-clamped traits. Must stay in sync with
 // ConfigData; its length must equal CONFIG_DATA_BASE_FIELDS (asserted below).
-constexpr auto CONFIG_DATA_BASE_SIGNATURE = "sssbsssbbbbssbddui";
+constexpr auto CONFIG_DATA_BASE_SIGNATURE = "sssbsssbbbddui";
 static_assert(std::char_traits<char>::length(CONFIG_DATA_BASE_SIGNATURE)
                   == static_cast<size_t>(CONFIG_DATA_BASE_FIELDS),
               "CONFIG_DATA_BASE_SIGNATURE must describe exactly "
@@ -632,8 +570,8 @@ void DesktopAssistantKcm::pushPersonalityTrait(const char *setField, int value)
     // false except this trait, and SetConfig it. The struct's field order/types
     // are fixed by the daemon's zvariant::Type derive; we marshal positionally.
     // The leading (pre-personality) patch fields mirror the current daemon's
-    // input signature (bsbsbsbsbsbsbsbbbsbsbbbdbdbubi); the 7 trailing
-    // bool+u32 pairs are the personality block #226 appends.
+    // input signature (bsbsbsbsbsbsbsbdbdbubi); the 7 trailing bool+u32 pairs
+    // are the personality block #226 appends.
     //
     // KDE-8 (#63): this patch is hand-encoded POSITIONALLY, so it is only safe
     // when the daemon's config struct matches the shape we assume. load() sets
@@ -663,11 +601,6 @@ void DesktopAssistantKcm::pushPersonalityTrait(const char *setField, int value)
     patch << false << QString();   // set_embeddings_connector, embeddings_connector
     patch << false << QString();   // set_embeddings_model, embeddings_model
     patch << false << QString();   // set_embeddings_base_url, embeddings_base_url
-    // --- Persistence ---
-    patch << false << false;       // set_persistence_enabled, persistence_enabled
-    patch << false << QString();   // set_persistence_remote_url, persistence_remote_url
-    patch << false << QString();   // set_persistence_remote_name, persistence_remote_name
-    patch << false << false;       // set_persistence_push_on_update, persistence_push_on_update
     // --- LLM numeric sampling ---
     patch << false << 0.0;         // set_llm_temperature, llm_temperature
     patch << false << 0.0;         // set_llm_top_p, llm_top_p
@@ -770,30 +703,7 @@ void DesktopAssistantKcm::load()
     // --- Parallel daemon reads ----------------------------------------------
     // Count them up front so the "last reply" detection in applyOutcome is
     // correct regardless of completion order.
-    state->pending = 5;
-
-    asyncSettingsCall(
-        QStringLiteral("GetPersistenceSettings"), {}, DBUS_TIMEOUT_DEFAULT_MS,
-        [this, applyOutcome](const QDBusMessage &reply) {
-            if (reply.type() == QDBusMessage::ErrorMessage) {
-                applyOutcome(dbusErrorMessage(reply));
-                return;
-            }
-            const auto parsed = daemonreply::parsePersistenceReply(reply.arguments());
-            if (!applyOutcome(parsed.ok ? QString() : parsed.error)) {
-                return;
-            }
-            if (parsed.ok) {
-                m_gitEnabled = parsed.gitEnabled;
-                m_gitRemoteUrl = parsed.gitRemoteUrl;
-                m_gitRemoteName = parsed.gitRemoteName;
-                m_gitPushOnUpdate = parsed.gitPushOnUpdate;
-                Q_EMIT gitEnabledChanged();
-                Q_EMIT gitRemoteUrlChanged();
-                Q_EMIT gitRemoteNameChanged();
-                Q_EMIT gitPushOnUpdateChanged();
-            }
-        });
+    state->pending = 4;
 
     asyncSettingsCall(
         QStringLiteral("GetDatabaseSettings"), {}, DBUS_TIMEOUT_DEFAULT_MS,
@@ -997,12 +907,6 @@ void DesktopAssistantKcm::pushSetterAsync(const QString &method, const QVariantL
             // already updated the in-memory value + emitted its NOTIFY).
             setStatusFromDbusError(reply);
         });
-}
-
-void DesktopAssistantKcm::pushPersistenceSettings()
-{
-    pushSetterAsync(QStringLiteral("SetPersistenceSettings"),
-                    {m_gitEnabled, m_gitRemoteUrl, m_gitRemoteName, m_gitPushOnUpdate});
 }
 
 void DesktopAssistantKcm::pushDatabaseSettings()

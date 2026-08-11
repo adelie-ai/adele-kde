@@ -19,10 +19,6 @@ class DesktopAssistantKcm : public KQuickConfigModule {
     Q_OBJECT
     Q_PROPERTY(QString buildStamp READ buildStamp CONSTANT)
     Q_PROPERTY(QString statusText READ statusText NOTIFY statusTextChanged)
-    Q_PROPERTY(bool gitEnabled READ gitEnabled WRITE setGitEnabled NOTIFY gitEnabledChanged)
-    Q_PROPERTY(QString gitRemoteUrl READ gitRemoteUrl WRITE setGitRemoteUrl NOTIFY gitRemoteUrlChanged)
-    Q_PROPERTY(QString gitRemoteName READ gitRemoteName WRITE setGitRemoteName NOTIFY gitRemoteNameChanged)
-    Q_PROPERTY(bool gitPushOnUpdate READ gitPushOnUpdate WRITE setGitPushOnUpdate NOTIFY gitPushOnUpdateChanged)
     Q_PROPERTY(QString dbUrl READ dbUrl WRITE setDbUrl NOTIFY dbUrlChanged)
     Q_PROPERTY(int dbMaxConnections READ dbMaxConnections WRITE setDbMaxConnections NOTIFY dbMaxConnectionsChanged)
     Q_PROPERTY(QStringList connectionNames READ connectionNames NOTIFY connectionNamesChanged)
@@ -127,18 +123,6 @@ public:
     QString buildStamp() const;
 
     QString statusText() const;
-
-    bool gitEnabled() const;
-    void setGitEnabled(bool value);
-
-    QString gitRemoteUrl() const;
-    void setGitRemoteUrl(const QString &value);
-
-    QString gitRemoteName() const;
-    void setGitRemoteName(const QString &value);
-
-    bool gitPushOnUpdate() const;
-    void setGitPushOnUpdate(bool value);
 
     QString dbUrl() const;
     void setDbUrl(const QString &value);
@@ -369,10 +353,6 @@ Q_SIGNALS:
     /// Knowledge page refreshes its list when entries change on any client or a
     /// maintenance pass (dream cycle) rewrites them.
     void knowledgeEntriesChanged();
-    void gitEnabledChanged();
-    void gitRemoteUrlChanged();
-    void gitRemoteNameChanged();
-    void gitPushOnUpdateChanged();
     void dbUrlChanged();
     void dbMaxConnectionsChanged();
     void connectionNamesChanged();
@@ -463,7 +443,6 @@ private:
     // and surfaces only an error reply into statusText — nothing blocks the UI
     // thread. Used by the per-section pushers below.
     void pushSetterAsync(const QString &method, const QVariantList &args);
-    void pushPersistenceSettings();
     void pushDatabaseSettings();
     void pushBackendTasksSettings();
     void pushWsAuthSettings();
@@ -566,10 +545,6 @@ private:
     // Client-context opt-out (#549), persisted in a local KConfig. Default ON,
     // matching ConnectionConfig::default() in client-common.
     bool m_shareClientContext = true;
-    bool m_gitEnabled = false;
-    QString m_gitRemoteUrl;
-    QString m_gitRemoteName = QStringLiteral("origin");
-    bool m_gitPushOnUpdate = true;
     QString m_dbUrl;
     int m_dbMaxConnections = 5;
     QVector<ConnectionProfile> m_connections;

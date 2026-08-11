@@ -71,21 +71,6 @@ QString dbusErrorMessage(const QString &errorName, const QString &errorMessage)
     return QStringLiteral("D-Bus call failed");
 }
 
-PersistenceReply parsePersistenceReply(const QList<QVariant> &args)
-{
-    PersistenceReply out;
-    if (args.size() < 4) {
-        out.error = QStringLiteral("Unexpected GetPersistenceSettings reply");
-        return out;
-    }
-    out.ok = true;
-    out.gitEnabled = args[0].toBool();
-    out.gitRemoteUrl = args[1].toString();
-    out.gitRemoteName = args[2].toString();
-    out.gitPushOnUpdate = args[3].toBool();
-    return out;
-}
-
 DatabaseReply parseDatabaseReply(const QList<QVariant> &args)
 {
     DatabaseReply out;
