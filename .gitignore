@@ -4,3 +4,6 @@ __pycache__/
 
 # Gate and build output, never committed.
 *.log
+
+# Agent worktrees live here; never commit them.
+.worktrees/
