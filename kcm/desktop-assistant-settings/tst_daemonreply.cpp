@@ -171,11 +171,11 @@ private Q_SLOTS:
     // --- parsePersonalityConfig (KDE-8 / #63) --------------------------------
     //
     // The base signature here mirrors the real ConfigData leading fields
-    // (sssbsssbbbbssbddui = 18 fields). Each test builds a flattened reply with
+    // (sssbsssbbbddui = 14 fields). Each test builds a flattened reply with
     // the matching concrete QVariant types, then appends seven u32 traits.
 
 private:
-    // A well-typed 18-field base matching "sssbsssbbbbssbddui".
+    // A well-typed 14-field base matching "sssbsssbbbddui".
     static QVariantList validBase()
     {
         return QVariantList{
@@ -183,8 +183,6 @@ private:
             QStringLiteral("base_url"), false,                 // s s s b
             QStringLiteral("e_conn"), QStringLiteral("e_model"),
             QStringLiteral("e_base"), false, true, false,      // s s s b b b
-            true, QStringLiteral("remote"), QStringLiteral("origin"),
-            false,                                             // b s s b
             double(0.7), double(0.9),                          // d d
             uint(4096), int(-1),                               // u i
         };
@@ -201,7 +199,7 @@ private Q_SLOTS:
         QVariantList args = validBase();
         args += sevenTraits(4, 3, 3, 2, 2, 1, 1);
         const auto r = daemonreply::parsePersonalityConfig(
-            args, QStringLiteral("sssbsssbbbbssbddui"), 7);
+            args, QStringLiteral("sssbsssbbbddui"), 7);
         QVERIFY2(r.signatureOk, qPrintable(r.error));
         QVERIFY(r.error.isEmpty());
         QCOMPARE(r.professionalism, 4);
@@ -218,7 +216,7 @@ private Q_SLOTS:
         QVariantList args = validBase();
         args += sevenTraits(99, 0, 4, 5, 1, 2, 3); // 99 and 5 clamp to 4
         const auto r = daemonreply::parsePersonalityConfig(
-            args, QStringLiteral("sssbsssbbbbssbddui"), 7);
+            args, QStringLiteral("sssbsssbbbddui"), 7);
         QVERIFY(r.signatureOk);
         QCOMPARE(r.professionalism, 4);
         QCOMPARE(r.enthusiasm, 4);
@@ -232,7 +230,7 @@ private Q_SLOTS:
         args += sevenTraits(1, 1, 1, 1, 1, 1, 1);
         args.removeLast(); // base+6
         const auto r = daemonreply::parsePersonalityConfig(
-            args, QStringLiteral("sssbsssbbbbssbddui"), 7);
+            args, QStringLiteral("sssbsssbbbddui"), 7);
         QVERIFY(!r.signatureOk);
         QVERIFY(!r.error.isEmpty());
     }
@@ -243,7 +241,7 @@ private Q_SLOTS:
         args += sevenTraits(1, 1, 1, 1, 1, 1, 1);
         args += uint(0); // a field appended AFTER the block — base+8
         const auto r = daemonreply::parsePersonalityConfig(
-            args, QStringLiteral("sssbsssbbbbssbddui"), 7);
+            args, QStringLiteral("sssbsssbbbddui"), 7);
         QVERIFY(!r.signatureOk);
     }
 
@@ -255,7 +253,7 @@ private Q_SLOTS:
         args[0] = int(42); // expected 's', got 'i'
         args += sevenTraits(1, 1, 1, 1, 1, 1, 1);
         const auto r = daemonreply::parsePersonalityConfig(
-            args, QStringLiteral("sssbsssbbbbssbddui"), 7);
+            args, QStringLiteral("sssbsssbbbddui"), 7);
         QVERIFY(!r.signatureOk);
         QVERIFY2(r.error.contains(QStringLiteral("field 0")), qPrintable(r.error));
     }
@@ -266,34 +264,11 @@ private Q_SLOTS:
         // shape diverged (e.g. a signed field crept in).
         QVariantList args = validBase();
         args += sevenTraits(1, 1, 1, 1, 1, 1, 1);
-        args[18] = int(1); // first trait as i32, not u32
+        args[14] = int(1); // first trait as i32, not u32
         const auto r = daemonreply::parsePersonalityConfig(
-            args, QStringLiteral("sssbsssbbbbssbddui"), 7);
+            args, QStringLiteral("sssbsssbbbddui"), 7);
         QVERIFY(!r.signatureOk);
         QVERIFY2(r.error.contains(QStringLiteral("trait field 0")), qPrintable(r.error));
-    }
-
-    // --- parsePersistenceReply (KDE-2 PR 2/5) --------------------------------
-
-    void persistenceParsesFullReply()
-    {
-        const QList<QVariant> args{true, QStringLiteral("git@host:repo.git"),
-                                   QStringLiteral("origin"), false};
-        const auto r = daemonreply::parsePersistenceReply(args);
-        QVERIFY(r.ok);
-        QVERIFY(r.error.isEmpty());
-        QCOMPARE(r.gitEnabled, true);
-        QCOMPARE(r.gitRemoteUrl, QStringLiteral("git@host:repo.git"));
-        QCOMPARE(r.gitRemoteName, QStringLiteral("origin"));
-        QCOMPARE(r.gitPushOnUpdate, false);
-    }
-
-    void persistenceShortReplyErrors()
-    {
-        const QList<QVariant> args{true, QStringLiteral("url")}; // only 2 of 4
-        const auto r = daemonreply::parsePersistenceReply(args);
-        QVERIFY(!r.ok);
-        QCOMPARE(r.error, QStringLiteral("Unexpected GetPersistenceSettings reply"));
     }
 
     // --- parseDatabaseReply --------------------------------------------------

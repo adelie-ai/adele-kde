@@ -43,17 +43,6 @@ QString dbusErrorMessage(const QString &errorName, const QString &errorMessage);
 // when it fails the arity/shape check, an `error` string mirroring the
 // historical "Unexpected Get<X> reply" message. Bus-free for unit testing.
 
-struct PersistenceReply {
-    bool ok = false;
-    QString error;
-    bool gitEnabled = false;
-    QString gitRemoteUrl;
-    QString gitRemoteName;
-    bool gitPushOnUpdate = false;
-};
-// GetPersistenceSettings -> (b enabled, s remote_url, s remote_name, b push).
-PersistenceReply parsePersistenceReply(const QList<QVariant> &args);
-
 struct DatabaseReply {
     bool ok = false;
     QString error;
