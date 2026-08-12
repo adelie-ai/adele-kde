@@ -15,6 +15,7 @@ desktop_chatview_fallback := "plasmoid/org.desktopassistant.desktopchat/contents
 shared_tasks_view_src := "shared/chat-module/ui/TasksView.qml"
 shared_tasks_window_src := "shared/chat-module/ui/TasksWindow.qml"
 shared_tasks_badge_src := "shared/chat-module/ui/TasksBadge.qml"
+shared_conversation_list_src := "shared/chat-module/ui/ConversationList.js"
 shared_link_safety_src := "shared/chat-module/ui/LinkSafety.js"
 shared_message_kind_src := "shared/chat-module/ui/MessageKind.js"
 shared_queue_recall_src := "shared/chat-module/ui/QueueRecall.js"
@@ -22,6 +23,7 @@ shared_queued_chip_src := "shared/chat-module/ui/QueuedChip.qml"
 desktop_tasks_view_fallback := "plasmoid/org.desktopassistant.desktopchat/contents/ui/TasksView.qml"
 desktop_tasks_window_fallback := "plasmoid/org.desktopassistant.desktopchat/contents/ui/TasksWindow.qml"
 desktop_tasks_badge_fallback := "plasmoid/org.desktopassistant.desktopchat/contents/ui/TasksBadge.qml"
+desktop_conversation_list_fallback := "plasmoid/org.desktopassistant.desktopchat/contents/ui/ConversationList.js"
 desktop_link_safety_fallback := "plasmoid/org.desktopassistant.desktopchat/contents/ui/LinkSafety.js"
 desktop_message_kind_fallback := "plasmoid/org.desktopassistant.desktopchat/contents/ui/MessageKind.js"
 desktop_queue_recall_fallback := "plasmoid/org.desktopassistant.desktopchat/contents/ui/QueueRecall.js"
@@ -48,6 +50,7 @@ chatview-sync:
     cp -a "{{shared_tasks_view_src}}" "{{desktop_tasks_view_fallback}}"
     cp -a "{{shared_tasks_window_src}}" "{{desktop_tasks_window_fallback}}"
     cp -a "{{shared_tasks_badge_src}}" "{{desktop_tasks_badge_fallback}}"
+    cp -a "{{shared_conversation_list_src}}" "{{desktop_conversation_list_fallback}}"
     cp -a "{{shared_link_safety_src}}" "{{desktop_link_safety_fallback}}"
     cp -a "{{shared_message_kind_src}}" "{{desktop_message_kind_fallback}}"
     cp -a "{{shared_queue_recall_src}}" "{{desktop_queue_recall_fallback}}"
@@ -61,6 +64,7 @@ chatview-verify:
     cmp -s "{{shared_tasks_view_src}}" "{{desktop_tasks_view_fallback}}" || (echo "TasksView drift detected: run 'just chatview-sync'" >&2; exit 1)
     cmp -s "{{shared_tasks_window_src}}" "{{desktop_tasks_window_fallback}}" || (echo "TasksWindow drift detected: run 'just chatview-sync'" >&2; exit 1)
     cmp -s "{{shared_tasks_badge_src}}" "{{desktop_tasks_badge_fallback}}" || (echo "TasksBadge drift detected: run 'just chatview-sync'" >&2; exit 1)
+    cmp -s "{{shared_conversation_list_src}}" "{{desktop_conversation_list_fallback}}" || (echo "ConversationList.js drift detected: run 'just chatview-sync'" >&2; exit 1)
     cmp -s "{{shared_link_safety_src}}" "{{desktop_link_safety_fallback}}" || (echo "LinkSafety.js drift detected: run 'just chatview-sync'" >&2; exit 1)
     cmp -s "{{shared_message_kind_src}}" "{{desktop_message_kind_fallback}}" || (echo "MessageKind.js drift detected: run 'just chatview-sync'" >&2; exit 1)
     cmp -s "{{shared_queue_recall_src}}" "{{desktop_queue_recall_fallback}}" || (echo "QueueRecall.js drift detected: run 'just chatview-sync'" >&2; exit 1)

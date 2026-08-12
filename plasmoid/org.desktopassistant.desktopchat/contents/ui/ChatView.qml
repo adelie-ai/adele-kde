@@ -22,6 +22,7 @@ import org.kde.plasma.plasmoid
 
 import org.desktopassistant.client
 
+import "ConversationList.js" as ConversationList
 import "LinkSafety.js" as LinkSafety
 import "MessageKind.js" as MessageKind
 import "QueueRecall.js" as QueueRecall
@@ -74,8 +75,12 @@ Item {
     property string statusText: "Connecting…"
     // Transient "Thinking…" line under the transcript while a turn is in flight.
     property string chatStatusText: ""
-    // Sidebar list: [{id, title, message_count, archived}].
-    property var conversationChoices: []
+    // The core's whole inventory: [{id, title, message_count, archived}],
+    // archived rows included, so nothing here needs a second query to find one.
+    property var allConversations: []
+    // The rows the picker offers. The plasmoid has no archive affordance, so it
+    // lists active conversations only; an archived one is not an ordinary row.
+    readonly property var conversationChoices: ConversationList.activeConversations(root.allConversations)
     // Index of the in-progress assistant bubble in transcriptModel, or -1.
     property int streamingIndex: -1
     // Context-window fill (#76): the `context_usage` event payload (or null).
@@ -200,7 +205,7 @@ Item {
             root.busy = !(data.value === true)
             break
         case "conversations":
-            root.conversationChoices = data.items || []
+            root.allConversations = data.items || []
             root.syncConversationPicker()
             break
         case "load_conversation":
@@ -401,12 +406,7 @@ Item {
     }
 
     function conversationIndexById(id) {
-        for (let i = 0; i < conversationChoices.length; i++) {
-            if (conversationChoices[i].id === id) {
-                return i
-            }
-        }
-        return -1
+        return ConversationList.indexById(root.conversationChoices, id)
     }
 
     function selectConversationById(id) {
@@ -419,8 +419,18 @@ Item {
 
     function syncConversationPicker() {
         const idx = conversationIndexById(conversationId)
-        if (idx >= 0 && conversationPicker.currentIndex !== idx) {
-            conversationPicker.currentIndex = idx
+        if (idx >= 0) {
+            if (conversationPicker.currentIndex !== idx) {
+                conversationPicker.currentIndex = idx
+            }
+            return
+        }
+        // An open conversation with no row to select is one the daemon archived
+        // under the reader (it archives on a schedule, and the core leaves the
+        // reader on it). Select nothing, so the picker does not highlight some
+        // other conversation's row; `displayText` still names the open one.
+        if (String(conversationId).length > 0 && conversationPicker.currentIndex !== -1) {
+            conversationPicker.currentIndex = -1
         }
     }
 
@@ -862,6 +872,12 @@ Item {
                 enabled: !root.busy
                 model: root.conversationChoices
                 textRole: "title"
+                // The model holds active conversations only, so the open one is
+                // absent from it once the daemon archives it. Name it from the
+                // full inventory instead of falling back on the current row.
+                displayText: conversationPicker.currentIndex >= 0
+                    ? conversationPicker.currentText
+                    : ConversationList.titleById(root.allConversations, root.conversationId)
                 delegate: QQC2.ItemDelegate {
                     id: conversationDelegate
                     required property var modelData
