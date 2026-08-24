@@ -54,7 +54,11 @@ void AdeleCore::connectToDaemon(const QString &transport, const QString &address
     setShareClientContext(shareClientContextPreference());
     const QByteArray t = transport.toUtf8();
     const QByteArray a = address.toUtf8();
-    adele_core_connect(m_handle, t.constData(), a.constData());
+    adele_core_connect_n(m_handle,
+                         t.constData(),
+                         static_cast<uintptr_t>(t.size()),
+                         a.constData(),
+                         static_cast<uintptr_t>(a.size()));
 }
 
 void AdeleCore::setShareClientContext(bool enabled)
@@ -80,7 +84,7 @@ void AdeleCore::sendPrompt(const QString &text)
         return;
     }
     const QByteArray t = text.toUtf8();
-    adele_core_send_prompt(m_handle, t.constData());
+    adele_core_send_prompt_n(m_handle, t.constData(), static_cast<uintptr_t>(t.size()));
 }
 
 void AdeleCore::editQueued(int index)
@@ -115,7 +119,7 @@ void AdeleCore::selectConversation(const QString &conversationId)
         return;
     }
     const QByteArray c = conversationId.toUtf8();
-    adele_core_select_conversation(m_handle, c.constData());
+    adele_core_select_conversation_n(m_handle, c.constData(), static_cast<uintptr_t>(c.size()));
 }
 
 void AdeleCore::newConversation()
@@ -132,7 +136,7 @@ void AdeleCore::deleteConversation(const QString &conversationId)
         return;
     }
     const QByteArray c = conversationId.toUtf8();
-    adele_core_delete_conversation(m_handle, c.constData());
+    adele_core_delete_conversation_n(m_handle, c.constData(), static_cast<uintptr_t>(c.size()));
 }
 
 void AdeleCore::setVoiceIn(const QString &conversationId, bool enabled)
@@ -141,7 +145,7 @@ void AdeleCore::setVoiceIn(const QString &conversationId, bool enabled)
         return;
     }
     const QByteArray c = conversationId.toUtf8();
-    adele_core_set_voice_in(m_handle, c.constData(), enabled);
+    adele_core_set_voice_in_n(m_handle, c.constData(), static_cast<uintptr_t>(c.size()), enabled);
 }
 
 void AdeleCore::setAdeleOutput(const QString &conversationId, const QString &level)
@@ -151,7 +155,11 @@ void AdeleCore::setAdeleOutput(const QString &conversationId, const QString &lev
     }
     const QByteArray c = conversationId.toUtf8();
     const QByteArray l = level.toUtf8();
-    adele_core_set_adele_output(m_handle, c.constData(), l.constData());
+    adele_core_set_adele_output_n(m_handle,
+                                  c.constData(),
+                                  static_cast<uintptr_t>(c.size()),
+                                  l.constData(),
+                                  static_cast<uintptr_t>(l.size()));
 }
 
 void AdeleCore::selectModel(const QString &connectionId, const QString &modelId, const QString &effort)
@@ -162,7 +170,13 @@ void AdeleCore::selectModel(const QString &connectionId, const QString &modelId,
     const QByteArray c = connectionId.toUtf8();
     const QByteArray m = modelId.toUtf8();
     const QByteArray e = effort.toUtf8();
-    adele_core_select_model(m_handle, c.constData(), m.constData(), e.constData());
+    adele_core_select_model_n(m_handle,
+                              c.constData(),
+                              static_cast<uintptr_t>(c.size()),
+                              m.constData(),
+                              static_cast<uintptr_t>(m.size()),
+                              e.constData(),
+                              static_cast<uintptr_t>(e.size()));
 }
 
 void AdeleCore::cancelTask(const QString &taskId)
@@ -171,7 +185,7 @@ void AdeleCore::cancelTask(const QString &taskId)
         return;
     }
     const QByteArray t = taskId.toUtf8();
-    adele_core_cancel_task(m_handle, t.constData());
+    adele_core_cancel_task_n(m_handle, t.constData(), static_cast<uintptr_t>(t.size()));
 }
 
 void AdeleCore::fetchTaskLogs(const QString &taskId)
@@ -180,7 +194,7 @@ void AdeleCore::fetchTaskLogs(const QString &taskId)
         return;
     }
     const QByteArray t = taskId.toUtf8();
-    adele_core_fetch_task_logs(m_handle, t.constData());
+    adele_core_fetch_task_logs_n(m_handle, t.constData(), static_cast<uintptr_t>(t.size()));
 }
 
 void AdeleCore::onViewEvent(void *userData, const char *json)

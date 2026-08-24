@@ -138,6 +138,21 @@ if(BUILD_CLIENT_TESTS)
         BUILD_RPATH "${CLIENT_UI_COMMON_DIR}/target/${CARGO_PROFILE_DIR}")
     add_test(NAME tst_adelecore COMMAND tst_adelecore)
 
+    # FFI-length spec (#136): does AdeleCore hand the length-carrying entry
+    # points a UTF-8 BYTE count, not a QString CHARACTER count? Links its own
+    # stand-in `adele_core_*` definitions (see the .cpp) instead of the real
+    # cdylib, so it needs no cargo toolchain and runs even when client-build's
+    # Rust leg is skipped.
+    add_executable(tst_adelecore_ffi_lengths
+        tst_adelecore_ffi_lengths.cpp
+        adelecore.cpp
+        adelecore.h
+    )
+    target_include_directories(tst_adelecore_ffi_lengths PRIVATE "${CORE_HEADER_DIR}")
+    target_link_libraries(tst_adelecore_ffi_lengths PRIVATE Qt6::Core Qt6::Qml Qt6::Test KF6::ConfigCore)
+    target_compile_options(tst_adelecore_ffi_lengths PRIVATE -Werror)
+    add_test(NAME tst_adelecore_ffi_lengths COMMAND tst_adelecore_ffi_lengths)
+
     # VoiceController is pure QtDBus glue (no Rust core), so its test links
     # neither the cdylib nor needs the cargo BUILD_RPATH.
     add_executable(tst_voicecontroller
